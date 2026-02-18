@@ -1,0 +1,24 @@
+# DBMEditor
+
+.venv/
+__pycache__/
+*.py[cod]
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+build/
+dist/
+
+.vscode/
+.idea/
+
+*.log
+*.tmp
+
+# Local temporary files produced by the editor/app
+__tmp_*
