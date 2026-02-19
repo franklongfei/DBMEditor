@@ -63,7 +63,8 @@ def _collect_scl_ids_from_files(folder: Path, tag: str) -> set[str]:
     if not folder.exists():
         return out
 
-    for path in folder.glob("*.xml"):
+    # Templates are organized in subfolders (e.g., P7/, P3Plus/). Scan recursively.
+    for path in folder.rglob("*.xml"):
         tree = _safe_parse(path)
         if tree is None:
             continue

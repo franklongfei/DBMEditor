@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from tkinter import ttk
+from typing import Callable
 import xml.etree.ElementTree as ET
 
 from iec61850_scanner import (
@@ -25,6 +27,24 @@ from ln_instance_scanner import load_ln_instance_document
 
 
 APP_TITLE = "DBMEditor"
+
+
+SCL_NS = "http://www.iec.ch/61850/2003/SCL"
+
+
+def _local_name(tag: str) -> str:
+    if isinstance(tag, str) and tag.startswith("{"):
+        return tag.split("}", 1)[1]
+    return tag
+
+
+def _q(ns: str, local: str) -> str:
+    return f"{{{ns}}}{local}" if ns else local
+
+
+def _deepcopy_et_element(el: ET.Element) -> ET.Element:
+    # ElementTree has no built-in deepcopy; round-trip via string is good enough here.
+    return ET.fromstring(ET.tostring(el, encoding="unicode"))
 
 
 class _NewApplicationChoiceDialog(tk.Toplevel):
@@ -58,6 +78,106 @@ class _NewApplicationChoiceDialog(tk.Toplevel):
 
     def _set(self, value: str) -> None:
         self._result = value
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> str | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _DoTemplateSaveAsDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Misc, *, initial_id: str = ""):
+        super().__init__(parent)
+        self.title("Save DO template as")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: str | None = None
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="New DOType id (file name is <id>.xml):").grid(row=0, column=0, sticky="w")
+        self.var_id = tk.StringVar(value=initial_id)
+        ent = ttk.Entry(frm, textvariable=self.var_id, width=48)
+        ent.grid(row=1, column=0, sticky="we", pady=(6, 0))
+        frm.columnconfigure(0, weight=1)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+
+        try:
+            ent.focus_set()
+            ent.select_range(0, tk.END)
+        except Exception:
+            pass
+
+    def _ok(self) -> None:
+        new_id = (self.var_id.get() or "").strip()
+        if not new_id:
+            messagebox.showerror("Missing", "DOType id is required", parent=self)
+            return
+        self._result = new_id
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> str | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _EnumTypeSaveAsDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Misc, *, initial_id: str = ""):
+        super().__init__(parent)
+        self.title("Save EnumType as")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: str | None = None
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="New EnumType id (file name is <id>.xml):").grid(row=0, column=0, sticky="w")
+        self.var_id = tk.StringVar(value=initial_id)
+        ent = ttk.Entry(frm, textvariable=self.var_id, width=48)
+        ent.grid(row=1, column=0, sticky="we", pady=(6, 0))
+        frm.columnconfigure(0, weight=1)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+
+        try:
+            ent.focus_set()
+            ent.select_range(0, tk.END)
+        except Exception:
+            pass
+
+    def _ok(self) -> None:
+        new_id = (self.var_id.get() or "").strip()
+        if not new_id:
+            messagebox.showerror("Missing", "EnumType id is required", parent=self)
+            return
+        self._result = new_id
         self.destroy()
 
     def _cancel(self) -> None:
@@ -678,6 +798,198 @@ class _EditApplicationInputDialog(tk.Toplevel):
         return self._result
 
 
+class _EditApplicationSimpleDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        title: str,
+        type_values: list[str],
+        initial: dict[str, str],
+    ):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: dict[str, str] | None = None
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        self.var_name = tk.StringVar(value=(initial.get("name") or ""))
+        self.var_type = tk.StringVar(value=(initial.get("type") or ""))
+        self.var_src = tk.StringVar(value=(initial.get("src") or ""))
+        self.var_desc = tk.StringVar(value=(initial.get("desc") or ""))
+
+        ttk.Label(frm, text="name").grid(row=0, column=0, sticky="w", pady=4)
+        ent_name = ttk.Entry(frm, textvariable=self.var_name, width=56)
+        ent_name.grid(row=0, column=1, sticky="we", pady=4)
+
+        ttk.Label(frm, text="type").grid(row=1, column=0, sticky="w", pady=4)
+        cb_type = ttk.Combobox(frm, textvariable=self.var_type, values=list(type_values), width=54)
+        cb_type.grid(row=1, column=1, sticky="we", pady=4)
+
+        ttk.Label(frm, text="src").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_src, width=56).grid(row=2, column=1, sticky="we", pady=4)
+
+        ttk.Label(frm, text="desc").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_desc, width=56).grid(row=3, column=1, sticky="we", pady=4)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+        cb_type.bind("<Return>", lambda _e: self._ok())
+
+        ent_name.focus_set()
+        try:
+            ent_name.selection_range(0, tk.END)
+        except Exception:
+            pass
+
+    def _ok(self) -> None:
+        name = (self.var_name.get() or "").strip()
+        if not name:
+            messagebox.showerror("Missing", "name is required", parent=self)
+            return
+
+        self._result = {
+            "name": name,
+            "type": (self.var_type.get() or "").strip(),
+            "src": (self.var_src.get() or ""),
+            "desc": (self.var_desc.get() or ""),
+        }
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, str] | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _EditApplicationOutputDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        title: str,
+        output_types: list[str],
+        initial: dict[str, str],
+    ):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: dict[str, str] | None = None
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        self.var_name = tk.StringVar(value=(initial.get("name") or ""))
+        self.var_type = tk.StringVar(value=(initial.get("type") or ""))
+        self.var_desc = tk.StringVar(value=(initial.get("desc") or ""))
+        self.var_outPurpose = tk.StringVar(value=(initial.get("outPurpose") or ""))
+        self.var_srvRef = tk.StringVar(value=(initial.get("srvRef") or ""))
+        self.var_doRef = tk.StringVar(value=(initial.get("doRef") or ""))
+        self.var_max = tk.StringVar(value=(initial.get("MaxContiguous") or ""))
+        self.var_overlap = tk.StringVar(value=(initial.get("Overlap") or ""))
+        self.var_persist = tk.BooleanVar(value=((initial.get("persist") or "").lower() == "true"))
+        self.var_fault = tk.BooleanVar(value=((initial.get("faultlog") or "").lower() == "true"))
+
+        ttk.Label(frm, text="name").grid(row=0, column=0, sticky="w", pady=4)
+        ent_name = ttk.Entry(frm, textvariable=self.var_name, width=56)
+        ent_name.grid(row=0, column=1, sticky="we", pady=4)
+
+        ttk.Label(frm, text="type").grid(row=1, column=0, sticky="w", pady=4)
+        cb_type = ttk.Combobox(frm, textvariable=self.var_type, values=list(output_types), width=54)
+        cb_type.grid(row=1, column=1, sticky="we", pady=4)
+
+        ttk.Label(frm, text="desc").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_desc, width=56).grid(row=2, column=1, sticky="we", pady=4)
+
+        ttk.Label(frm, text="outPurpose").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_outPurpose, width=56).grid(row=3, column=1, sticky="we", pady=4)
+
+        ttk.Label(frm, text="srvRef").grid(row=4, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_srvRef, width=56).grid(row=4, column=1, sticky="we", pady=4)
+
+        ttk.Label(frm, text="doRef").grid(row=5, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_doRef, width=56).grid(row=5, column=1, sticky="we", pady=4)
+
+        ttk.Label(frm, text="MaxContiguous").grid(row=6, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_max, width=56).grid(row=6, column=1, sticky="we", pady=4)
+
+        ttk.Label(frm, text="Overlap").grid(row=7, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_overlap, width=56).grid(row=7, column=1, sticky="we", pady=4)
+
+        flags = ttk.Frame(frm)
+        flags.grid(row=8, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Checkbutton(flags, text="persist", variable=self.var_persist).pack(side="left")
+        ttk.Checkbutton(flags, text="faultlog", variable=self.var_fault).pack(side="left", padx=(16, 0))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=9, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+        cb_type.bind("<Return>", lambda _e: self._ok())
+
+        ent_name.focus_set()
+        try:
+            ent_name.selection_range(0, tk.END)
+        except Exception:
+            pass
+
+    def _ok(self) -> None:
+        name = (self.var_name.get() or "").strip()
+        if not name:
+            messagebox.showerror("Missing", "name is required", parent=self)
+            return
+
+        maxc = (self.var_max.get() or "").strip()
+        overlap = (self.var_overlap.get() or "").strip()
+        if not maxc:
+            maxc = "0"
+        if not overlap:
+            overlap = "1"
+
+        self._result = {
+            "name": name,
+            "type": (self.var_type.get() or "").strip(),
+            "desc": (self.var_desc.get() or ""),
+            "outPurpose": (self.var_outPurpose.get() or ""),
+            "srvRef": (self.var_srvRef.get() or ""),
+            "persist": "true" if bool(self.var_persist.get()) else "false",
+            "doRef": (self.var_doRef.get() or "").strip(),
+            "MaxContiguous": maxc,
+            "Overlap": overlap,
+            "faultlog": "true" if bool(self.var_fault.get()) else "",
+        }
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, str] | None:
+        self.wait_window(self)
+        return self._result
+
+
 class DOEditDialog(tk.Toplevel):
     def __init__(
         self,
@@ -687,14 +999,17 @@ class DOEditDialog(tk.Toplevel):
         do_types: list[str],
         initial: DOItem | None,
         edit_name: bool = True,
+        get_do_type_preview: Callable[[str], str] | None = None,
     ):
         super().__init__(parent)
         self.title(title)
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.transient(parent)
         self.grab_set()
 
         self._result: DOItem | None = None
+        self._get_do_type_preview = get_do_type_preview
+        self._preview_after_id: str | None = None
 
         frm = ttk.Frame(self, padding=10)
         frm.pack(fill="both", expand=True)
@@ -759,15 +1074,106 @@ class DOEditDialog(tk.Toplevel):
 
         frm.columnconfigure(1, weight=1)
 
+        # Preview area: shows selected DOType template content.
+        preview_box = ttk.Frame(frm)
+        preview_box.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        ttk.Label(preview_box, text="DO type template preview").pack(anchor="w")
+
+        preview_inner = ttk.Frame(preview_box)
+        preview_inner.pack(fill="both", expand=True, pady=(6, 0))
+        preview_inner.columnconfigure(0, weight=1)
+        preview_inner.rowconfigure(0, weight=1)
+
+        self.txt_preview = tk.Text(preview_inner, height=14, wrap="none")
+        y = ttk.Scrollbar(preview_inner, orient="vertical", command=self.txt_preview.yview)
+        self.txt_preview.configure(yscrollcommand=y.set)
+        self.txt_preview.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        try:
+            self.txt_preview.configure(state="disabled")
+        except Exception:
+            pass
+
+        frm.rowconfigure(2, weight=1)
+
         btns = ttk.Frame(frm)
-        btns.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
 
         self.bind("<Escape>", lambda _e: self._cancel())
         self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
 
+        def schedule_preview_update(*_args) -> None:
+            if getattr(self, "txt_preview", None) is None:
+                return
+            if self._preview_after_id is not None:
+                try:
+                    self.after_cancel(self._preview_after_id)
+                except Exception:
+                    pass
+                self._preview_after_id = None
+            try:
+                self._preview_after_id = self.after(80, self._update_preview)
+            except Exception:
+                self._preview_after_id = None
+
+        self.var_type.trace_add("write", schedule_preview_update)
+        try:
+            self.cb.bind("<<ComboboxSelected>>", lambda _e: self._update_preview())
+        except Exception:
+            pass
+
+        self._update_preview()
+
         ent_filter.focus_set()
+
+        # Make the dialog open larger (2x current requested size).
+        try:
+            self.update_idletasks()
+            w = int(self.winfo_reqwidth() or 0)
+            h = int(self.winfo_reqheight() or 0)
+            if w > 0 and h > 0:
+                self.geometry(f"{w * 2}x{h * 2}")
+                try:
+                    self.minsize(w, h)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _update_preview(self) -> None:
+        get_preview = getattr(self, "_get_do_type_preview", None)
+        txt = getattr(self, "txt_preview", None)
+        if txt is None:
+            return
+
+        do_type = (self.var_type.get() or "").strip()
+
+        if not callable(get_preview) or not do_type:
+            preview = ""
+        else:
+            try:
+                preview = str(get_preview(do_type) or "")
+            except Exception as e:
+                preview = f"(Failed to load preview: {e})"
+
+        if callable(get_preview) and do_type and not preview.strip():
+            preview = "(DOType not found)"
+
+        try:
+            txt.configure(state="normal")
+        except Exception:
+            pass
+        try:
+            txt.delete("1.0", "end")
+            if preview:
+                txt.insert("1.0", preview)
+        finally:
+            try:
+                txt.configure(state="disabled")
+            except Exception:
+                pass
 
     def _ok(self) -> None:
         name = self.var_name.get().strip()
@@ -790,10 +1196,1286 @@ class DOEditDialog(tk.Toplevel):
         return self._result
 
 
+class DAEditDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        title: str,
+        initial: dict[str, str] | None,
+        btype_options: list[str] | None = None,
+        enum_type_ids: list[str] | None = None,
+        get_enum_values: Callable[[str], list[str]] | None = None,
+        get_enum_preview: Callable[[str], str] | None = None,
+    ):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(True, True)
+        self.transient(parent)
+        self.grab_set()
+        self._result: dict[str, str] | None = None
+
+        self._all_btypes = [x for x in (btype_options or []) if (x or '').strip()]
+        self._all_enum_ids = [x for x in (enum_type_ids or []) if (x or '').strip()]
+        self._get_enum_values = get_enum_values
+        self._get_enum_preview = get_enum_preview
+
+        frm = ttk.Frame(self, padding=10)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        init = initial or {}
+        self.var_name = tk.StringVar(value=(init.get("name") or ""))
+        self.var_fc = tk.StringVar(value=(init.get("fc") or ""))
+        self.var_bType = tk.StringVar(value=(init.get("bType") or ""))
+        self.var_type = tk.StringVar(value=(init.get("type") or ""))
+        self.var_valKind = tk.StringVar(value=(init.get("valKind") or ""))
+        self.var_valImport = tk.StringVar(value=(init.get("valImport") or ""))
+        self.var_dchg = tk.StringVar(value=(init.get("dchg") or ""))
+        self.var_val = tk.StringVar(value=(init.get("val") or ""))
+        self.var_desc = tk.StringVar(value=(init.get("desc") or ""))
+
+        self.var_enum_filter = tk.StringVar(value="")
+
+        ttk.Label(frm, text="name").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_name, width=44).grid(row=0, column=1, sticky="we", pady=4)
+
+        ttk.Label(frm, text="fc").grid(row=1, column=0, sticky="w", pady=4)
+        cb_fc = ttk.Combobox(
+            frm,
+            textvariable=self.var_fc,
+            state="readonly",
+            values=("ST", "MX", "SP", "SV", "CF", "DC", "EX", "CO", "SG", "SE"),
+            width=12,
+        )
+        cb_fc.grid(row=1, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="bType").grid(row=2, column=0, sticky="w", pady=4)
+        btypes = self._all_btypes or []
+        cur_bt = (self.var_bType.get() or "").strip()
+        if cur_bt and cur_bt not in btypes:
+            btypes = [cur_bt] + btypes
+        cb_bt = ttk.Combobox(frm, textvariable=self.var_bType, state="readonly", values=tuple(btypes), width=16)
+        cb_bt.grid(row=2, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="type").grid(row=3, column=0, sticky="w", pady=4)
+
+        type_box = ttk.Frame(frm)
+        type_box.grid(row=3, column=1, sticky="we", pady=4)
+        type_box.columnconfigure(0, weight=1)
+
+        # Enum mode widgets (filter + combobox)
+        type_enum_box = ttk.Frame(type_box)
+        type_enum_box.grid(row=0, column=0, sticky="we")
+        type_enum_box.columnconfigure(0, weight=1)
+
+        ent_filter = ttk.Entry(type_enum_box, textvariable=self.var_enum_filter)
+        ent_filter.grid(row=0, column=0, sticky="we")
+        ttk.Label(type_enum_box, text="Search").grid(row=0, column=1, sticky="e", padx=(8, 0))
+
+        self.lbl_enum_match = ttk.Label(type_enum_box, text="")
+        self.lbl_enum_match.grid(row=1, column=1, sticky="e", padx=(8, 0), pady=(4, 0))
+
+        self.cb_enum_type = ttk.Combobox(
+            type_enum_box,
+            textvariable=self.var_type,
+            state="readonly",
+            values=tuple(self._all_enum_ids),
+        )
+        self.cb_enum_type.grid(row=1, column=0, sticky="we", pady=(4, 0))
+
+        # Non-enum mode widget (plain entry)
+        self.ent_type_plain = ttk.Entry(type_box, textvariable=self.var_type, width=44)
+        self.ent_type_plain.grid(row=1, column=0, sticky="we")
+
+        ttk.Label(frm, text="val").grid(row=4, column=0, sticky="w", pady=4)
+        val_box = ttk.Frame(frm)
+        val_box.grid(row=4, column=1, sticky="we", pady=4)
+        val_box.columnconfigure(0, weight=1)
+
+        self.cb_enum_val = ttk.Combobox(val_box, textvariable=self.var_val, state="readonly", values=("",))
+        self.cb_enum_val.grid(row=0, column=0, sticky="we")
+        self.ent_val_plain = ttk.Entry(val_box, textvariable=self.var_val, width=44)
+        self.ent_val_plain.grid(row=1, column=0, sticky="we")
+
+        ttk.Label(frm, text="valKind").grid(row=5, column=0, sticky="w", pady=4)
+        cb_vk = ttk.Combobox(frm, textvariable=self.var_valKind, state="readonly", values=("", "Set", "Conf", "RO"), width=16)
+        cb_vk.grid(row=5, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="valImport").grid(row=6, column=0, sticky="w", pady=4)
+        cb_vi = ttk.Combobox(frm, textvariable=self.var_valImport, state="readonly", values=("", "true", "false"), width=16)
+        cb_vi.grid(row=6, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="dchg").grid(row=7, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_dchg, width=16).grid(row=7, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="desc").grid(row=8, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_desc, width=44).grid(row=8, column=1, sticky="we", pady=4)
+
+        # Enum preview area (only meaningful when bType=Enum and type is selected)
+        preview_box = ttk.Frame(frm)
+        preview_box.grid(row=9, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        ttk.Label(preview_box, text="Enum preview").pack(anchor="w")
+
+        preview_inner = ttk.Frame(preview_box)
+        preview_inner.pack(fill="both", expand=True, pady=(6, 0))
+        preview_inner.columnconfigure(0, weight=1)
+        preview_inner.rowconfigure(0, weight=1)
+
+        self.txt_enum_preview = tk.Text(preview_inner, height=10, wrap="none")
+        y = ttk.Scrollbar(preview_inner, orient="vertical", command=self.txt_enum_preview.yview)
+        self.txt_enum_preview.configure(yscrollcommand=y.set)
+        self.txt_enum_preview.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        try:
+            self.txt_enum_preview.configure(state="disabled")
+        except Exception:
+            pass
+
+        frm.rowconfigure(9, weight=1)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=10, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+
+        def is_enum() -> bool:
+            return (self.var_bType.get() or "").strip().upper() == "ENUM"
+
+        def apply_enum_filter(*_args) -> None:
+            if not is_enum():
+                try:
+                    self.cb_enum_type["values"] = tuple(self._all_enum_ids)
+                except Exception:
+                    pass
+                try:
+                    self.lbl_enum_match.configure(text="")
+                except Exception:
+                    pass
+                return
+
+            raw = (self.var_enum_filter.get() or "").strip().lower()
+            if not raw:
+                filtered = list(self._all_enum_ids)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    lv = v.lower()
+                    return all(t in lv for t in tokens)
+
+                filtered = [v for v in self._all_enum_ids if ok(v)]
+
+            cur = (self.var_type.get() or "").strip()
+            if cur and cur not in filtered:
+                filtered = [cur] + filtered
+
+            max_show = 1500
+            shown = filtered[:max_show]
+            try:
+                self.cb_enum_type["values"] = tuple(shown)
+            except Exception:
+                pass
+            suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
+            try:
+                self.lbl_enum_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
+            except Exception:
+                pass
+
+        def update_val_widget() -> None:
+            bt_enum = is_enum()
+            enum_id = (self.var_type.get() or "").strip() if bt_enum else ""
+
+            # Type widgets
+            if bt_enum:
+                try:
+                    type_enum_box.grid()
+                except Exception:
+                    pass
+                try:
+                    self.ent_type_plain.grid_remove()
+                except Exception:
+                    pass
+            else:
+                try:
+                    type_enum_box.grid_remove()
+                except Exception:
+                    pass
+                try:
+                    self.ent_type_plain.grid()
+                except Exception:
+                    pass
+
+            # Val widgets
+            if bt_enum and enum_id:
+                vals: list[str] = []
+                if callable(self._get_enum_values):
+                    try:
+                        vals = list(self._get_enum_values(enum_id) or [])
+                    except Exception:
+                        vals = []
+                values = [""] + [v for v in vals if (v or "").strip()]
+                cur = self.var_val.get() or ""
+                if cur and cur not in values:
+                    values = [cur] + values
+                try:
+                    self.cb_enum_val["values"] = tuple(values)
+                except Exception:
+                    pass
+                try:
+                    self.cb_enum_val.grid()
+                except Exception:
+                    pass
+                try:
+                    self.ent_val_plain.grid_remove()
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.cb_enum_val.grid_remove()
+                except Exception:
+                    pass
+                try:
+                    self.ent_val_plain.grid()
+                except Exception:
+                    pass
+
+        def update_enum_preview(*_args) -> None:
+            txt = getattr(self, "txt_enum_preview", None)
+            if txt is None:
+                return
+            bt_enum = is_enum()
+            enum_id = (self.var_type.get() or "").strip() if bt_enum else ""
+            if bt_enum and enum_id and callable(self._get_enum_preview):
+                try:
+                    preview = str(self._get_enum_preview(enum_id) or "")
+                except Exception as e:
+                    preview = f"(Failed to load preview: {e})"
+            else:
+                preview = ""
+
+            try:
+                txt.configure(state="normal")
+            except Exception:
+                pass
+            try:
+                txt.delete("1.0", "end")
+                if preview:
+                    txt.insert("1.0", preview)
+            finally:
+                try:
+                    txt.configure(state="disabled")
+                except Exception:
+                    pass
+
+        self.var_enum_filter.trace_add("write", apply_enum_filter)
+        self.var_bType.trace_add("write", lambda *_a: (apply_enum_filter(), update_val_widget(), update_enum_preview()))
+        self.var_type.trace_add("write", lambda *_a: (update_val_widget(), update_enum_preview()))
+
+        apply_enum_filter()
+        update_val_widget()
+        update_enum_preview()
+
+        # Start with name focused.
+        try:
+            self.after(10, lambda: self.focus_force())
+        except Exception:
+            pass
+
+    def _ok(self) -> None:
+        name = (self.var_name.get() or "").strip()
+        if not name:
+            messagebox.showerror("Missing", "DA name is required", parent=self)
+            return
+        fc = (self.var_fc.get() or "").strip().upper()
+        if not fc:
+            messagebox.showerror("Missing", "FC is required (must not be empty)", parent=self)
+            return
+        bt = (self.var_bType.get() or "").strip()
+        if not bt:
+            messagebox.showerror("Missing", "bType is required (must not be empty)", parent=self)
+            return
+
+        vk0 = (self.var_valKind.get() or "").strip()
+        u = vk0.upper()
+        if u == "SET":
+            vk = "Set"
+        elif u == "CONF":
+            vk = "Conf"
+        elif u == "RO":
+            vk = "RO"
+        else:
+            vk = vk0
+
+        vi0 = (self.var_valImport.get() or "").strip()
+        vi = vi0.lower() if vi0.lower() in {"true", "false"} else vi0
+
+        self._result = {
+            "name": name,
+            "fc": fc,
+            "bType": bt,
+            "type": (self.var_type.get() or "").strip(),
+            "valKind": vk,
+            "valImport": vi,
+            "dchg": (self.var_dchg.get() or "").strip(),
+            "val": (self.var_val.get() or ""),
+            "desc": (self.var_desc.get() or ""),
+        }
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, str] | None:
+        self.wait_window(self)
+        return self._result
+
+
+class DATable(ttk.Frame):
+    def __init__(self, parent: tk.Misc):
+        super().__init__(parent)
+        self.rows: list[dict[str, str]] = []
+        self._clipboard: dict[str, str] | None = None
+        self._undo_stack: list[list[dict[str, str]]] = []
+        self._undo_max = 50
+
+        self._inline: ttk.Entry | None = None
+        self._inline_iid: str | None = None
+        self._inline_col: str | None = None
+        self._inline_started_at: float | None = None
+
+        # Optional providers for EnumType integration.
+        # - get_enum_type_ids(): list of EnumType@id strings
+        # - get_enum_values(enum_id): ordered list of EnumVal texts
+        self.get_enum_type_ids: Callable[[], list[str]] | None = None
+        self.get_enum_values: Callable[[str], list[str]] | None = None
+        # - get_enum_preview(enum_id): preview text for EnumType
+        self.get_enum_preview: Callable[[str], str] | None = None
+
+        # Optional provider for bType dropdown values.
+        # If not provided, the dropdown falls back to values seen in current rows.
+        self.get_btype_options: Callable[[], list[str]] | None = None
+
+        toolbar = ttk.Frame(self)
+        toolbar.pack(fill="x", pady=(6, 4))
+        ttk.Button(toolbar, text="Add", command=self._add).pack(side="left")
+        ttk.Button(toolbar, text="Insert", command=self._insert).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Edit", command=self.edit_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Copy", command=self.copy_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Cut", command=self.cut_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Paste", command=self.paste_after_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Delete", command=self.delete_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Up", command=lambda: self._move(-1)).pack(side="left", padx=(18, 0))
+        ttk.Button(toolbar, text="Down", command=lambda: self._move(1)).pack(side="left", padx=(6, 0))
+
+        content = ttk.Frame(self)
+        content.pack(fill="both", expand=True)
+
+        cols = ["name", "fc", "bType", "type", "valKind", "valImport", "dchg", "val", "desc"]
+        self.tree = ttk.Treeview(content, columns=cols, show="headings", selectmode="browse")
+        for c in cols:
+            self.tree.heading(c, text=c)
+            if c in {"name", "fc", "bType"}:
+                if c == "fc":
+                    # FC is typically 2 chars (e.g., ST/MX/SP). Keep it narrow.
+                    self.tree.column(c, width=52, anchor="w", stretch=False)
+                else:
+                    self.tree.column(c, width=120, anchor="w")
+            elif c in {"valKind", "valImport", "dchg"}:
+                self.tree.column(c, width=90, anchor="w")
+            elif c == "type":
+                self.tree.column(c, width=220, anchor="w")
+            elif c == "val":
+                self.tree.column(c, width=220, anchor="w")
+            else:  # desc
+                self.tree.column(c, width=320, anchor="w")
+
+        # Scrollbars: include horizontal so rightmost columns are reachable.
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(0, weight=1)
+
+        y = ttk.Scrollbar(content, orient="vertical", command=self.tree.yview)
+        x = ttk.Scrollbar(content, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=y.set, xscrollcommand=x.set)
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        x.grid(row=1, column=0, columnspan=2, sticky="ew")
+
+        # Single click: open dropdown editors for specific columns.
+        # Double click: edit text columns.
+        self.tree.bind("<Button-1>", self._on_left_click)
+        self.tree.bind("<Double-1>", self._on_double_click)
+
+        self.tree.bind("<Control-c>", lambda _e: self.copy_selected())
+        self.tree.bind("<Control-C>", lambda _e: self.copy_selected())
+        self.tree.bind("<Control-x>", lambda _e: self.cut_selected())
+        self.tree.bind("<Control-X>", lambda _e: self.cut_selected())
+        self.tree.bind("<Control-v>", lambda _e: self.paste_after_selected())
+        self.tree.bind("<Control-V>", lambda _e: self.paste_after_selected())
+        self.tree.bind("<Control-z>", lambda _e: self.undo())
+        self.tree.bind("<Control-Z>", lambda _e: self.undo())
+        self.tree.bind("<Delete>", lambda _e: self.delete_selected())
+        self.tree.bind("<Button-3>", self._show_context_menu)
+
+        self._menu = tk.Menu(self, tearoff=False)
+        self._menu.add_command(label="Add", command=self._add)
+        self._menu.add_command(label="Insert", command=self._insert)
+        self._menu.add_command(label="Edit", command=self.edit_selected)
+        self._menu.add_separator()
+        self._menu.add_command(label="Copy", command=self.copy_selected)
+        self._menu.add_command(label="Cut", command=self.cut_selected)
+        self._menu.add_command(label="Paste", command=self.paste_after_selected)
+        self._menu.add_command(label="Delete", command=self.delete_selected)
+        self._menu.add_separator()
+        self._menu.add_command(label="Up", command=lambda: self._move(-1))
+        self._menu.add_command(label="Down", command=lambda: self._move(1))
+
+
+    def commit_any_edit(self) -> None:
+        """Commit any active inline edit."""
+        try:
+            self._end_inline_edit(commit=True)
+        except Exception:
+            pass
+
+    def _combobox_is_posted(self, cb: ttk.Combobox) -> bool:
+        try:
+            popdown = cb.tk.call("ttk::combobox::PopdownWindow", str(cb))
+            return bool(int(cb.tk.call("winfo", "ismapped", popdown)))
+        except Exception:
+            return False
+
+    def _combobox_post(self, cb: ttk.Combobox) -> None:
+        try:
+            cb.tk.call("ttk::combobox::Post", str(cb))
+        except Exception:
+            try:
+                cb.event_generate("<Alt-Down>")
+            except Exception:
+                pass
+
+    def _combobox_unpost(self, cb: ttk.Combobox) -> None:
+        try:
+            cb.tk.call("ttk::combobox::Unpost", str(cb))
+        except Exception:
+            try:
+                cb.event_generate("<Escape>")
+            except Exception:
+                pass
+
+    def _combobox_toggle_posted(self, cb: ttk.Combobox) -> None:
+        if self._combobox_is_posted(cb):
+            self._combobox_unpost(cb)
+        else:
+            self._combobox_post(cb)
+
+    def _on_inline_combobox_focus_out(self, event: tk.Event) -> None:
+        """Commit inline edit on focus-out, but avoid committing while the combobox dropdown is open.
+
+        On Windows, clicking the combobox dropdown list may trigger <FocusOut> on the combobox
+        before <<ComboboxSelected>> fires. If we commit/destroy on that focus change, the dropdown
+        appears empty / unselectable.
+        """
+        try:
+            widget = event.widget
+        except Exception:
+            widget = None
+
+        if not isinstance(widget, ttk.Combobox):
+            self._end_inline_edit(commit=True)
+            return
+
+        cb = widget
+
+        # If focus moved into the combobox popdown (listbox), do NOT commit/destroy.
+        # That focus change is part of selecting an item.
+        try:
+            popdown = cb.tk.call("ttk::combobox::PopdownWindow", str(cb))
+            focus_w = str(cb.tk.call("focus") or "")
+            if popdown and focus_w and focus_w.startswith(str(popdown)):
+                return
+        except Exception:
+            pass
+
+        if self._combobox_is_posted(cb):
+            # Re-check shortly: if user dismissed the dropdown without selecting,
+            # this will commit once the popdown closes.
+            try:
+                self.after(
+                    75,
+                    lambda: (
+                        self._end_inline_edit(commit=True)
+                        if self._inline is cb and not self._combobox_is_posted(cb)
+                        else None
+                    ),
+                )
+            except Exception:
+                pass
+            return
+
+        self._end_inline_edit(commit=True)
+
+    def _row_by_iid(self, iid: str) -> dict[str, str] | None:
+        try:
+            idx = int(iid)
+        except Exception:
+            return None
+        if idx < 0 or idx >= len(self.rows):
+            return None
+        return self.rows[idx]
+
+    def _enum_type_ids(self) -> list[str]:
+        try:
+            if self.get_enum_type_ids is None:
+                return []
+            return list(self.get_enum_type_ids() or [])
+        except Exception:
+            return []
+
+    def _enum_values(self, enum_type_id: str) -> list[str]:
+        try:
+            if self.get_enum_values is None:
+                return []
+            return list(self.get_enum_values(enum_type_id) or [])
+        except Exception:
+            return []
+
+    def _enum_preview_text(self, enum_type_id: str) -> str:
+        try:
+            if self.get_enum_preview is None:
+                return ""
+            return str(self.get_enum_preview(enum_type_id) or "")
+        except Exception:
+            return ""
+
+    def _btype_options(self) -> list[str]:
+        # Prefer a global provider (datamodel-derived list).
+        try:
+            if self.get_btype_options is not None:
+                opts = [str(x) for x in (self.get_btype_options() or [])]
+                opts = [o.strip() for o in opts if (o or "").strip()]
+                if opts:
+                    return opts
+        except Exception:
+            pass
+
+        # Fallback: values seen in current rows.
+        seen: list[str] = []
+        for r in (self.rows or []):
+            bt = (r.get("bType") or "").strip()
+            if bt and bt not in seen:
+                seen.append(bt)
+        if "Enum" not in seen and "ENUM" not in {s.upper() for s in seen}:
+            seen.append("Enum")
+        return seen
+
+    def _is_dropdown_cell(self, iid: str, col_name: str) -> bool:
+        if col_name in {"fc", "valKind", "valImport", "bType"}:
+            return True
+
+        row = self._row_by_iid(iid)
+        if row is None:
+            return False
+        bt = (row.get("bType") or "").strip()
+        if bt.upper() == "ENUM" and col_name == "type":
+            return True
+        if bt.upper() == "ENUM" and col_name == "val":
+            enum_id = (row.get("type") or "").strip()
+            # Even if EnumType catalog is incomplete, treat it as a dropdown cell
+            # as long as an enum id is provided; options may be empty if id is invalid.
+            return bool(enum_id)
+        return False
+
+    def set_rows(self, rows: list[dict[str, str]]) -> None:
+        self.rows = [dict(r) for r in (rows or [])]
+        self._undo_stack = []
+        self.refresh()
+
+    def get_rows(self) -> list[dict[str, str]]:
+        return [dict(r) for r in (self.rows or [])]
+
+    def refresh(self) -> None:
+        for item in self.tree.get_children(""):
+            self.tree.delete(item)
+        cols = ["name", "fc", "bType", "type", "valKind", "valImport", "dchg", "val", "desc"]
+        for idx, row in enumerate(self.rows):
+            self.tree.insert("", "end", iid=str(idx), values=[row.get(c, "") for c in cols])
+
+    def _selected_index(self) -> int | None:
+        try:
+            sel = self.tree.selection()
+            if not sel:
+                return None
+            return int(sel[0])
+        except Exception:
+            return None
+
+    def _clone_row(self, r: dict[str, str]) -> dict[str, str]:
+        return dict(r)
+
+    def _clone_rows(self, rows: list[dict[str, str]]) -> list[dict[str, str]]:
+        return [self._clone_row(x) for x in (rows or [])]
+
+    def _push_undo(self) -> None:
+        self._undo_stack.append(self._clone_rows(self.rows))
+        if len(self._undo_stack) > self._undo_max:
+            self._undo_stack = self._undo_stack[-self._undo_max :]
+
+    def undo(self) -> None:
+        self._end_inline_edit(commit=True)
+        if not self._undo_stack:
+            return
+        prev = self._undo_stack.pop()
+        self.rows = self._clone_rows(prev)
+        self.refresh()
+
+    def _unique_copy_name(self, base_name: str) -> str:
+        existing = {(x.get("name") or "").strip() for x in self.rows}
+        candidate = f"{base_name}_copy"
+        if candidate not in existing:
+            return candidate
+        i = 2
+        while True:
+            candidate = f"{base_name}_copy{i}"
+            if candidate not in existing:
+                return candidate
+            i += 1
+
+    def _unique_new_name(self, base: str = "newDA") -> str:
+        existing = {(x.get("name") or "").strip() for x in self.rows}
+        if base not in existing:
+            return base
+        i = 2
+        while True:
+            cand = f"{base}{i}"
+            if cand not in existing:
+                return cand
+            i += 1
+
+    def copy_selected(self) -> None:
+        self._end_inline_edit(commit=True)
+        idx = self._selected_index()
+        if idx is None or idx < 0 or idx >= len(self.rows):
+            return
+        self._clipboard = self._clone_row(self.rows[idx])
+        try:
+            self.clipboard_clear()
+            self.clipboard_append((self.rows[idx].get("name") or "") + "\t" + (self.rows[idx].get("bType") or ""))
+        except Exception:
+            pass
+
+    def cut_selected(self) -> None:
+        self.copy_selected()
+        self.delete_selected()
+
+    def delete_selected(self) -> None:
+        self._end_inline_edit(commit=True)
+        idx = self._selected_index()
+        if idx is None or idx < 0 or idx >= len(self.rows):
+            return
+        self._push_undo()
+        self.rows.pop(idx)
+        self.refresh()
+        if self.rows:
+            try:
+                self.tree.selection_set(str(min(idx, len(self.rows) - 1)))
+            except Exception:
+                pass
+
+    def paste_after_selected(self) -> None:
+        self._end_inline_edit(commit=True)
+        if self._clipboard is None:
+            return
+        self._push_undo()
+
+        new_row = self._clone_row(self._clipboard)
+        new_row["name"] = self._unique_copy_name((new_row.get("name") or "").strip() or "DA")
+
+        idx = self._selected_index()
+        if idx is None or idx < 0 or idx >= len(self.rows):
+            self.rows.append(new_row)
+            self.refresh()
+            try:
+                self.tree.selection_set(str(len(self.rows) - 1))
+            except Exception:
+                pass
+            return
+
+        insert_at = idx + 1
+        self.rows.insert(insert_at, new_row)
+        self.refresh()
+        try:
+            self.tree.selection_set(str(insert_at))
+        except Exception:
+            pass
+
+    def _move(self, delta: int) -> None:
+        self._end_inline_edit(commit=True)
+        idx = self._selected_index()
+        if idx is None:
+            return
+        j = idx + delta
+        if j < 0 or j >= len(self.rows):
+            return
+        self._push_undo()
+        self.rows[idx], self.rows[j] = self.rows[j], self.rows[idx]
+        self.refresh()
+        try:
+            self.tree.selection_set(str(j))
+        except Exception:
+            pass
+
+    def _show_context_menu(self, event: tk.Event) -> None:
+        self._end_inline_edit(commit=True)
+
+        try:
+            row_id = self.tree.identify_row(event.y)
+            if row_id:
+                self.tree.selection_set(row_id)
+        except Exception:
+            pass
+
+        idx = self._selected_index()
+        can_copy = idx is not None
+        can_edit = can_copy
+        can_delete = can_copy
+        can_paste = self._clipboard is not None
+        can_up = idx is not None and idx > 0
+        can_down = idx is not None and idx < (len(self.rows) - 1)
+
+        self._menu.entryconfigure("Edit", state=("normal" if can_edit else "disabled"))
+        self._menu.entryconfigure("Copy", state=("normal" if can_copy else "disabled"))
+        self._menu.entryconfigure("Cut", state=("normal" if can_copy else "disabled"))
+        self._menu.entryconfigure("Paste", state=("normal" if can_paste else "disabled"))
+        self._menu.entryconfigure("Delete", state=("normal" if can_delete else "disabled"))
+        self._menu.entryconfigure("Up", state=("normal" if can_up else "disabled"))
+        self._menu.entryconfigure("Down", state=("normal" if can_down else "disabled"))
+
+        try:
+            self._menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self._menu.grab_release()
+            except Exception:
+                pass
+
+    def _add(self) -> None:
+        self._end_inline_edit(commit=True)
+        self._push_undo()
+        new_row = {
+            "name": self._unique_new_name("newDA"),
+            "fc": "",
+            "bType": "",
+            "type": "",
+            "valKind": "",
+            "valImport": "",
+            "dchg": "",
+            "val": "",
+            "desc": "",
+        }
+        self.rows.append(new_row)
+        self.refresh()
+        iid = str(len(self.rows) - 1)
+        try:
+            self.tree.selection_set(iid)
+        except Exception:
+            pass
+        self._begin_inline_edit(iid, "name")
+
+    def _insert(self) -> None:
+        self._end_inline_edit(commit=True)
+        self._push_undo()
+        new_row = {
+            "name": self._unique_new_name("newDA"),
+            "fc": "",
+            "bType": "",
+            "type": "",
+            "valKind": "",
+            "valImport": "",
+            "dchg": "",
+            "val": "",
+            "desc": "",
+        }
+        idx = self._selected_index()
+        if idx is None or idx < 0 or idx >= len(self.rows):
+            self.rows.append(new_row)
+            self.refresh()
+            iid = str(len(self.rows) - 1)
+            try:
+                self.tree.selection_set(iid)
+            except Exception:
+                pass
+            self._begin_inline_edit(iid, "name")
+            return
+
+        insert_at = idx + 1
+        self.rows.insert(insert_at, new_row)
+        self.refresh()
+        iid = str(insert_at)
+        try:
+            self.tree.selection_set(iid)
+        except Exception:
+            pass
+        self._begin_inline_edit(iid, "name")
+
+    def edit_selected(self) -> None:
+        self._end_inline_edit(commit=True)
+        idx = self._selected_index()
+        if idx is None or idx < 0 or idx >= len(self.rows):
+            return
+
+        initial = dict(self.rows[idx])
+        dlg = DAEditDialog(
+            self,
+            title="Edit DA",
+            initial=initial,
+            btype_options=self._btype_options(),
+            enum_type_ids=self._enum_type_ids(),
+            get_enum_values=lambda enum_id: self._enum_values(enum_id),
+            get_enum_preview=lambda enum_id: self._enum_preview_text(enum_id),
+        )
+        res = dlg.show()
+        if res is None:
+            return
+
+        new_name = (res.get("name") or "").strip()
+        if not new_name:
+            return
+        if any(i != idx and (x.get("name") or "").strip() == new_name for i, x in enumerate(self.rows)):
+            messagebox.showerror("Duplicate", f"DA name already exists: {new_name}", parent=self)
+            return
+
+        # Normalize key fields.
+        fc = (res.get("fc") or "").strip().upper()
+        bt = (res.get("bType") or "").strip()
+        typ = (res.get("type") or "").strip()
+        val = res.get("val") or ""
+
+        new_row = dict(self.rows[idx])
+        new_row.update(
+            {
+                "name": new_name,
+                "fc": fc,
+                "bType": bt,
+                "type": typ,
+                "valKind": (res.get("valKind") or "").strip(),
+                "valImport": (res.get("valImport") or "").strip(),
+                "dchg": (res.get("dchg") or "").strip(),
+                "val": val,
+                "desc": (res.get("desc") or ""),
+            }
+        )
+
+        # Enum consistency: if bType is Enum but type is empty, clear val.
+        if (bt or "").strip().upper() == "ENUM":
+            if not typ:
+                new_row["val"] = ""
+            else:
+                # If val is not in EnumVal options, clear it (prevents stale values).
+                enum_vals = [""] + list(self._enum_values(typ) or [])
+                if (new_row.get("val") or "") and (new_row.get("val") not in enum_vals):
+                    new_row["val"] = ""
+
+        if new_row == self.rows[idx]:
+            return
+
+        self._push_undo()
+        self.rows[idx] = new_row
+        self.refresh()
+        try:
+            self.tree.selection_set(str(idx))
+        except Exception:
+            pass
+
+    def _on_double_click(self, event: tk.Event) -> None:
+        try:
+            iid = self.tree.identify_row(event.y)
+            col = self.tree.identify_column(event.x)
+        except Exception:
+            return
+        if not iid:
+            return
+        try:
+            self.tree.selection_set(iid)
+        except Exception:
+            pass
+        try:
+            col_index = int(col.lstrip("#")) - 1
+        except Exception:
+            return
+        cols = list(self.tree["columns"])
+        if col_index < 0 or col_index >= len(cols):
+            return
+        col_name = cols[col_index]
+        # Dropdown cells are edited via single click.
+        if self._is_dropdown_cell(iid, col_name):
+            return
+        self._begin_inline_edit(iid, col_name)
+
+    def _on_left_click(self, event: tk.Event) -> str | None:
+        # Single-click opens dropdown editors for select columns (fc/valKind/valImport).
+        try:
+            region = self.tree.identify("region", event.x, event.y)
+            if region != "cell":
+                return None
+
+            col = self.tree.identify_column(event.x)
+            iid = self.tree.identify_row(event.y)
+            if not iid:
+                return None
+
+            try:
+                self.tree.selection_set(iid)
+            except Exception:
+                pass
+
+            try:
+                col_index = int(col.lstrip("#")) - 1
+            except Exception:
+                return None
+            cols = list(self.tree["columns"])
+            if col_index < 0 or col_index >= len(cols):
+                return None
+            col_name = cols[col_index]
+
+            if not self._is_dropdown_cell(iid, col_name):
+                return None
+
+            # If already editing this cell with a combobox, toggle dropdown.
+            if (
+                isinstance(self._inline, ttk.Combobox)
+                and self._inline_iid == iid
+                and self._inline_col == col_name
+            ):
+                self._combobox_toggle_posted(self._inline)
+                return "break"
+
+            # Create editor immediately; delays here can cause FocusOut timing glitches.
+            self._begin_inline_edit(iid, col_name)
+            return "break"
+        except Exception:
+            return None
+
+    def _begin_inline_edit(self, iid: str, col_name: str) -> None:
+        if iid is None or col_name is None:
+            return
+        try:
+            idx = int(iid)
+        except Exception:
+            return
+        if idx < 0 or idx >= len(self.rows):
+            return
+
+        self._end_inline_edit(commit=True)
+
+        bbox = self.tree.bbox(iid, column=col_name)
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        row = self.rows[idx]
+        current = row.get(col_name) or ""
+
+        # bType dropdown: auto-fill from existing values.
+        if col_name == "bType":
+            opts = list(self._btype_options())
+            cur0 = (current or "").strip()
+            if cur0 and cur0 not in opts:
+                opts = [cur0] + opts
+
+            # bType is required; do not offer an empty selection.
+            values = tuple(opts)
+            cb = ttk.Combobox(self.tree, state="readonly", values=values)
+            cb.place(x=x, y=y, width=w, height=h)
+            cb.set(cur0 if cur0 in values else (cur0 or ""))
+            cb.focus_set()
+
+            self._inline = cb  # type: ignore[assignment]
+            self._inline_iid = iid
+            self._inline_col = col_name
+            self._inline_started_at = time.monotonic()
+
+            cb.bind("<<ComboboxSelected>>", lambda _e: self._end_inline_edit(commit=True))
+            cb.bind("<Return>", lambda _e: self._end_inline_edit(commit=True))
+            cb.bind("<Escape>", lambda _e: self._end_inline_edit(commit=False))
+            cb.bind("<FocusOut>", self._on_inline_combobox_focus_out)
+            cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+            try:
+                self.tree.after_idle(lambda: self._combobox_post(cb))
+            except Exception:
+                self._combobox_post(cb)
+            return
+
+        # Enum integration: when bType=Enum, use dropdown for type and val.
+        bt = (row.get("bType") or "").strip().upper()
+        if bt == "ENUM" and col_name == "type":
+            enum_ids = self._enum_type_ids()
+            values = tuple([""] + list(enum_ids))
+            cur0 = (current or "").strip()
+            cb = ttk.Combobox(self.tree, state="readonly", values=values)
+            cb.place(x=x, y=y, width=w, height=h)
+            cb.set(cur0 if cur0 in values else (cur0 or ""))
+            cb.focus_set()
+
+            self._inline = cb  # type: ignore[assignment]
+            self._inline_iid = iid
+            self._inline_col = col_name
+            self._inline_started_at = time.monotonic()
+
+            cb.bind("<<ComboboxSelected>>", lambda _e: self._end_inline_edit(commit=True))
+            cb.bind("<Return>", lambda _e: self._end_inline_edit(commit=True))
+            cb.bind("<Escape>", lambda _e: self._end_inline_edit(commit=False))
+            cb.bind("<FocusOut>", self._on_inline_combobox_focus_out)
+            cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+            try:
+                self.tree.after_idle(lambda: self._combobox_post(cb))
+            except Exception:
+                self._combobox_post(cb)
+            return
+
+        if bt == "ENUM" and col_name == "val":
+            enum_id = (row.get("type") or "").strip()
+            if enum_id:
+                enum_vals = self._enum_values(enum_id)
+                values = tuple([""] + list(enum_vals))
+                cur0 = (current or "")
+                cb = ttk.Combobox(self.tree, state="readonly", values=values)
+                cb.place(x=x, y=y, width=w, height=h)
+                cb.set(cur0 if cur0 in values else (cur0 or ""))
+                cb.focus_set()
+
+                self._inline = cb  # type: ignore[assignment]
+                self._inline_iid = iid
+                self._inline_col = col_name
+                self._inline_started_at = time.monotonic()
+
+                cb.bind("<<ComboboxSelected>>", lambda _e: self._end_inline_edit(commit=True))
+                cb.bind("<Return>", lambda _e: self._end_inline_edit(commit=True))
+                cb.bind("<Escape>", lambda _e: self._end_inline_edit(commit=False))
+                cb.bind("<FocusOut>", self._on_inline_combobox_focus_out)
+                cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+                try:
+                    self.tree.after_idle(lambda: self._combobox_post(cb))
+                except Exception:
+                    self._combobox_post(cb)
+                return
+
+        # Use combobox for specific columns.
+        if col_name == "fc":
+            # FC must not be empty.
+            values = ("ST", "MX", "SP", "SV", "CF", "DC", "EX", "CO", "SG", "SE")
+            cur = (current or "").strip().upper()
+            cb = ttk.Combobox(self.tree, state="readonly", values=values)
+            cb.place(x=x, y=y, width=w, height=h)
+            cb.set(cur if cur in values else (current or ""))
+            cb.focus_set()
+
+            self._inline = cb  # type: ignore[assignment]
+            self._inline_iid = iid
+            self._inline_col = col_name
+            self._inline_started_at = time.monotonic()
+
+            cb.bind("<<ComboboxSelected>>", lambda _e: self._end_inline_edit(commit=True))
+            cb.bind("<Return>", lambda _e: self._end_inline_edit(commit=True))
+            cb.bind("<Escape>", lambda _e: self._end_inline_edit(commit=False))
+            cb.bind("<FocusOut>", self._on_inline_combobox_focus_out)
+
+            # Allow single-click to toggle dropdown while editing.
+            cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+            try:
+                self.tree.after_idle(lambda: self._combobox_post(cb))
+            except Exception:
+                self._combobox_post(cb)
+            return
+
+        if col_name == "valKind":
+            values = ("", "Set", "Conf", "RO")
+            v0 = (current or "").strip()
+            u = v0.upper()
+            if u == "SET":
+                cur = "Set"
+            elif u == "CONF":
+                cur = "Conf"
+            elif u == "RO":
+                cur = "RO"
+            else:
+                cur = v0
+            cb = ttk.Combobox(self.tree, state="readonly", values=values)
+            cb.place(x=x, y=y, width=w, height=h)
+            cb.set(cur if cur in values else (current or ""))
+            cb.focus_set()
+
+            self._inline = cb  # type: ignore[assignment]
+            self._inline_iid = iid
+            self._inline_col = col_name
+            self._inline_started_at = time.monotonic()
+
+            cb.bind("<<ComboboxSelected>>", lambda _e: self._end_inline_edit(commit=True))
+            cb.bind("<Return>", lambda _e: self._end_inline_edit(commit=True))
+            cb.bind("<Escape>", lambda _e: self._end_inline_edit(commit=False))
+            cb.bind("<FocusOut>", self._on_inline_combobox_focus_out)
+
+            cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+            try:
+                self.tree.after_idle(lambda: self._combobox_post(cb))
+            except Exception:
+                self._combobox_post(cb)
+            return
+
+        if col_name == "valImport":
+            values = ("", "true", "false")
+            cur0 = (current or "").strip().lower()
+            cb = ttk.Combobox(self.tree, state="readonly", values=values)
+            cb.place(x=x, y=y, width=w, height=h)
+            cb.set(cur0 if cur0 in values else "")
+            cb.focus_set()
+
+            self._inline = cb  # type: ignore[assignment]
+            self._inline_iid = iid
+            self._inline_col = col_name
+            self._inline_started_at = time.monotonic()
+
+            cb.bind("<<ComboboxSelected>>", lambda _e: self._end_inline_edit(commit=True))
+            cb.bind("<Return>", lambda _e: self._end_inline_edit(commit=True))
+            cb.bind("<Escape>", lambda _e: self._end_inline_edit(commit=False))
+            cb.bind("<FocusOut>", self._on_inline_combobox_focus_out)
+
+            cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+            try:
+                self.tree.after_idle(lambda: self._combobox_post(cb))
+            except Exception:
+                self._combobox_post(cb)
+            return
+
+        ent = ttk.Entry(self.tree)
+        ent.place(x=x, y=y, width=w, height=h)
+        # Use insert() to ensure ent.get() round-trips correctly on commit.
+        ent.insert(0, current)
+        ent.focus_set()
+        try:
+            ent.selection_range(0, "end")
+        except Exception:
+            pass
+
+        self._inline = ent
+        self._inline_iid = iid
+        self._inline_col = col_name
+
+        ent.bind("<Return>", lambda _e: self._end_inline_edit(commit=True))
+        ent.bind("<Escape>", lambda _e: self._end_inline_edit(commit=False))
+        ent.bind("<FocusOut>", lambda _e: self._end_inline_edit(commit=True))
+
+    def _end_inline_edit(self, *, commit: bool) -> None:
+        ent = self._inline
+        iid = self._inline_iid
+        col_name = self._inline_col
+
+        if ent is None or iid is None or col_name is None:
+            self._inline = None
+            self._inline_iid = None
+            self._inline_col = None
+            return
+
+        try:
+            new_val = ent.get()
+        except Exception:
+            new_val = ""
+
+        try:
+            ent.place_forget()
+            ent.destroy()
+        except Exception:
+            pass
+
+        self._inline = None
+        self._inline_iid = None
+        self._inline_col = None
+        self._inline_started_at = None
+
+        if not commit:
+            return
+
+        try:
+            idx = int(iid)
+        except Exception:
+            return
+        if idx < 0 or idx >= len(self.rows):
+            return
+
+        if col_name == "name":
+            new_name = (new_val or "").strip()
+            if not new_name:
+                messagebox.showerror("Missing", "DA name is required", parent=self)
+                return
+            if any(i != idx and (x.get("name") or "").strip() == new_name for i, x in enumerate(self.rows)):
+                messagebox.showerror("Duplicate", f"DA name already exists: {new_name}", parent=self)
+                return
+            if (self.rows[idx].get("name") or "").strip() == new_name:
+                return
+            self._push_undo()
+            self.rows[idx]["name"] = new_name
+        elif col_name == "fc":
+            fc_new = (new_val or "").strip().upper()
+            if not fc_new:
+                messagebox.showerror("Missing", "FC is required (must not be empty)", parent=self)
+                return
+            if (self.rows[idx].get("fc") or "") == fc_new:
+                return
+            self._push_undo()
+            self.rows[idx]["fc"] = fc_new
+        elif col_name == "bType":
+            old_bt = (self.rows[idx].get("bType") or "").strip()
+            new_bt = (new_val or "").strip()
+            if not new_bt and old_bt:
+                messagebox.showerror("Missing", "bType is required (must not be empty)", parent=self)
+                return
+            if old_bt == new_bt:
+                return
+
+            old_is_enum = old_bt.strip().upper() == "ENUM"
+            new_is_enum = new_bt.strip().upper() == "ENUM"
+
+            self._push_undo()
+            self.rows[idx]["bType"] = new_bt
+
+            # If leaving Enum, clear dependent fields.
+            if old_is_enum and not new_is_enum:
+                self.rows[idx]["type"] = ""
+                self.rows[idx]["val"] = ""
+            # If entering Enum, clear incompatible stale values.
+            if new_is_enum:
+                enum_id = (self.rows[idx].get("type") or "").strip()
+                if not enum_id or (enum_id not in set(self._enum_type_ids())):
+                    self.rows[idx]["type"] = ""
+                    self.rows[idx]["val"] = ""
+        else:
+            if (self.rows[idx].get(col_name) or "") == (new_val or ""):
+                return
+            # Special case: Enum type change should clear Enum value.
+            if col_name == "type" and (self.rows[idx].get("bType") or "").strip().upper() == "ENUM":
+                self._push_undo()
+                self.rows[idx][col_name] = new_val or ""
+                self.rows[idx]["val"] = ""
+            else:
+                self._push_undo()
+                self.rows[idx][col_name] = new_val or ""
+
+        self.refresh()
+        try:
+            self.tree.selection_set(str(idx))
+        except Exception:
+            pass
+
+
 class DOTable(ttk.Frame):
-    def __init__(self, parent: tk.Misc, *, do_types: list[str]):
+    def __init__(self, parent: tk.Misc, *, do_types: list[str], get_do_type_preview: Callable[[str], str] | None = None):
         super().__init__(parent)
         self.do_types = do_types
+        self._get_do_type_preview = get_do_type_preview
         self.rows: list[DOItem] = []
         self._clipboard: DOItem | None = None
         self._undo_stack: list[list[DOItem]] = []
@@ -810,6 +2492,7 @@ class DOTable(ttk.Frame):
         toolbar.pack(fill="x", pady=(6, 4))
         ttk.Button(toolbar, text="Add", command=self._add).pack(side="left")
         ttk.Button(toolbar, text="Insert", command=self._insert).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Edit", command=self.edit_selected).pack(side="left", padx=(6, 0))
         ttk.Button(toolbar, text="Copy", command=self.copy_selected).pack(side="left", padx=(6, 0))
         ttk.Button(toolbar, text="Cut", command=self.cut_selected).pack(side="left", padx=(6, 0))
         ttk.Button(toolbar, text="Paste", command=self.paste_after_selected).pack(side="left", padx=(6, 0))
@@ -846,6 +2529,7 @@ class DOTable(ttk.Frame):
         self._menu = tk.Menu(self, tearoff=False)
         self._menu.add_command(label="Add", command=self._add)
         self._menu.add_command(label="Insert", command=self._insert)
+        self._menu.add_command(label="Edit", command=self.edit_selected)
         self._menu.add_separator()
         self._menu.add_command(label="Copy", command=self.copy_selected)
         self._menu.add_command(label="Cut", command=self.cut_selected)
@@ -857,6 +2541,11 @@ class DOTable(ttk.Frame):
 
         self._menu.add_separator()
         self._menu.add_command(label="Rules...", command=self.edit_rules_for_selected)
+
+    def edit_selected(self) -> None:
+        """Edit the selected DO using the same UI as double-clicking the type cell."""
+        self._end_inline_name_edit(commit=True)
+        self._edit_type_for_selected()
 
     def edit_rules_for_selected(self) -> None:
         self._end_inline_name_edit(commit=True)
@@ -1110,6 +2799,7 @@ class DOTable(ttk.Frame):
 
         idx = self._selected_index()
         can_copy = idx is not None
+        can_edit = can_copy
         can_delete = can_copy
         can_paste = self._clipboard is not None
         can_up = idx is not None and idx > 0
@@ -1119,6 +2809,10 @@ class DOTable(ttk.Frame):
         self._menu.entryconfigure("Cut", state=("normal" if can_copy else "disabled"))
         self._menu.entryconfigure("Paste", state=("normal" if can_paste else "disabled"))
         self._menu.entryconfigure("Delete", state=("normal" if can_delete else "disabled"))
+        try:
+            self._menu.entryconfigure("Edit", state=("normal" if can_edit else "disabled"))
+        except Exception:
+            pass
         self._menu.entryconfigure("Up", state=("normal" if can_up else "disabled"))
         self._menu.entryconfigure("Down", state=("normal" if can_down else "disabled"))
         try:
@@ -1136,7 +2830,13 @@ class DOTable(ttk.Frame):
 
     def _add(self) -> None:
         self._end_inline_name_edit(commit=True)
-        dlg = DOEditDialog(self, title="Add", do_types=self.do_types, initial=None)
+        dlg = DOEditDialog(
+            self,
+            title="Add",
+            do_types=self.do_types,
+            initial=None,
+            get_do_type_preview=self._get_do_type_preview,
+        )
         res = dlg.show()
         if res is None:
             return
@@ -1155,7 +2855,13 @@ class DOTable(ttk.Frame):
         - If nothing is selected: append at the end.
         """
         self._end_inline_name_edit(commit=True)
-        dlg = DOEditDialog(self, title="Insert", do_types=self.do_types, initial=None)
+        dlg = DOEditDialog(
+            self,
+            title="Insert",
+            do_types=self.do_types,
+            initial=None,
+            get_do_type_preview=self._get_do_type_preview,
+        )
         res = dlg.show()
         if res is None:
             return
@@ -1182,7 +2888,14 @@ class DOTable(ttk.Frame):
         if idx is None or idx < 0 or idx >= len(self.rows):
             return
         current = self.rows[idx]
-        dlg = DOEditDialog(self, title="Edit type", do_types=self.do_types, initial=current, edit_name=False)
+        dlg = DOEditDialog(
+            self,
+            title="Edit type",
+            do_types=self.do_types,
+            initial=current,
+            edit_name=False,
+            get_do_type_preview=self._get_do_type_preview,
+        )
         res = dlg.show()
         if res is None:
             return
@@ -1669,6 +3382,684 @@ class NewTemplateDialog(tk.Toplevel):
         return self._result
 
 
+class NewDOTypeDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        do_type_ids: list[str],
+        cdc_values: list[str],
+        get_base_cdc: Callable[[str], str] | None = None,
+    ):
+        super().__init__(parent)
+        self.title("New DO template (DOType)")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: dict[str, str] | None = None
+        self._do_type_ids = list(do_type_ids or [])
+        self._cdc_values = list(cdc_values or [])
+        self._get_base_cdc = get_base_cdc
+
+        self._id_internal_update = False
+        self._id_user_modified = False
+        self._last_suggested_id = ""
+
+        frm = ttk.Frame(self, padding=10)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        ttk.Label(frm, text="Create from").grid(row=0, column=0, sticky="w", pady=4)
+        self.var_base = tk.StringVar(value="(Blank)")
+        base_values = ["(Blank)"] + list(self._do_type_ids)
+        cb_base = ttk.Combobox(frm, textvariable=self.var_base, values=base_values, width=62)
+        cb_base.grid(row=0, column=1, sticky="we", padx=(10, 0), pady=4)
+
+        ttk.Label(frm, text="id (file name)").grid(row=1, column=0, sticky="w", pady=4)
+        self.var_id = tk.StringVar(value="")
+        ent_id = ttk.Entry(frm, textvariable=self.var_id, width=64)
+        ent_id.grid(row=1, column=1, sticky="we", padx=(10, 0), pady=4)
+
+        def _mark_user_modified(*_args) -> None:
+            if self._id_internal_update:
+                return
+            self._id_user_modified = True
+
+        self.var_id.trace_add("write", _mark_user_modified)
+
+        ttk.Label(frm, text="CDC").grid(row=2, column=0, sticky="w", pady=4)
+        self.var_cdc = tk.StringVar(value="")
+        cb_cdc = ttk.Combobox(frm, textvariable=self.var_cdc, values=list(self._cdc_values), width=62)
+        try:
+            cb_cdc.configure(state="readonly")
+        except Exception:
+            pass
+        cb_cdc.grid(row=2, column=1, sticky="we", padx=(10, 0), pady=4)
+
+        ttk.Label(frm, text="desc (optional)").grid(row=3, column=0, sticky="w", pady=4)
+        self.var_desc = tk.StringVar(value="")
+        ent_desc = ttk.Entry(frm, textvariable=self.var_desc, width=64)
+        ent_desc.grid(row=3, column=1, sticky="we", padx=(10, 0), pady=4)
+
+        hint = ttk.Label(
+            frm,
+            text=(
+                "Tip: If you pick an existing DOType, DA/Private blocks will be copied, then id/CDC/desc updated."
+            ),
+        )
+        hint.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="Create", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+
+        def unique_copy_name(base: str) -> str:
+            existing = set(self._do_type_ids)
+            candidate = f"{base}_copy"
+            if candidate not in existing:
+                return candidate
+            i = 2
+            while True:
+                candidate = f"{base}_copy{i}"
+                if candidate not in existing:
+                    return candidate
+                i += 1
+
+        def prefill(*_args) -> None:
+            base_id = self.var_base.get().strip()
+            if base_id == "(Blank)":
+                return
+
+            cur = self.var_id.get().strip()
+            if (not self._id_user_modified) or (not cur) or (cur == self._last_suggested_id):
+                suggested = unique_copy_name(base_id)
+                self._id_internal_update = True
+                try:
+                    self.var_id.set(suggested)
+                    self._last_suggested_id = suggested
+                finally:
+                    self._id_internal_update = False
+
+            # Prefill CDC from base if available.
+            if not self.var_cdc.get().strip() and callable(self._get_base_cdc):
+                try:
+                    cdc0 = (self._get_base_cdc(base_id) or "").strip()
+                except Exception:
+                    cdc0 = ""
+                if cdc0:
+                    # keep original casing in list (typically uppercase)
+                    self.var_cdc.set(cdc0)
+
+        self.var_base.trace_add("write", prefill)
+        prefill()
+
+        ent_id.focus_set()
+
+    def _ok(self) -> None:
+        new_id = (self.var_id.get() or "").strip()
+        cdc = (self.var_cdc.get() or "").strip()
+        desc = (self.var_desc.get() or "").strip()
+        base_id = (self.var_base.get() or "").strip()
+
+        if not new_id:
+            messagebox.showerror("Missing", "id is required", parent=self)
+            return
+        if not cdc:
+            messagebox.showerror("Missing", "CDC is required", parent=self)
+            return
+
+        self._result = {
+            "base_id": base_id,
+            "id": new_id,
+            "cdc": cdc,
+            "desc": desc,
+        }
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, str] | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _EnumValEditDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Misc, *, initial: dict[str, str]):
+        super().__init__(parent)
+        self.title("Edit EnumVal")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: dict[str, str] | None = None
+
+        frm = ttk.Frame(self, padding=10)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        self.var_ord = tk.StringVar(value=(initial.get("ord") or ""))
+        self.var_val = tk.StringVar(value=(initial.get("val") or ""))
+        self.var_desc = tk.StringVar(value=(initial.get("desc") or ""))
+
+        ttk.Label(frm, text="ord").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_ord, width=18).grid(row=0, column=1, sticky="we", padx=(10, 0), pady=4)
+        ttk.Label(frm, text="val").grid(row=1, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_val, width=52).grid(row=1, column=1, sticky="we", padx=(10, 0), pady=4)
+        ttk.Label(frm, text="desc").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_desc, width=52).grid(row=2, column=1, sticky="we", padx=(10, 0), pady=4)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+
+    def _ok(self) -> None:
+        ord0 = (self.var_ord.get() or "").strip()
+        if ord0 and not ord0.isdigit():
+            messagebox.showerror("Invalid", "ord must be an integer", parent=self)
+            return
+        self._result = {
+            "ord": ord0,
+            "val": (self.var_val.get() or ""),
+            "desc": (self.var_desc.get() or ""),
+        }
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, str] | None:
+        self.wait_window(self)
+        return self._result
+
+
+class EnumValTable(ttk.Frame):
+    def __init__(self, parent: tk.Misc):
+        super().__init__(parent)
+        self.rows: list[dict[str, str]] = []
+        self._clipboard: dict[str, str] | None = None
+        self._undo_stack: list[list[dict[str, str]]] = []
+        self._undo_max = 50
+
+        self._inline: ttk.Entry | None = None
+        self._inline_iid: str | None = None
+        self._inline_col: str | None = None
+
+        toolbar = ttk.Frame(self)
+        toolbar.pack(fill="x", pady=(6, 4))
+        ttk.Button(toolbar, text="Add", command=self._add).pack(side="left")
+        ttk.Button(toolbar, text="Insert", command=self._insert).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Edit", command=self.edit_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Copy", command=self.copy_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Cut", command=self.cut_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Paste", command=self.paste_after_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Delete", command=self.delete_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(toolbar, text="Up", command=lambda: self._move(-1)).pack(side="left", padx=(18, 0))
+        ttk.Button(toolbar, text="Down", command=lambda: self._move(1)).pack(side="left", padx=(6, 0))
+
+        content = ttk.Frame(self)
+        content.pack(fill="both", expand=True)
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(0, weight=1)
+
+        cols = ["ord", "desc", "val"]
+        self.tree = ttk.Treeview(content, columns=cols, show="headings", selectmode="browse")
+        self.tree.heading("ord", text="ord")
+        self.tree.heading("desc", text="desc")
+        self.tree.heading("val", text="val")
+        self.tree.column("ord", width=70, anchor="w", stretch=False)
+        self.tree.column("desc", width=520, anchor="w")
+        self.tree.column("val", width=240, anchor="w")
+
+        y = ttk.Scrollbar(content, orient="vertical", command=self.tree.yview)
+        x = ttk.Scrollbar(content, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=y.set, xscrollcommand=x.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        x.grid(row=1, column=0, columnspan=2, sticky="ew")
+
+        self.tree.bind("<Double-1>", self._on_double_click)
+        self.tree.bind("<Button-1>", self._on_left_click)
+        self.tree.bind("<Control-c>", lambda _e: self.copy_selected())
+        self.tree.bind("<Control-C>", lambda _e: self.copy_selected())
+        self.tree.bind("<Control-x>", lambda _e: self.cut_selected())
+        self.tree.bind("<Control-X>", lambda _e: self.cut_selected())
+        self.tree.bind("<Control-v>", lambda _e: self.paste_after_selected())
+        self.tree.bind("<Control-V>", lambda _e: self.paste_after_selected())
+        self.tree.bind("<Control-z>", lambda _e: self.undo())
+        self.tree.bind("<Control-Z>", lambda _e: self.undo())
+        self.tree.bind("<Delete>", lambda _e: self.delete_selected())
+        self.tree.bind("<Button-3>", self._show_context_menu)
+
+        self._menu = tk.Menu(self, tearoff=False)
+        self._menu.add_command(label="Add", command=self._add)
+        self._menu.add_command(label="Insert", command=self._insert)
+        self._menu.add_command(label="Edit", command=self.edit_selected)
+        self._menu.add_separator()
+        self._menu.add_command(label="Copy", command=self.copy_selected)
+        self._menu.add_command(label="Cut", command=self.cut_selected)
+        self._menu.add_command(label="Paste", command=self.paste_after_selected)
+        self._menu.add_command(label="Delete", command=self.delete_selected)
+        self._menu.add_separator()
+        self._menu.add_command(label="Up", command=lambda: self._move(-1))
+        self._menu.add_command(label="Down", command=lambda: self._move(1))
+
+    def commit_any_edit(self) -> None:
+        try:
+            self._end_inline(commit=True)
+        except Exception:
+            pass
+
+    def set_rows(self, rows: list[dict[str, str]]) -> None:
+        self.rows = [dict(r) for r in (rows or [])]
+        self._undo_stack = []
+        self.refresh()
+
+    def get_rows(self) -> list[dict[str, str]]:
+        return [dict(r) for r in (self.rows or [])]
+
+    def refresh(self) -> None:
+        for item in self.tree.get_children(""):
+            self.tree.delete(item)
+        for idx, row in enumerate(self.rows):
+            self.tree.insert("", "end", iid=str(idx), values=[row.get("ord", ""), row.get("desc", ""), row.get("val", "")])
+
+    def _selected_index(self) -> int | None:
+        try:
+            sel = self.tree.selection()
+            if not sel:
+                return None
+            return int(sel[0])
+        except Exception:
+            return None
+
+    def _push_undo(self) -> None:
+        self._undo_stack.append([dict(r) for r in (self.rows or [])])
+        if len(self._undo_stack) > self._undo_max:
+            self._undo_stack = self._undo_stack[-self._undo_max :]
+
+    def undo(self) -> None:
+        self._end_inline(commit=True)
+        if not self._undo_stack:
+            return
+        self.rows = [dict(r) for r in self._undo_stack.pop()]
+        self.refresh()
+
+    def _default_new_ord(self) -> str:
+        nums: list[int] = []
+        for r in (self.rows or []):
+            raw = (r.get("ord") or "").strip()
+            if raw.isdigit():
+                nums.append(int(raw))
+        if not nums:
+            return "0"
+        return str(max(nums) + 1)
+
+    def _add(self) -> None:
+        self._end_inline(commit=True)
+        self._push_undo()
+        self.rows.append({"ord": self._default_new_ord(), "desc": "", "val": "", "langRef": ""})
+        self.refresh()
+        try:
+            self.tree.selection_set(str(len(self.rows) - 1))
+        except Exception:
+            pass
+
+    def _insert(self) -> None:
+        self._end_inline(commit=True)
+        self._push_undo()
+        idx = self._selected_index()
+        row = {"ord": self._default_new_ord(), "desc": "", "val": "", "langRef": ""}
+        if idx is None or idx < 0 or idx >= len(self.rows):
+            self.rows.insert(0, row)
+            self.refresh()
+            try:
+                self.tree.selection_set("0")
+            except Exception:
+                pass
+            return
+        self.rows.insert(idx, row)
+        self.refresh()
+        try:
+            self.tree.selection_set(str(idx))
+        except Exception:
+            pass
+
+    def copy_selected(self) -> None:
+        self._end_inline(commit=True)
+        idx = self._selected_index()
+        if idx is None or idx < 0 or idx >= len(self.rows):
+            return
+        self._clipboard = dict(self.rows[idx])
+        try:
+            self.clipboard_clear()
+            self.clipboard_append((self.rows[idx].get("val") or "") + "\t" + (self.rows[idx].get("desc") or ""))
+        except Exception:
+            pass
+
+    def cut_selected(self) -> None:
+        self.copy_selected()
+        self.delete_selected()
+
+    def delete_selected(self) -> None:
+        self._end_inline(commit=True)
+        idx = self._selected_index()
+        if idx is None or idx < 0 or idx >= len(self.rows):
+            return
+        self._push_undo()
+        self.rows.pop(idx)
+        self.refresh()
+        if self.rows:
+            try:
+                self.tree.selection_set(str(min(idx, len(self.rows) - 1)))
+            except Exception:
+                pass
+
+    def paste_after_selected(self) -> None:
+        self._end_inline(commit=True)
+        if self._clipboard is None:
+            return
+        self._push_undo()
+        new_row = dict(self._clipboard)
+        idx = self._selected_index()
+        if idx is None or idx < 0 or idx >= len(self.rows):
+            self.rows.append(new_row)
+            self.refresh()
+            try:
+                self.tree.selection_set(str(len(self.rows) - 1))
+            except Exception:
+                pass
+            return
+        insert_at = idx + 1
+        self.rows.insert(insert_at, new_row)
+        self.refresh()
+        try:
+            self.tree.selection_set(str(insert_at))
+        except Exception:
+            pass
+
+    def _move(self, delta: int) -> None:
+        self._end_inline(commit=True)
+        idx = self._selected_index()
+        if idx is None:
+            return
+        j = idx + delta
+        if j < 0 or j >= len(self.rows):
+            return
+        self._push_undo()
+        self.rows[idx], self.rows[j] = self.rows[j], self.rows[idx]
+        self.refresh()
+        try:
+            self.tree.selection_set(str(j))
+        except Exception:
+            pass
+
+    def edit_selected(self) -> None:
+        self._end_inline(commit=True)
+        idx = self._selected_index()
+        if idx is None or idx < 0 or idx >= len(self.rows):
+            return
+        dlg = _EnumValEditDialog(self, initial=dict(self.rows[idx]))
+        res = dlg.show()
+        if not res:
+            return
+        self._push_undo()
+        self.rows[idx].update(res)
+        self.refresh()
+        try:
+            self.tree.selection_set(str(idx))
+        except Exception:
+            pass
+
+    def _show_context_menu(self, event: tk.Event) -> None:
+        self._end_inline(commit=True)
+
+        try:
+            row_id = self.tree.identify_row(event.y)
+            if row_id:
+                self.tree.selection_set(row_id)
+        except Exception:
+            pass
+
+        idx = self._selected_index()
+        can_copy = idx is not None
+        can_edit = can_copy
+        can_delete = can_copy
+        can_paste = self._clipboard is not None
+        can_up = idx is not None and idx > 0
+        can_down = idx is not None and idx < (len(self.rows) - 1)
+
+        self._menu.entryconfigure("Edit", state=("normal" if can_edit else "disabled"))
+        self._menu.entryconfigure("Copy", state=("normal" if can_copy else "disabled"))
+        self._menu.entryconfigure("Cut", state=("normal" if can_copy else "disabled"))
+        self._menu.entryconfigure("Paste", state=("normal" if can_paste else "disabled"))
+        self._menu.entryconfigure("Delete", state=("normal" if can_delete else "disabled"))
+        self._menu.entryconfigure("Up", state=("normal" if can_up else "disabled"))
+        self._menu.entryconfigure("Down", state=("normal" if can_down else "disabled"))
+
+        try:
+            self._menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self._menu.grab_release()
+            except Exception:
+                pass
+
+    def _on_left_click(self, _event: tk.Event) -> None:
+        self._end_inline(commit=True)
+
+    def _on_double_click(self, event: tk.Event) -> None:
+        self._end_inline(commit=True)
+        try:
+            iid = self.tree.identify_row(event.y)
+            col = self.tree.identify_column(event.x)
+        except Exception:
+            return
+        if not iid or not col:
+            return
+        try:
+            idx = int(iid)
+        except Exception:
+            return
+        if idx < 0 or idx >= len(self.rows):
+            return
+        col_idx = int(col.replace("#", "")) - 1
+        cols = ["ord", "desc", "val"]
+        if col_idx < 0 or col_idx >= len(cols):
+            return
+        self._start_inline(iid, cols[col_idx])
+
+    def _start_inline(self, iid: str, col_name: str) -> None:
+        try:
+            bbox = self.tree.bbox(iid, col_name)
+        except Exception:
+            bbox = None
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        val = ""
+        try:
+            idx = int(iid)
+            val = self.rows[idx].get(col_name, "")
+        except Exception:
+            val = ""
+
+        ent = ttk.Entry(self.tree)
+        ent.insert(0, val)
+        ent.place(x=x, y=y, width=w, height=h)
+        self._inline = ent
+        self._inline_iid = iid
+        self._inline_col = col_name
+
+        ent.focus_set()
+        ent.select_range(0, tk.END)
+        ent.bind("<Return>", lambda _e: self._end_inline(commit=True))
+        ent.bind("<Escape>", lambda _e: self._end_inline(commit=False))
+        ent.bind("<FocusOut>", lambda _e: self._end_inline(commit=True))
+
+    def _end_inline(self, *, commit: bool) -> None:
+        if self._inline is None:
+            return
+        ent = self._inline
+        iid = self._inline_iid
+        col = self._inline_col
+
+        try:
+            value = ent.get()
+        except Exception:
+            value = ""
+
+        try:
+            ent.destroy()
+        except Exception:
+            pass
+        self._inline = None
+        self._inline_iid = None
+        self._inline_col = None
+
+        if not commit or iid is None or col is None:
+            return
+
+        try:
+            idx = int(iid)
+        except Exception:
+            return
+        if idx < 0 or idx >= len(self.rows):
+            return
+
+        if col == "ord":
+            v = (value or "").strip()
+            if v and not v.isdigit():
+                messagebox.showerror("Invalid", "ord must be an integer", parent=self)
+                return
+            value = v
+
+        self._push_undo()
+        self.rows[idx][col] = value
+        self.refresh()
+        try:
+            self.tree.selection_set(iid)
+        except Exception:
+            pass
+
+
+class NewEnumTypeDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        enum_type_ids: list[str],
+    ):
+        super().__init__(parent)
+        self.title("New EnumType")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: dict[str, str] | None = None
+        self._enum_type_ids = list(enum_type_ids or [])
+
+        self._id_internal_update = False
+        self._id_user_modified = False
+        self._last_suggested_id = ""
+
+        frm = ttk.Frame(self, padding=10)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        ttk.Label(frm, text="Create from").grid(row=0, column=0, sticky="w", pady=4)
+        self.var_base = tk.StringVar(value="(Blank)")
+        base_values = ["(Blank)"] + list(self._enum_type_ids)
+        cb_base = ttk.Combobox(frm, textvariable=self.var_base, values=base_values, width=62)
+        cb_base.grid(row=0, column=1, sticky="we", padx=(10, 0), pady=4)
+
+        ttk.Label(frm, text="id (file name)").grid(row=1, column=0, sticky="w", pady=4)
+        self.var_id = tk.StringVar(value="")
+        ent_id = ttk.Entry(frm, textvariable=self.var_id, width=64)
+        ent_id.grid(row=1, column=1, sticky="we", padx=(10, 0), pady=4)
+
+        def _mark_user_modified(*_args) -> None:
+            if self._id_internal_update:
+                return
+            self._id_user_modified = True
+
+        self.var_id.trace_add("write", _mark_user_modified)
+
+        hint = ttk.Label(frm, text="Tip: If you pick an existing EnumType, EnumVal + LangRef will be copied, then id updated.")
+        hint.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="Create", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+
+        def unique_copy_name(base: str) -> str:
+            existing = set(self._enum_type_ids)
+            candidate = f"{base}_copy"
+            if candidate not in existing:
+                return candidate
+            i = 2
+            while True:
+                candidate = f"{base}_copy{i}"
+                if candidate not in existing:
+                    return candidate
+                i += 1
+
+        def prefill(*_args) -> None:
+            base_id = self.var_base.get().strip()
+            if base_id == "(Blank)":
+                return
+
+            cur = self.var_id.get().strip()
+            if (not self._id_user_modified) or (not cur) or (cur == self._last_suggested_id):
+                suggested = unique_copy_name(base_id)
+                self._id_internal_update = True
+                try:
+                    self.var_id.set(suggested)
+                    self._last_suggested_id = suggested
+                finally:
+                    self._id_internal_update = False
+
+        self.var_base.trace_add("write", prefill)
+        prefill()
+
+        ent_id.focus_set()
+
+    def _ok(self) -> None:
+        new_id = (self.var_id.get() or "").strip()
+        base_id = (self.var_base.get() or "").strip()
+
+        if not new_id:
+            messagebox.showerror("Missing", "id is required", parent=self)
+            return
+
+        self._result = {
+            "base_id": base_id,
+            "id": new_id,
+        }
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, str] | None:
+        self.wait_window(self)
+        return self._result
+
+
 class LNodeTypeEditor(ttk.Frame):
     def __init__(
         self,
@@ -1737,7 +4128,7 @@ class LNodeTypeEditor(ttk.Frame):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=10, pady=10)
 
-        self.table = DOTable(self.nb, do_types=catalog.do_types)
+        self.table = DOTable(self.nb, do_types=catalog.do_types, get_do_type_preview=self._do_type_preview_text)
         self.nb.add(self.table, text="DO")
         self.table.on_rules = self._do_rules_for_index
 
@@ -2463,6 +4854,89 @@ class LNodeTypeEditor(ttk.Frame):
         cache[do_type_id] = list(names)
         return list(names)
 
+    def _do_type_preview_text(self, do_type_id: str) -> str:
+        """Return a readable XML snippet for the selected DOType."""
+        do_type_id = (do_type_id or "").strip()
+        if not do_type_id:
+            return ""
+
+        p = self._do_type_file_path(do_type_id)
+        if p is None:
+            return ""
+
+        try:
+            root = ET.parse(p).getroot()
+        except Exception:
+            return ""
+
+        ns = ""
+        if isinstance(root.tag, str) and root.tag.startswith("{"):
+            ns = root.tag.split("}", 1)[0][1:]
+
+        def q(tag: str) -> str:
+            return f"{{{ns}}}{tag}" if ns else tag
+
+        do_el = None
+        for cand in root.findall(f".//{q('DOType')}"):
+            if (cand.attrib.get("id") or "").strip() == do_type_id:
+                do_el = cand
+                break
+        if do_el is None:
+            return ""
+
+        def strip_ns(tag: str) -> str:
+            if not isinstance(tag, str):
+                return str(tag)
+            if "}" in tag:
+                return tag.split("}", 1)[1]
+            return tag
+
+        def fmt_attrs(attrib: dict) -> str:
+            if not attrib:
+                return ""
+            parts: list[str] = []
+            for k in sorted(attrib.keys()):
+                v = attrib.get(k)
+                if v is None:
+                    continue
+                parts.append(f'{k}="{v}"')
+            return (" " + " ".join(parts)) if parts else ""
+
+        max_lines = 600
+        lines: list[str] = []
+
+        def render(el: ET.Element, level: int = 0) -> None:
+            if len(lines) >= max_lines:
+                return
+            tag = strip_ns(el.tag)
+            attrs = fmt_attrs(getattr(el, "attrib", {}) or {})
+            children = list(el)
+            text = (el.text or "").strip()
+            indent = "  " * level
+
+            if not children and not text:
+                lines.append(f"{indent}<{tag}{attrs} />")
+                return
+
+            if not children and text:
+                lines.append(f"{indent}<{tag}{attrs}>{text}</{tag}>")
+                return
+
+            lines.append(f"{indent}<{tag}{attrs}>")
+            if text:
+                lines.append(f"{indent}  {text}")
+            for ch in children:
+                if len(lines) >= max_lines:
+                    break
+                render(ch, level + 1)
+            lines.append(f"{indent}</{tag}>")
+
+        render(do_el, 0)
+        if len(lines) >= max_lines:
+            lines = lines[: max_lines - 1] + ["...(truncated)..."]
+
+        return "\n".join(lines) + "\n"
+
     def _do_type_cdc(self, do_type_id: str) -> str:
         """Return DOType@cdc for a DOType id (uppercased), or ""."""
         do_type_id = (do_type_id or "").strip()
@@ -2566,6 +5040,13 @@ class LNodeTypeEditor(ttk.Frame):
         if not enum_dir.exists():
             cache[enum_type_id] = None
             return None
+
+        # Fast path: many EnumType files are named exactly as their id.
+        # This avoids depending on the full-folder index scan.
+        direct = enum_dir / f"{enum_type_id}.xml"
+        if direct.is_file():
+            cache[enum_type_id] = direct
+            return direct
 
         index = getattr(self, "_enum_type_file_index", None)
         if index is None:
@@ -2689,6 +5170,89 @@ class LNodeTypeEditor(ttk.Frame):
         out = [t for _o, t in items]
         cache[enum_type_id] = list(out)
         return list(out)
+
+    def _enum_type_preview_text(self, enum_type_id: str) -> str:
+        """Return a readable XML snippet for the selected EnumType."""
+        enum_type_id = (enum_type_id or "").strip()
+        if not enum_type_id:
+            return ""
+
+        p = self._enum_type_file_path(enum_type_id)
+        if p is None:
+            return ""
+
+        try:
+            root = ET.parse(p).getroot()
+        except Exception:
+            return ""
+
+        ns = ""
+        if isinstance(root.tag, str) and root.tag.startswith("{"):
+            ns = root.tag.split("}", 1)[0][1:]
+
+        def q(tag: str) -> str:
+            return f"{{{ns}}}{tag}" if ns else tag
+
+        enum_el = None
+        for cand in root.findall(f".//{q('EnumType')}"):
+            if (cand.attrib.get("id") or "").strip() == enum_type_id:
+                enum_el = cand
+                break
+        if enum_el is None:
+            return ""
+
+        def strip_ns(tag: str) -> str:
+            if not isinstance(tag, str):
+                return str(tag)
+            if "}" in tag:
+                return tag.split("}", 1)[1]
+            return tag
+
+        def fmt_attrs(attrib: dict) -> str:
+            if not attrib:
+                return ""
+            parts: list[str] = []
+            for k in sorted(attrib.keys()):
+                v = attrib.get(k)
+                if v is None:
+                    continue
+                parts.append(f'{k}="{v}"')
+            return (" " + " ".join(parts)) if parts else ""
+
+        max_lines = 400
+        lines: list[str] = []
+
+        def render(el: ET.Element, level: int = 0) -> None:
+            if len(lines) >= max_lines:
+                return
+            tag = strip_ns(el.tag)
+            attrs = fmt_attrs(getattr(el, "attrib", {}) or {})
+            children = list(el)
+            text = (el.text or "").strip()
+            indent = "  " * level
+
+            if not children and not text:
+                lines.append(f"{indent}<{tag}{attrs} />")
+                return
+
+            if not children and text:
+                lines.append(f"{indent}<{tag}{attrs}>{text}</{tag}>")
+                return
+
+            lines.append(f"{indent}<{tag}{attrs}>")
+            if text:
+                lines.append(f"{indent}  {text}")
+            for ch in children:
+                if len(lines) >= max_lines:
+                    break
+                render(ch, level + 1)
+            lines.append(f"{indent}</{tag}>")
+
+        render(enum_el, 0)
+        if len(lines) >= max_lines:
+            lines = lines[: max_lines - 1] + ["...(truncated)..."]
+
+        return "\n".join(lines) + "\n"
 
     def _enum_options_for_condition_do(self, do_name: str) -> list[str]:
         """If the condition DO resolves to an Enum leaf (setVal / setMag.f/i), return options."""
@@ -5028,10 +7592,71 @@ class MainWindow(tk.Tk):
         self.body.pack(fill="both", expand=True)
 
         self.notebook: ttk.Notebook | None = None
+        self.tab_enum_type: ttk.Frame | None = None
+        self.tab_do_template: ttk.Frame | None = None
         self.tab_template: ttk.Frame | None = None
         self.tab_instance: ttk.Frame | None = None
         self.tab_application: ttk.Frame | None = None
         self.instance_editor: LNInstanceEditorFrame | None = None
+
+        # EnumType editor state
+        self._enum_file_path: Path | None = None
+        self._enum_root: ET.Element | None = None
+        self._enum_enumtype: ET.Element | None = None
+        self._enum_preserved_before: list[ET.Element] = []
+        self._enum_preserved_after: list[ET.Element] = []
+        self._enum_id: tk.StringVar | None = None
+        self._enum_table: "EnumValTable" | None = None
+
+        # EnumType: Language reference UI state
+        self._enum_details_nb: ttk.Notebook | None = None
+        self.var_enum_lang_filter: tk.StringVar | None = None
+        self.lbl_enum_lang_match: ttk.Label | None = None
+        self._enum_lang_tree: ttk.Treeview | None = None
+        self._enum_lang_rows_all: list[dict[str, str]] = []
+        self._enum_lang_rows_filtered: list[dict[str, str]] = []
+        self._enum_lang_inline: ttk.Entry | None = None
+        self._enum_lang_inline_iid: str | None = None
+
+        # EnumType "Search" UI state
+        self._all_enum_files: list[str] = []
+        self.var_enum_filter: tk.StringVar | None = None
+        self.var_enum_selected: tk.StringVar | None = None
+        self.cb_enum: ttk.Combobox | None = None
+        self.lbl_enum_match: ttk.Label | None = None
+
+        # DO template editor state
+        self._do_tmpl_file_path: Path | None = None
+        self._do_tmpl_root: ET.Element | None = None
+        self._do_tmpl_dotype: ET.Element | None = None
+        self._do_tmpl_child_specs: list[tuple[str, object]] = []
+        self._do_tmpl_da_elements: list[ET.Element] = []
+
+        self._do_tmpl_id: tk.StringVar | None = None
+        self._do_tmpl_cdc: tk.StringVar | None = None
+        self._do_tmpl_desc: tk.StringVar | None = None
+
+        self._do_tmpl_cdc_cb: ttk.Combobox | None = None
+
+        self._do_tmpl_private_enabled: tk.BooleanVar | None = None
+
+        self._do_tmpl_table: "DATable" | None = None
+
+        # DO template: Language reference UI state
+        self._do_tmpl_details_nb: ttk.Notebook | None = None
+        self.var_do_tmpl_lang_filter: tk.StringVar | None = None
+        self.lbl_do_tmpl_lang_match: ttk.Label | None = None
+        self._do_tmpl_lang_tree: ttk.Treeview | None = None
+        self._do_tmpl_lang_rows_all: list[dict[str, str]] = []
+        self._do_tmpl_lang_rows_filtered: list[dict[str, str]] = []
+        self._do_tmpl_lang_inline: ttk.Entry | None = None
+        self._do_tmpl_lang_inline_iid: str | None = None
+
+        self._all_do_tmpl_files: list[str] = []
+        self.var_do_tmpl_filter: tk.StringVar | None = None
+        self.var_do_tmpl_selected: tk.StringVar | None = None
+        self.cb_do_tmpl: ttk.Combobox | None = None
+        self.lbl_do_tmpl_match: ttk.Label | None = None
 
         # Application editor state
         self._app_file_path: Path | None = None
@@ -5076,10 +7701,18 @@ class MainWindow(tk.Tk):
         self._app_ctx_table: str | None = None
         self._app_ctx_menu: tk.Menu | None = None
 
+        # Application "Search" UI state
+        self._all_app_files: list[str] = []
+        self.var_app_filter: tk.StringVar | None = None
+        self.var_app_selected: tk.StringVar | None = None
+        self.cb_app: ttk.Combobox | None = None
+        self.lbl_app_match: ttk.Label | None = None
+
         self._set_status("Scanning IEC 61850 types...")
         self.update_idletasks()
 
         iec61850_dir = self.workspace_root / "ep7_datamodel" / "datamodel" / "iec61850"
+        self.iec61850_dir = iec61850_dir
         if not iec61850_dir.exists():
             messagebox.showerror(
                 "Missing",
@@ -5099,12 +7732,282 @@ class MainWindow(tk.Tk):
         self.notebook = ttk.Notebook(self.body)
         self.notebook.pack(fill="both", expand=True)
 
+        self.tab_enum_type = ttk.Frame(self.notebook)
+        self.tab_do_template = ttk.Frame(self.notebook)
         self.tab_template = ttk.Frame(self.notebook)
         self.tab_instance = ttk.Frame(self.notebook)
         self.tab_application = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_enum_type, text="Enum")
+        self.notebook.add(self.tab_do_template, text="DO template")
         self.notebook.add(self.tab_template, text="LN template")
         self.notebook.add(self.tab_instance, text="LN instance")
         self.notebook.add(self.tab_application, text="Application")
+
+        # EnumType tab UI (files under iec61850/EnumType)
+        if self.tab_enum_type is not None:
+            toolbar = ttk.Frame(self.tab_enum_type, padding=(10, 10, 10, 0))
+            toolbar.pack(fill="x")
+            ttk.Button(toolbar, text="New", command=self._new_enum_type_dialog).pack(side="left")
+            ttk.Button(toolbar, text="Open", command=self._open_enum_type).pack(side="left", padx=(8, 0))
+            ttk.Button(toolbar, text="Save", command=self._save_enum_type).pack(side="left", padx=(8, 0))
+            ttk.Button(toolbar, text="Save As", command=self._save_enum_type_as).pack(side="left", padx=(8, 0))
+
+            row2 = ttk.Frame(self.tab_enum_type, padding=(10, 8, 10, 0))
+            row2.pack(fill="x")
+            ttk.Label(row2, text="Search").pack(side="left")
+            self.var_enum_filter = tk.StringVar(value="")
+            ent_filter = ttk.Entry(row2, textvariable=self.var_enum_filter, width=28)
+            ent_filter.pack(side="left", padx=(8, 0))
+
+            self.var_enum_selected = tk.StringVar(value="")
+            self.cb_enum = ttk.Combobox(row2, textvariable=self.var_enum_selected, values=[], width=66)
+            self.cb_enum.pack(side="left", padx=(10, 0))
+            ttk.Button(row2, text="Load", command=self._open_enum_type_from_search).pack(side="left", padx=(8, 0))
+
+            self.lbl_enum_match = ttk.Label(row2, text="")
+            self.lbl_enum_match.pack(side="left", padx=(10, 0))
+
+            body = ttk.Frame(self.tab_enum_type, padding=10)
+            body.pack(fill="both", expand=True)
+            body.columnconfigure(0, weight=1)
+            body.rowconfigure(1, weight=1)
+
+            meta = ttk.LabelFrame(body, text="EnumType", padding=10)
+            meta.grid(row=0, column=0, sticky="we")
+            meta.columnconfigure(1, weight=1)
+
+            self._enum_id = tk.StringVar(value="")
+            ttk.Label(meta, text="id").grid(row=0, column=0, sticky="w")
+            ttk.Entry(meta, textvariable=self._enum_id, width=62).grid(row=0, column=1, sticky="we", padx=(6, 0))
+
+            self._enum_details_nb = ttk.Notebook(body)
+            self._enum_details_nb.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+            try:
+                self._enum_details_nb.bind("<<NotebookTabChanged>>", lambda _e: self._on_enum_details_tab_changed())
+            except Exception:
+                pass
+
+            tab_vals = ttk.Frame(self._enum_details_nb)
+            tab_lang = ttk.Frame(self._enum_details_nb)
+            self._enum_details_nb.add(tab_vals, text="EnumVal")
+            self._enum_details_nb.add(tab_lang, text="Language reference")
+
+            self._enum_table = EnumValTable(tab_vals)
+            self._enum_table.pack(fill="both", expand=True)
+
+            langbox = ttk.LabelFrame(tab_lang, text="Language reference (<Private type=...LangRef>)", padding=8)
+            langbox.pack(fill="both", expand=True)
+            langbox.columnconfigure(0, weight=1)
+            langbox.rowconfigure(1, weight=1)
+
+            lrow = ttk.Frame(langbox)
+            lrow.grid(row=0, column=0, sticky="we")
+            lrow.columnconfigure(1, weight=1)
+            ttk.Label(lrow, text="Filter").grid(row=0, column=0, sticky="w")
+            self.var_enum_lang_filter = tk.StringVar(value="")
+            ent_lfilter = ttk.Entry(lrow, textvariable=self.var_enum_lang_filter)
+            ent_lfilter.grid(row=0, column=1, sticky="we", padx=(8, 0))
+            ttk.Button(lrow, text="Clear", command=self._clear_enum_lang_filter).grid(row=0, column=2, padx=(8, 0))
+
+            self.lbl_enum_lang_match = ttk.Label(lrow, text="")
+            self.lbl_enum_lang_match.grid(row=0, column=3, sticky="w", padx=(10, 0))
+
+            self._enum_lang_tree = ttk.Treeview(langbox, columns=("name", "id", "desc"), show="headings", selectmode="browse")
+            self._enum_lang_tree.heading("name", text="EnumVal")
+            self._enum_lang_tree.heading("id", text="LangRef ID")
+            self._enum_lang_tree.heading("desc", text="desc")
+            self._enum_lang_tree.column("name", width=220, anchor="w")
+            self._enum_lang_tree.column("id", width=140, anchor="w")
+            self._enum_lang_tree.column("desc", width=700, anchor="w")
+            self._enum_lang_tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+
+            lvsb = ttk.Scrollbar(langbox, orient="vertical", command=self._enum_lang_tree.yview)
+            lhsb = ttk.Scrollbar(langbox, orient="horizontal", command=self._enum_lang_tree.xview)
+            self._enum_lang_tree.configure(yscrollcommand=lvsb.set, xscrollcommand=lhsb.set)
+            lvsb.grid(row=1, column=1, sticky="ns", pady=(8, 0))
+            lhsb.grid(row=2, column=0, sticky="we")
+
+            try:
+                self._enum_lang_tree.bind("<Double-1>", self._on_enum_lang_double_click)
+                self._enum_lang_tree.bind("<Button-1>", self._on_enum_lang_left_click)
+            except Exception:
+                pass
+
+            try:
+                if self.var_enum_lang_filter is not None:
+                    self.var_enum_lang_filter.trace_add("write", lambda *_args: self._apply_enum_lang_filter())
+            except Exception:
+                pass
+
+            try:
+                self.cb_enum.bind("<Return>", lambda _e: self._open_enum_type_from_search())
+            except Exception:
+                pass
+
+            self._refresh_enum_search_list(select_rel=None)
+
+        # DO template tab UI (raw XML editor for files under iec61850/DOType)
+        if self.tab_do_template is not None:
+            toolbar = ttk.Frame(self.tab_do_template, padding=(10, 10, 10, 0))
+            toolbar.pack(fill="x")
+            ttk.Button(toolbar, text="New", command=self._new_do_template_dialog).pack(side="left")
+            ttk.Button(toolbar, text="Open", command=self._open_do_template).pack(side="left", padx=(8, 0))
+            ttk.Button(toolbar, text="Save", command=self._save_do_template).pack(side="left", padx=(8, 0))
+            ttk.Button(toolbar, text="Save As", command=self._save_do_template_as).pack(side="left", padx=(8, 0))
+
+            row2 = ttk.Frame(self.tab_do_template, padding=(10, 8, 10, 0))
+            row2.pack(fill="x")
+            ttk.Label(row2, text="Search").pack(side="left")
+            self.var_do_tmpl_filter = tk.StringVar(value="")
+            ent_filter = ttk.Entry(row2, textvariable=self.var_do_tmpl_filter, width=28)
+            ent_filter.pack(side="left", padx=(8, 0))
+
+            self.var_do_tmpl_selected = tk.StringVar(value="")
+            self.cb_do_tmpl = ttk.Combobox(row2, textvariable=self.var_do_tmpl_selected, values=[], width=66)
+            self.cb_do_tmpl.pack(side="left", padx=(10, 0))
+            ttk.Button(row2, text="Load", command=self._open_do_template_from_search).pack(side="left", padx=(8, 0))
+
+            self.lbl_do_tmpl_match = ttk.Label(row2, text="")
+            self.lbl_do_tmpl_match.pack(side="left", padx=(10, 0))
+
+            body = ttk.Frame(self.tab_do_template, padding=10)
+            body.pack(fill="both", expand=True)
+            body.columnconfigure(0, weight=1)
+            body.rowconfigure(1, weight=1)
+
+            meta = ttk.LabelFrame(body, text="DOType", padding=10)
+            meta.grid(row=0, column=0, sticky="we")
+            for col in (1, 3, 5):
+                meta.columnconfigure(col, weight=1)
+
+            self._do_tmpl_id = tk.StringVar(value="")
+            self._do_tmpl_cdc = tk.StringVar(value="")
+            self._do_tmpl_desc = tk.StringVar(value="")
+
+            ttk.Label(meta, text="id").grid(row=0, column=0, sticky="w")
+            ttk.Entry(meta, textvariable=self._do_tmpl_id, width=42).grid(row=0, column=1, sticky="we", padx=(6, 12))
+            ttk.Label(meta, text="cdc").grid(row=0, column=2, sticky="w")
+            self._do_tmpl_cdc_cb = ttk.Combobox(
+                meta,
+                textvariable=self._do_tmpl_cdc,
+                values=self._get_do_cdc_types(),
+                width=12,
+            )
+            try:
+                self._do_tmpl_cdc_cb.configure(state="readonly")
+            except Exception:
+                pass
+            self._do_tmpl_cdc_cb.grid(row=0, column=3, sticky="w", padx=(6, 12))
+            ttk.Label(meta, text="desc").grid(row=0, column=4, sticky="w")
+            ttk.Entry(meta, textvariable=self._do_tmpl_desc, width=52).grid(row=0, column=5, sticky="we", padx=(6, 0))
+
+            self._do_tmpl_private_enabled = tk.BooleanVar(value=False)
+            ttk.Checkbutton(
+                meta,
+                text="Private",
+                variable=self._do_tmpl_private_enabled,
+                command=self._on_do_tmpl_private_toggle,
+            ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+
+            # Details notebook: DA + Language reference
+            self._do_tmpl_details_nb = ttk.Notebook(body)
+            self._do_tmpl_details_nb.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+            try:
+                self._do_tmpl_details_nb.bind(
+                    "<<NotebookTabChanged>>",
+                    lambda _e: self._on_do_tmpl_details_tab_changed(),
+                )
+            except Exception:
+                pass
+
+            tab_da = ttk.Frame(self._do_tmpl_details_nb)
+            tab_lang = ttk.Frame(self._do_tmpl_details_nb)
+            self._do_tmpl_details_nb.add(tab_da, text="DA")
+            self._do_tmpl_details_nb.add(tab_lang, text="Language reference")
+
+            self._do_tmpl_table = DATable(tab_da)
+            self._do_tmpl_table.pack(fill="both", expand=True)
+
+            # Language reference page
+            langbox = ttk.LabelFrame(tab_lang, text="Language reference (<Private type=...LangRef>)", padding=8)
+            langbox.pack(fill="both", expand=True)
+            langbox.columnconfigure(0, weight=1)
+            langbox.rowconfigure(1, weight=1)
+
+            lrow = ttk.Frame(langbox)
+            lrow.grid(row=0, column=0, sticky="we")
+            lrow.columnconfigure(1, weight=1)
+            ttk.Label(lrow, text="Filter").grid(row=0, column=0, sticky="w")
+            self.var_do_tmpl_lang_filter = tk.StringVar(value="")
+            ent_lfilter = ttk.Entry(lrow, textvariable=self.var_do_tmpl_lang_filter)
+            ent_lfilter.grid(row=0, column=1, sticky="we", padx=(8, 0))
+            ttk.Button(lrow, text="Clear", command=self._clear_do_tmpl_lang_filter).grid(row=0, column=2, padx=(8, 0))
+
+            self.lbl_do_tmpl_lang_match = ttk.Label(lrow, text="")
+            self.lbl_do_tmpl_lang_match.grid(row=0, column=3, sticky="w", padx=(10, 0))
+
+            self._do_tmpl_lang_tree = ttk.Treeview(
+                langbox,
+                columns=("name", "id", "desc"),
+                show="headings",
+                selectmode="browse",
+            )
+            self._do_tmpl_lang_tree.heading("name", text="DA")
+            self._do_tmpl_lang_tree.heading("id", text="LangRef ID")
+            self._do_tmpl_lang_tree.heading("desc", text="desc")
+            self._do_tmpl_lang_tree.column("name", width=220, anchor="w")
+            self._do_tmpl_lang_tree.column("id", width=140, anchor="w")
+            self._do_tmpl_lang_tree.column("desc", width=700, anchor="w")
+            self._do_tmpl_lang_tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+
+            lvsb = ttk.Scrollbar(langbox, orient="vertical", command=self._do_tmpl_lang_tree.yview)
+            lhsb = ttk.Scrollbar(langbox, orient="horizontal", command=self._do_tmpl_lang_tree.xview)
+            self._do_tmpl_lang_tree.configure(yscrollcommand=lvsb.set, xscrollcommand=lhsb.set)
+            lvsb.grid(row=1, column=1, sticky="ns", pady=(8, 0))
+            lhsb.grid(row=2, column=0, sticky="we")
+
+            try:
+                self._do_tmpl_lang_tree.bind("<Double-1>", self._on_do_tmpl_lang_double_click)
+                self._do_tmpl_lang_tree.bind("<Button-1>", self._on_do_tmpl_lang_left_click)
+            except Exception:
+                pass
+
+            try:
+                if self.var_do_tmpl_lang_filter is not None:
+                    self.var_do_tmpl_lang_filter.trace_add("write", lambda *_args: self._apply_do_tmpl_lang_filter())
+            except Exception:
+                pass
+
+            # Wire EnumType providers for DO template Enum editing.
+            try:
+                self._do_tmpl_table.get_enum_type_ids = lambda: list(self.catalog.enum_types)
+                # EnumType/EnumVal parsing helpers live on LNodeTypeEditor.
+                # The DO template tab is constructed before `self.editor` is created,
+                # so resolve it lazily at call time.
+                self._do_tmpl_table.get_enum_values = (
+                    lambda enum_id: (
+                        self.editor._enum_values_for_enum_type(enum_id)
+                        if getattr(self, "editor", None) is not None
+                        else []
+                    )
+                )
+                self._do_tmpl_table.get_enum_preview = (
+                    lambda enum_id: (
+                        self.editor._enum_type_preview_text(enum_id)
+                        if getattr(self, "editor", None) is not None
+                        else ""
+                    )
+                )
+                self._do_tmpl_table.get_btype_options = lambda: self._all_btype_options()
+            except Exception:
+                pass
+
+            try:
+                self.cb_do_tmpl.bind("<Return>", lambda _e: self._open_do_template_from_search())
+            except Exception:
+                pass
+
+            self._refresh_do_template_search_list(select_rel=None)
 
         self.editor = LNodeTypeEditor(
             self.tab_template,
@@ -5132,6 +8035,31 @@ class MainWindow(tk.Tk):
             ttk.Button(toolbar, text="Open", command=self._open_application).pack(side="left", padx=(8, 0))
             ttk.Button(toolbar, text="Save", command=self._save_application).pack(side="left", padx=(8, 0))
             ttk.Button(toolbar, text="Save As", command=self._save_application_as).pack(side="left", padx=(8, 0))
+
+            row2 = ttk.Frame(self.tab_application, padding=(10, 8, 10, 0))
+            row2.pack(fill="x")
+            ttk.Label(row2, text="Search").pack(side="left")
+            self.var_app_filter = tk.StringVar(value="")
+            ent_filter = ttk.Entry(row2, textvariable=self.var_app_filter, width=28)
+            ent_filter.pack(side="left", padx=(8, 0))
+
+            self.var_app_selected = tk.StringVar(value="")
+            self.cb_app = ttk.Combobox(row2, textvariable=self.var_app_selected, values=[], width=66)
+            self.cb_app.pack(side="left", padx=(10, 0))
+            ttk.Button(row2, text="Load", command=self._open_application_from_search).pack(side="left", padx=(8, 0))
+
+            self.lbl_app_match = ttk.Label(row2, text="")
+            self.lbl_app_match.pack(side="left", padx=(10, 0))
+
+            try:
+                self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
+            except Exception:
+                pass
+
+            try:
+                self.cb_app.bind("<Return>", lambda _e: self._open_application_from_search())
+            except Exception:
+                pass
 
             body = ttk.Frame(self.tab_application, padding=10)
             body.pack(fill="both", expand=True)
@@ -5220,6 +8148,9 @@ class MainWindow(tk.Tk):
 
             # Hook toolbars + context menus
             self._init_app_table_ui("input", self._app_tv_input)
+
+            # Populate application list for search combobox.
+            self._refresh_application_search_list(select_rel=None)
             self._init_app_table_ui("setting", self._app_tv_setting)
             self._init_app_table_ui("output", self._app_tv_output)
             self._init_app_table_ui("conf", self._app_tv_conf)
@@ -5266,6 +8197,77 @@ class MainWindow(tk.Tk):
             f"Loaded: DOType={len(self.catalog.do_types)}  DAType={len(self.catalog.da_types)}  EnumType={len(self.catalog.enum_types)}  LNodeType={len(self.catalog.lnode_types)}"
         )
 
+    def _all_btype_options(self) -> list[str]:
+        """Return a stable list of bType values found in the datamodel.
+
+        This is used to populate the DO template editor bType dropdown even when
+        the current file/new template doesn't contain any bType values yet.
+        """
+        cache = getattr(self, "_btype_options_cache", None)
+        if cache is not None:
+            return list(cache)
+
+        def add_value(mapping: dict[str, str], raw: str) -> None:
+            v = (raw or "").strip()
+            if not v:
+                return
+            k = v.upper()
+            # Prefer common casing for Enum.
+            if k == "ENUM":
+                v = "Enum"
+            if k not in mapping:
+                mapping[k] = v
+
+        found: dict[str, str] = {}
+        pattern = re.compile(r"\bbType=\"([^\"]+)\"", flags=re.IGNORECASE)
+        for folder_name in ("DOType", "DAType"):
+            base = self.iec61850_dir / folder_name
+            if not base.exists():
+                continue
+            for p in base.rglob("*.xml"):
+                try:
+                    txt = p.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                for m in pattern.finditer(txt):
+                    add_value(found, m.group(1))
+
+        # If scanning fails for any reason, keep a small safe fallback.
+        if not found:
+            for v in ("Enum", "BOOLEAN", "INT32", "FLOAT32", "FLOAT64", "Quality", "Timestamp", "VisString255"):
+                add_value(found, v)
+
+        preferred = [
+            "BOOLEAN",
+            "INT8",
+            "INT16",
+            "INT32",
+            "INT64",
+            "INT8U",
+            "INT16U",
+            "INT32U",
+            "INT64U",
+            "FLOAT32",
+            "FLOAT64",
+            "ENUM",
+            "QUALITY",
+            "TIMESTAMP",
+        ]
+
+        preferred_out: list[str] = []
+        used: set[str] = set()
+        for k in preferred:
+            if k in found:
+                preferred_out.append(found[k])
+                used.add(k)
+
+        rest = [v for k, v in found.items() if k not in used]
+        rest.sort(key=lambda s: (s or "").lower())
+        out = preferred_out + rest
+
+        setattr(self, "_btype_options_cache", list(out))
+        return list(out)
+
     def _create_instance_with_template(self, model: LNodeTypeModel) -> None:
         if self.instance_editor is None:
             return
@@ -5281,10 +8283,14 @@ class MainWindow(tk.Tk):
     def _new_shortcut(self) -> None:
         tab = self._active_tab()
         if tab == 0:
+            self._new_enum_type_dialog()
+        elif tab == 1:
+            self._new_do_template_dialog()
+        elif tab == 2:
             self.editor.new_template()
             if self.editor.model is not None:
                 self._set_status(f"Created: {os.fspath(self.editor.model.info.file_path)}")
-        elif tab == 1:
+        elif tab == 3:
             if self.instance_editor is None:
                 return
             self.instance_editor.new_instance()
@@ -5294,10 +8300,14 @@ class MainWindow(tk.Tk):
     def _open_shortcut(self) -> None:
         tab = self._active_tab()
         if tab == 0:
+            self._open_enum_type()
+        elif tab == 1:
+            self._open_do_template()
+        elif tab == 2:
             self.editor.open_template()
             if self.editor.model is not None:
                 self._set_status(f"Opened: {os.fspath(self.editor.model.info.file_path)}")
-        elif tab == 1:
+        elif tab == 3:
             if self.instance_editor is None:
                 return
             self.instance_editor.open_dialog()
@@ -5309,10 +8319,14 @@ class MainWindow(tk.Tk):
     def _save_shortcut(self) -> None:
         tab = self._active_tab()
         if tab == 0:
+            self._save_enum_type()
+        elif tab == 1:
+            self._save_do_template()
+        elif tab == 2:
             self.editor.save_current()
             if self.editor.model is not None:
                 self._set_status(f"Saved: {os.fspath(self.editor.model.info.file_path)}")
-        elif tab == 1:
+        elif tab == 3:
             if self.instance_editor is None:
                 return
             self.instance_editor.save()
@@ -5324,10 +8338,14 @@ class MainWindow(tk.Tk):
     def _save_as_shortcut(self) -> None:
         tab = self._active_tab()
         if tab == 0:
+            self._save_enum_type_as()
+        elif tab == 1:
+            self._save_do_template_as()
+        elif tab == 2:
             self.editor.save_as()
             if self.editor.model is not None:
                 self._set_status(f"Saved As: {os.fspath(self.editor.model.info.file_path)}")
-        elif tab == 1:
+        elif tab == 3:
             if self.instance_editor is None:
                 return
             self.instance_editor.save_as()
@@ -5338,6 +8356,772 @@ class MainWindow(tk.Tk):
 
     def _application_dir(self) -> Path:
         return self.workspace_root / "ep7_datamodel" / "datamodel" / "application"
+
+    def _do_type_dir(self) -> Path:
+        return self.workspace_root / "ep7_datamodel" / "datamodel" / "iec61850" / "DOType"
+
+    def _enum_type_dir(self) -> Path:
+        return self.workspace_root / "ep7_datamodel" / "datamodel" / "iec61850" / "EnumType"
+
+    def _enum_langref_private_type(self) -> str:
+        return "SchneiderElectric-PowerLogic-LangRef"
+
+    def _refresh_enum_search_list(self, *, select_rel: str | None) -> None:
+        if self.cb_enum is None or self.var_enum_selected is None or self.lbl_enum_match is None:
+            return
+        enum_dir = self._enum_type_dir()
+        self._all_enum_files = self._scan_xml_relpaths(enum_dir)
+
+        def apply_filter(*_args) -> None:
+            raw = ""
+            if self.var_enum_filter is not None:
+                raw = self.var_enum_filter.get().strip().lower()
+            if not raw:
+                filtered = list(self._all_enum_files)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    lv = (v or "").lower()
+                    return all(t in lv for t in tokens)
+
+                filtered = [v for v in self._all_enum_files if ok(v)]
+
+            cur = (self.var_enum_selected.get() or "").strip()
+            if cur and cur not in filtered:
+                filtered = [cur] + filtered
+
+            max_show = 1200
+            shown = filtered[:max_show]
+            self.cb_enum["values"] = shown
+            suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
+            self.lbl_enum_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
+
+        if getattr(self, "_enum_apply_filter", None) is None:
+            if self.var_enum_filter is not None:
+                self.var_enum_filter.trace_add("write", apply_filter)
+            setattr(self, "_enum_apply_filter", apply_filter)
+        else:
+            apply_filter = getattr(self, "_enum_apply_filter")
+
+        if select_rel:
+            try:
+                self.var_enum_selected.set(select_rel)
+            except Exception:
+                pass
+        apply_filter()
+
+    def _new_enum_type_dialog(self) -> None:
+        if self._enum_table is None or self._enum_id is None:
+            return
+        enum_ids = list(getattr(self, "catalog", None).enum_types) if getattr(self, "catalog", None) is not None else []
+        dlg = NewEnumTypeDialog(self, enum_type_ids=enum_ids)
+        res = dlg.show()
+        if not res:
+            return
+        base_id = (res.get("base_id") or "").strip()
+        new_id = (res.get("id") or "").strip()
+
+        if base_id and base_id != "(Blank)":
+            enum_dir = self._enum_type_dir()
+            src_path = self._find_type_file(kind_dir=enum_dir, type_id=base_id)
+            if src_path is None:
+                messagebox.showerror("Missing", f"Source EnumType not found: {base_id}", parent=self)
+                return
+            self._open_enum_type_from_path(src_path)
+            self._enum_file_path = None
+            if self.var_enum_selected is not None:
+                try:
+                    self.var_enum_selected.set("")
+                except Exception:
+                    pass
+        else:
+            self._new_enum_type()
+
+        try:
+            self._enum_id.set(new_id)
+        except Exception:
+            pass
+
+        self._set_status(
+            (f"New EnumType created from {base_id} (unsaved)" if base_id and base_id != "(Blank)" else "New EnumType created (unsaved)")
+        )
+
+    def _new_enum_type(self) -> None:
+        if self._enum_table is None or self._enum_id is None:
+            return
+        ns = SCL_NS
+        root = ET.Element(_q(ns, "SCL"))
+        enum_el = ET.SubElement(root, _q(ns, "EnumType"))
+        enum_el.attrib["id"] = ""
+
+        self._enum_root = root
+        self._enum_enumtype = enum_el
+        self._enum_preserved_before = []
+        self._enum_preserved_after = []
+
+        self._enum_id.set("")
+        self._enum_table.set_rows([])
+        self._enum_file_path = None
+        try:
+            self._refresh_enum_language_reference()
+        except Exception:
+            pass
+
+    def _open_enum_type(self) -> None:
+        enum_dir = self._enum_type_dir()
+        initialdir = enum_dir if enum_dir.exists() else self.workspace_root
+        target = filedialog.askopenfilename(
+            parent=self,
+            title="Open EnumType file",
+            initialdir=os.fspath(initialdir),
+            filetypes=[("XML", "*.xml"), ("All", "*")],
+        )
+        if not target:
+            return
+        self._open_enum_type_from_path(Path(target))
+
+    def _open_enum_type_from_search(self) -> None:
+        if self.var_enum_selected is None:
+            return
+        rel = (self.var_enum_selected.get() or "").strip()
+        if not rel:
+            return
+        enum_dir = self._enum_type_dir()
+        target = enum_dir / rel
+        if not target.exists():
+            messagebox.showerror("Missing", f"File not found:\n\n{os.fspath(target)}", parent=self)
+            return
+        self._open_enum_type_from_path(target)
+
+    def _open_enum_type_from_path(self, path: Path) -> None:
+        path = Path(path)
+        if self._enum_table is None or self._enum_id is None:
+            return
+
+        try:
+            tree = ET.parse(path)
+            root = tree.getroot()
+        except Exception as e:
+            messagebox.showerror("Open failed", str(e), parent=self)
+            return
+
+        ns = ""
+        if isinstance(root.tag, str) and root.tag.startswith("{"):
+            ns = root.tag.split("}", 1)[0][1:]
+        ns = ns or SCL_NS
+
+        enum_el = None
+        for cand in root.iter():
+            if not isinstance(cand.tag, str):
+                continue
+            if _local_name(cand.tag) == "EnumType":
+                enum_el = cand
+                break
+        if enum_el is None:
+            messagebox.showerror("Invalid", "No <EnumType> found in file", parent=self)
+            return
+
+        preserved_before: list[ET.Element] = []
+        preserved_after: list[ET.Element] = []
+        rows: list[dict[str, str]] = []
+
+        # Collect EnumVal elements and any non-LangRef extras.
+        seen_first_enumval = False
+        lang_privs: list[ET.Element] = []
+        for ch in list(enum_el):
+            if not isinstance(ch.tag, str):
+                (preserved_after if seen_first_enumval else preserved_before).append(_deepcopy_et_element(ch))
+                continue
+            ln = _local_name(ch.tag)
+            if ln == "EnumVal":
+                seen_first_enumval = True
+                rows.append(
+                    {
+                        "ord": (ch.attrib.get("ord") or ""),
+                        "desc": (ch.attrib.get("desc") or ""),
+                        "val": (ch.text or ""),
+                        "langRef": "",
+                    }
+                )
+                continue
+            if ln == "Private" and (ch.attrib.get("type") or "").strip() == self._enum_langref_private_type():
+                lang_privs.append(ch)
+                continue
+            (preserved_after if seen_first_enumval else preserved_before).append(_deepcopy_et_element(ch))
+
+        # Map LangRef privates to rows by index (files typically store one Private per EnumVal).
+        for i in range(len(rows)):
+            txt = ""
+            if i < len(lang_privs):
+                try:
+                    txt = (lang_privs[i].text or "").strip()
+                except Exception:
+                    txt = ""
+            rows[i]["langRef"] = txt
+
+        self._enum_root = root
+        self._enum_enumtype = enum_el
+        self._enum_preserved_before = preserved_before
+        self._enum_preserved_after = preserved_after
+
+        self._enum_id.set((enum_el.attrib.get("id") or "").strip())
+        self._enum_table.set_rows(rows)
+        self._enum_file_path = path
+
+        try:
+            enum_dir = self._enum_type_dir()
+            rel = os.fspath(path.resolve().relative_to(enum_dir.resolve()))
+            if self.var_enum_selected is not None:
+                self.var_enum_selected.set(rel)
+            self._refresh_enum_search_list(select_rel=rel)
+        except Exception:
+            self._refresh_enum_search_list(select_rel=None)
+
+        try:
+            self._refresh_enum_language_reference()
+        except Exception:
+            pass
+
+        self._set_status(f"Opened EnumType: {os.fspath(path)}")
+
+    def _save_enum_type(self) -> None:
+        if self._enum_table is None or self._enum_id is None:
+            return
+
+        try:
+            self._end_enum_lang_inline(commit=True)
+        except Exception:
+            pass
+        try:
+            self._enum_table.commit_any_edit()
+        except Exception:
+            pass
+
+        enum_id = (self._enum_id.get() or "").strip()
+        if not enum_id:
+            messagebox.showerror("Missing", "EnumType id is required (used as file name)", parent=self)
+            return
+
+        # Validate ord values.
+        rows = self._enum_table.get_rows()
+        for r in rows:
+            o = (r.get("ord") or "").strip()
+            if o and not o.isdigit():
+                messagebox.showerror("Invalid", f"ord must be an integer: {o}", parent=self)
+                return
+
+        stem = re.sub(r'[<>:"/\\|?*]', "_", enum_id).strip() or "EnumType"
+        target_path = self._enum_type_dir() / f"{stem}.xml"
+
+        try:
+            self._apply_enum_ui_to_xml()
+            self._write_enum_type_xml(target_path)
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e), parent=self)
+            return
+
+        self._enum_file_path = target_path
+        try:
+            enum_dir = self._enum_type_dir()
+            rel = os.fspath(target_path.relative_to(enum_dir))
+        except Exception:
+            rel = os.fspath(target_path.name)
+        self._refresh_enum_search_list(select_rel=rel)
+
+        # Update in-memory catalog so EnumType dropdowns refresh without restart.
+        try:
+            if getattr(self, "catalog", None) is not None:
+                if enum_id not in self.catalog.enum_types:
+                    self.catalog.enum_types.append(enum_id)
+                    self.catalog.enum_types.sort(key=lambda s: (s or "").lower())
+        except Exception:
+            pass
+
+        self._set_status(f"Saved EnumType: {os.fspath(target_path)}")
+
+    def _save_enum_type_as(self) -> None:
+        if self._enum_table is None or self._enum_id is None:
+            return
+
+        cur_id = (self._enum_id.get() or "").strip()
+        initial = f"{cur_id}_copy" if cur_id else ""
+        dlg = _EnumTypeSaveAsDialog(self, initial_id=initial)
+        new_id = dlg.show()
+        if not new_id:
+            return
+
+        stem = re.sub(r'[<>:"/\\|?*]', "_", new_id).strip() or "EnumType"
+        target_path = self._enum_type_dir() / f"{stem}.xml"
+
+        try:
+            cur_path = self._enum_file_path.resolve() if self._enum_file_path is not None else None
+        except Exception:
+            cur_path = self._enum_file_path
+        try:
+            tgt_resolved = target_path.resolve()
+        except Exception:
+            tgt_resolved = target_path
+
+        if target_path.exists() and (cur_path is None or tgt_resolved != cur_path):
+            ok = messagebox.askyesno(
+                "Overwrite?",
+                f"File already exists:\n\n{os.fspath(target_path)}\n\nOverwrite?",
+                parent=self,
+            )
+            if not ok:
+                return
+
+        old_id = cur_id
+        old_path = self._enum_file_path
+        try:
+            self._enum_id.set(new_id)
+        except Exception:
+            return
+
+        self._save_enum_type()
+
+        try:
+            saved_ok = self._enum_file_path is not None and self._enum_file_path.resolve() == tgt_resolved
+        except Exception:
+            saved_ok = self._enum_file_path == target_path
+
+        if not saved_ok:
+            try:
+                self._enum_id.set(old_id)
+            except Exception:
+                pass
+            self._enum_file_path = old_path
+
+    def _apply_enum_ui_to_xml(self) -> None:
+        if self._enum_table is None or self._enum_id is None:
+            return
+        if self._enum_root is None or self._enum_enumtype is None:
+            self._new_enum_type()
+        if self._enum_root is None or self._enum_enumtype is None:
+            return
+
+        root = self._enum_root
+        enum_el = self._enum_enumtype
+
+        ns = ""
+        if isinstance(root.tag, str) and root.tag.startswith("{"):
+            ns = root.tag.split("}", 1)[0][1:]
+        ns = ns or SCL_NS
+
+        enum_el.attrib["id"] = (self._enum_id.get() or "").strip()
+
+        # Rebuild children: preserved-before, LangRef privates, EnumVal, preserved-after.
+        for ch in list(enum_el):
+            enum_el.remove(ch)
+
+        for el in (self._enum_preserved_before or []):
+            enum_el.append(_deepcopy_et_element(el))
+
+        rows = self._enum_table.get_rows()
+        for r in rows:
+            p = ET.Element(_q(ns, "Private"))
+            p.attrib["type"] = self._enum_langref_private_type()
+            txt = (r.get("langRef") or "").strip()
+            # Keep one Private per EnumVal to preserve positional mapping.
+            p.text = txt
+            enum_el.append(p)
+
+        for r in rows:
+            ev = ET.Element(_q(ns, "EnumVal"))
+            o = (r.get("ord") or "").strip()
+            if o:
+                ev.attrib["ord"] = o
+            d = r.get("desc") or ""
+            if (d or "").strip() or "desc" in ev.attrib:
+                if (d or "") != "":
+                    ev.attrib["desc"] = d
+            v = r.get("val") or ""
+            ev.text = v
+            enum_el.append(ev)
+
+        for el in (self._enum_preserved_after or []):
+            enum_el.append(_deepcopy_et_element(el))
+
+    def _write_enum_type_xml(self, path: Path) -> None:
+        if self._enum_root is None or self._enum_enumtype is None:
+            raise ValueError("No EnumType loaded")
+
+        root = self._enum_root
+
+        ns = ""
+        if isinstance(root.tag, str) and root.tag.startswith("{"):
+            ns = root.tag.split("}", 1)[0][1:]
+
+        schema_ns = "http://www.w3.org/2001/XMLSchema"
+        xsi_ns = "http://www.w3.org/2001/XMLSchema-instance"
+        root.attrib[_q(xsi_ns, "schemaLocation")] = f"{SCL_NS} SCL.xsd"
+
+        ET.register_namespace("", ns or SCL_NS)
+        ET.register_namespace("xsi", xsi_ns)
+        ET.register_namespace("xsd", schema_ns)
+        try:
+            ET.indent(root, space="    ")
+        except Exception:
+            pass
+
+        body = ET.tostring(root, encoding="unicode", short_empty_elements=True)
+        open_end = body.find(">")
+        if open_end != -1:
+            required_open = (
+                f'<SCL xmlns:xsd="{schema_ns}" '
+                f'xmlns="{SCL_NS}" '
+                f'xmlns:xsi="{xsi_ns}" '
+                f'xsi:schemaLocation="{SCL_NS} SCL.xsd">'
+            )
+            body = required_open + body[open_end + 1 :]
+        body = re.sub(r"</[^>]*:?SCL\s*>", "</SCL>", body)
+
+        text = "<?xml version=\"1.0\" encoding=\"utf-8\" ?>\n" + body.rstrip() + "\n"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\r\n") as f:
+            f.write(text)
+
+    def _on_enum_details_tab_changed(self) -> None:
+        # Refresh the language ref page when selected.
+        try:
+            if self._enum_details_nb is None:
+                return
+            idx = self._enum_details_nb.index("current")
+        except Exception:
+            return
+        if idx == 1:
+            try:
+                self._refresh_enum_language_reference()
+            except Exception:
+                pass
+
+    def _refresh_enum_language_reference(self) -> None:
+        if self._enum_lang_tree is None or self._enum_table is None:
+            return
+
+        rows = self._enum_table.get_rows()
+        view_rows: list[dict[str, str]] = []
+        for i, r in enumerate(rows):
+            ord0 = (r.get("ord") or "").strip()
+            val0 = (r.get("val") or "").strip()
+            name = f"{ord0}: {val0}" if ord0 or val0 else f"#{i}"
+            view_rows.append(
+                {
+                    "idx": str(i),
+                    "name": name,
+                    "id": (r.get("langRef") or "").strip(),
+                    "desc": (r.get("desc") or ""),
+                }
+            )
+
+        self._enum_lang_rows_all = view_rows
+        self._apply_enum_lang_filter()
+
+    def _clear_enum_lang_filter(self) -> None:
+        if self.var_enum_lang_filter is None:
+            return
+        try:
+            self.var_enum_lang_filter.set("")
+        except Exception:
+            pass
+
+    def _apply_enum_lang_filter(self) -> None:
+        if self._enum_lang_tree is None or self.lbl_enum_lang_match is None:
+            return
+        raw = ""
+        if self.var_enum_lang_filter is not None:
+            raw = (self.var_enum_lang_filter.get() or "").strip().lower()
+        if not raw:
+            filtered = list(self._enum_lang_rows_all)
+        else:
+            tokens = [t for t in raw.split() if t]
+
+            def ok(row: dict[str, str]) -> bool:
+                hay = " ".join([row.get("name", ""), row.get("id", ""), row.get("desc", "")]).lower()
+                return all(t in hay for t in tokens)
+
+            filtered = [r for r in self._enum_lang_rows_all if ok(r)]
+
+        self._enum_lang_rows_filtered = filtered
+
+        for item in self._enum_lang_tree.get_children(""):
+            self._enum_lang_tree.delete(item)
+        for i, row in enumerate(filtered):
+            self._enum_lang_tree.insert("", "end", iid=str(i), values=[row.get("name", ""), row.get("id", ""), row.get("desc", "")])
+
+        self.lbl_enum_lang_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}")
+
+    def _on_enum_lang_left_click(self, _event: tk.Event) -> None:
+        try:
+            self._end_enum_lang_inline(commit=True)
+        except Exception:
+            pass
+
+    def _on_enum_lang_double_click(self, event: tk.Event) -> None:
+        if self._enum_lang_tree is None:
+            return
+        try:
+            iid = self._enum_lang_tree.identify_row(event.y)
+            col = self._enum_lang_tree.identify_column(event.x)
+        except Exception:
+            return
+        if not iid or col != "#2":
+            return
+        self._start_enum_lang_inline(iid)
+
+    def _start_enum_lang_inline(self, iid: str) -> None:
+        if self._enum_lang_tree is None:
+            return
+        try:
+            bbox = self._enum_lang_tree.bbox(iid, "id")
+        except Exception:
+            bbox = None
+        if not bbox:
+            return
+        x, y, w, h = bbox
+
+        try:
+            idx = int(iid)
+        except Exception:
+            return
+        if idx < 0 or idx >= len(self._enum_lang_rows_filtered):
+            return
+        cur = self._enum_lang_rows_filtered[idx].get("id", "")
+
+        ent = ttk.Entry(self._enum_lang_tree)
+        ent.insert(0, cur)
+        ent.place(x=x, y=y, width=w, height=h)
+        self._enum_lang_inline = ent
+        self._enum_lang_inline_iid = iid
+
+        ent.focus_set()
+        ent.select_range(0, tk.END)
+        ent.bind("<Return>", lambda _e: self._end_enum_lang_inline(commit=True))
+        ent.bind("<Escape>", lambda _e: self._end_enum_lang_inline(commit=False))
+        ent.bind("<FocusOut>", lambda _e: self._end_enum_lang_inline(commit=True))
+
+    def _end_enum_lang_inline(self, *, commit: bool) -> None:
+        if self._enum_lang_inline is None:
+            return
+        ent = self._enum_lang_inline
+        iid = self._enum_lang_inline_iid
+
+        try:
+            value = (ent.get() or "").strip()
+        except Exception:
+            value = ""
+
+        try:
+            ent.destroy()
+        except Exception:
+            pass
+        self._enum_lang_inline = None
+        self._enum_lang_inline_iid = None
+
+        if not commit or iid is None:
+            return
+        try:
+            view_idx = int(iid)
+        except Exception:
+            return
+        if view_idx < 0 or view_idx >= len(self._enum_lang_rows_filtered):
+            return
+        src_row = self._enum_lang_rows_filtered[view_idx]
+        src_idx = int(src_row.get("idx") or "-1")
+        if self._enum_table is None:
+            return
+        rows = self._enum_table.get_rows()
+        if src_idx < 0 or src_idx >= len(rows):
+            return
+        rows[src_idx]["langRef"] = value
+        self._enum_table.set_rows(rows)
+        try:
+            self._refresh_enum_language_reference()
+        except Exception:
+            pass
+
+    def _do_type_list_path(self) -> Path:
+        return self._do_type_dir() / "DoTypeList.xml"
+
+    def _ensure_do_type_in_list(self, do_type_id: str) -> None:
+        do_type_id = (do_type_id or "").strip()
+        if not do_type_id:
+            return
+
+        path = self._do_type_list_path()
+        if not path.exists():
+            raise FileNotFoundError(f"DoTypeList.xml not found: {os.fspath(path)}")
+
+        # Keep formatting intact by doing a minimal textual insertion.
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        newline = "\r\n" if "\r\n" in text else "\n"
+
+        # 1) Robust de-dup: try XML parse first (handles whitespace/order/quotes).
+        try:
+            root = ET.fromstring(text)
+            for el in root.iter():
+                if not isinstance(el.tag, str) or _local_name(el.tag) != "Type":
+                    continue
+                if (el.attrib.get("ref") or "").strip() == do_type_id:
+                    return
+        except Exception:
+            pass
+
+        # 2) Fallback de-dup: tolerant regex (handles spaces + both quote types).
+        try:
+            pat = rf"<Type\b[^>]*\bref\s*=\s*(['\"])\s*{re.escape(do_type_id)}\s*\1"
+            if re.search(pat, text, flags=re.IGNORECASE):
+                return
+        except Exception:
+            pass
+
+        # Compute next id as max(existing ids) + 1.
+        max_id = 0
+        try:
+            root = ET.fromstring(text)
+            for el in root.iter():
+                if not isinstance(el.tag, str) or _local_name(el.tag) != "Type":
+                    continue
+                raw = (el.attrib.get("id") or "").strip()
+                if raw.isdigit():
+                    max_id = max(max_id, int(raw))
+        except Exception:
+            for m in re.finditer(r"<Type\b[^>]*\bid\s*=\s*(['\"])(\d+)\1", text, flags=re.IGNORECASE):
+                try:
+                    max_id = max(max_id, int(m.group(2)))
+                except Exception:
+                    pass
+        next_id = max_id + 1
+
+        # Preserve indentation style (copy from first <Type ...> line if present).
+        indent = "    "
+        try:
+            m_indent = re.search(r"^[ \t]*<Type\b", text, flags=re.IGNORECASE | re.MULTILINE)
+            if m_indent is not None:
+                indent = re.match(r"^[ \t]*", m_indent.group(0)).group(0)  # type: ignore[union-attr]
+        except Exception:
+            indent = "    "
+
+        # Find closing </LIST> (case-insensitive) and insert right before it.
+        close_iter = list(re.finditer(r"</\s*LIST\s*>", text, flags=re.IGNORECASE))
+        if not close_iter:
+            raise ValueError(f"Invalid DoTypeList.xml (missing </LIST>): {os.fspath(path)}")
+        idx = close_iter[-1].start()
+
+        insert = f"{indent}<Type id=\"{next_id}\" ref=\"{do_type_id}\" />{newline}"
+        prefix = text[:idx]
+        if prefix and not prefix.endswith(("\n", "\r")):
+            insert = newline + insert
+
+        new_text = text[:idx] + insert + text[idx:]
+        path.write_text(new_text, encoding="utf-8")
+
+    def _scan_do_cdc_types(self) -> list[str]:
+        do_dir = self._do_type_dir()
+        if not do_dir.exists():
+            return []
+        types: set[str] = set()
+        for rel in self._scan_xml_relpaths(do_dir):
+            p = do_dir / rel
+            try:
+                root = ET.parse(p).getroot()
+            except Exception:
+                continue
+            for el in root.iter():
+                if not isinstance(el.tag, str):
+                    continue
+                if _local_name(el.tag) != "DOType":
+                    continue
+                cdc = (el.attrib.get("cdc") or "").strip()
+                if cdc:
+                    types.add(cdc.strip().upper())
+                break
+        return sorted(types, key=lambda s: s.lower())
+
+    def _get_do_cdc_types(self) -> list[str]:
+        cache = getattr(self, "_do_cdc_types_cache", None)
+        if cache is None:
+            cache = self._scan_do_cdc_types()
+            setattr(self, "_do_cdc_types_cache", list(cache))
+        return list(cache)
+
+    def _do_type_cdc_for_id(self, do_type_id: str) -> str:
+        do_type_id = (do_type_id or "").strip()
+        if not do_type_id:
+            return ""
+        do_dir = self._do_type_dir()
+        path = self._find_type_file(kind_dir=do_dir, type_id=do_type_id)
+        if path is None:
+            return ""
+        try:
+            root = ET.parse(path).getroot()
+        except Exception:
+            return ""
+        for el in root.iter():
+            if isinstance(el.tag, str) and _local_name(el.tag) == "DOType":
+                return (el.attrib.get("cdc") or "").strip().upper()
+        return ""
+
+    def _new_do_template_dialog(self) -> None:
+        # Interactive "New" flow: Blank or Copy-from-existing.
+        if self._do_tmpl_table is None or self._do_tmpl_id is None or self._do_tmpl_cdc is None or self._do_tmpl_desc is None:
+            return
+
+        do_ids = list(getattr(self, "catalog", None).do_types) if getattr(self, "catalog", None) is not None else []
+        cdc_values = self._get_do_cdc_types()
+
+        dlg = NewDOTypeDialog(
+            self,
+            do_type_ids=do_ids,
+            cdc_values=cdc_values,
+            get_base_cdc=self._do_type_cdc_for_id,
+        )
+        res = dlg.show()
+        if not res:
+            return
+
+        base_id = (res.get("base_id") or "").strip()
+        new_id = (res.get("id") or "").strip()
+        new_cdc = (res.get("cdc") or "").strip().upper()
+        new_desc = res.get("desc") or ""
+
+        if base_id and base_id != "(Blank)":
+            do_dir = self._do_type_dir()
+            src_path = self._find_type_file(kind_dir=do_dir, type_id=base_id)
+            if src_path is None:
+                messagebox.showerror("Missing", f"Source DOType not found: {base_id}", parent=self)
+                return
+            # Load source into UI, then detach from file path to create a new unsaved template.
+            self._open_do_template_from_path(src_path)
+            self._do_tmpl_file_path = None
+            if self.var_do_tmpl_selected is not None:
+                try:
+                    self.var_do_tmpl_selected.set("")
+                except Exception:
+                    pass
+        else:
+            # Create blank skeleton without prompting.
+            self._new_do_template(default_cdc=new_cdc)
+
+        # Apply user-specified id/cdc/desc.
+        try:
+            self._do_tmpl_id.set(new_id)
+            self._do_tmpl_cdc.set(new_cdc)
+            self._do_tmpl_desc.set(new_desc)
+        except Exception:
+            pass
+
+        # Ensure CDC combobox has up-to-date values.
+        try:
+            if self._do_tmpl_cdc_cb is not None:
+                self._do_tmpl_cdc_cb["values"] = self._get_do_cdc_types()
+        except Exception:
+            pass
+
+        self._set_status(
+            (f"New DO template created from {base_id} (unsaved)" if base_id and base_id != "(Blank)" else "New DO template created (unsaved)")
+        )
 
     def _lndm_dir(self) -> Path:
         return self.workspace_root / "ep7_datamodel" / "datamodel" / "lndm"
@@ -5359,6 +9143,1099 @@ class MainWindow(tk.Tk):
             rels = [os.fspath(p.name) for p in base_dir.glob("*.xml")]
         rels.sort(key=lambda s: s.lower())
         return rels
+
+    def _refresh_do_template_search_list(self, *, select_rel: str | None) -> None:
+        if self.cb_do_tmpl is None or self.var_do_tmpl_selected is None or self.lbl_do_tmpl_match is None:
+            return
+        do_dir = self._do_type_dir()
+        self._all_do_tmpl_files = self._scan_xml_relpaths(do_dir)
+
+        def apply_filter(*_args) -> None:
+            raw = ""
+            if self.var_do_tmpl_filter is not None:
+                raw = self.var_do_tmpl_filter.get().strip().lower()
+            if not raw:
+                filtered = list(self._all_do_tmpl_files)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    lv = (v or "").lower()
+                    return all(t in lv for t in tokens)
+
+                filtered = [v for v in self._all_do_tmpl_files if ok(v)]
+
+            cur = (self.var_do_tmpl_selected.get() or "").strip()
+            if cur and cur not in filtered:
+                filtered = [cur] + filtered
+
+            max_show = 1200
+            shown = filtered[:max_show]
+            self.cb_do_tmpl["values"] = shown
+            suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
+            self.lbl_do_tmpl_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
+
+        if getattr(self, "_do_tmpl_apply_filter", None) is None:
+            if self.var_do_tmpl_filter is not None:
+                self.var_do_tmpl_filter.trace_add("write", apply_filter)
+            setattr(self, "_do_tmpl_apply_filter", apply_filter)
+        else:
+            apply_filter = getattr(self, "_do_tmpl_apply_filter")
+
+        if select_rel:
+            try:
+                self.var_do_tmpl_selected.set(select_rel)
+            except Exception:
+                pass
+
+        try:
+            apply_filter()
+        except Exception:
+            pass
+
+    # --- DO template: Language reference (similar to LN instance) ---
+
+    def _on_do_tmpl_details_tab_changed(self) -> None:
+        try:
+            if self._do_tmpl_details_nb is None:
+                return
+            current = self._do_tmpl_details_nb.select()
+            tab_text = self._do_tmpl_details_nb.tab(current, "text")
+            if tab_text == "Language reference":
+                self._refresh_do_tmpl_language_reference()
+        except Exception:
+            pass
+
+    def _clear_do_tmpl_lang_filter(self) -> None:
+        try:
+            if self.var_do_tmpl_lang_filter is not None:
+                self.var_do_tmpl_lang_filter.set("")
+        except Exception:
+            pass
+        self._apply_do_tmpl_lang_filter()
+
+    def _do_tmpl_langref_private_type(self) -> str:
+        return "SchneiderElectric-PowerLogic-LangRef"
+
+    def _do_tmpl_get_da_langref_id(self, da_el: ET.Element) -> str:
+        ptype = self._do_tmpl_langref_private_type()
+        try:
+            for ch in list(da_el):
+                if not isinstance(ch.tag, str) or _local_name(ch.tag) != "Private":
+                    continue
+                if (ch.attrib.get("type") or "") != ptype:
+                    continue
+                return (ch.text or "").strip()
+        except Exception:
+            pass
+        return ""
+
+    def _do_tmpl_set_da_langref_id(self, da_el: ET.Element, value: str) -> None:
+        value = (value or "").strip()
+        ptype = self._do_tmpl_langref_private_type()
+
+        ns = ""
+        try:
+            if isinstance(da_el.tag, str) and da_el.tag.startswith("{"):
+                ns = da_el.tag.split("}", 1)[0][1:]
+        except Exception:
+            ns = ""
+
+        p_el: ET.Element | None = None
+        try:
+            for ch in list(da_el):
+                if not isinstance(ch.tag, str) or _local_name(ch.tag) != "Private":
+                    continue
+                if (ch.attrib.get("type") or "") != ptype:
+                    continue
+                p_el = ch
+                break
+        except Exception:
+            p_el = None
+
+        if value == "":
+            if p_el is not None:
+                da_el.remove(p_el)
+            return
+
+        if p_el is None:
+            p_el = ET.SubElement(da_el, _q(ns, "Private"))
+            p_el.set("type", ptype)
+        p_el.text = value
+
+    def _refresh_do_tmpl_language_reference(self) -> None:
+        if self._do_tmpl_lang_tree is None:
+            return
+
+        # Ensure any pending DA-table edit is committed before we read element state.
+        try:
+            if self._do_tmpl_table is not None:
+                self._do_tmpl_table.commit_any_edit()
+        except Exception:
+            pass
+
+        table_rows = self._do_tmpl_table.get_rows() if self._do_tmpl_table is not None else []
+
+        rows: list[dict[str, str]] = []
+        for idx, row in enumerate(table_rows):
+            name = (row.get("name") or "").strip()
+            lang_id = (row.get("langRef") or "").strip()
+            btype = (row.get("bType") or "").strip()
+            enum_type = (row.get("type") or "").strip()
+            fc = (row.get("fc") or "").strip()
+            desc = (row.get("desc") or "").strip()
+
+            type_txt = btype
+            if btype.upper() == "ENUM" and enum_type:
+                type_txt = f"{btype} ({enum_type})"
+
+            parts: list[str] = []
+            if fc:
+                parts.append(f"[{fc}]")
+            if type_txt:
+                parts.append(type_txt)
+            if desc:
+                parts.append(desc)
+            desc_txt = " ".join(parts)
+
+            rows.append(
+                {
+                    "iid": str(idx),
+                    "name": name,
+                    "id": lang_id,
+                    "desc": desc_txt,
+                }
+            )
+
+        self._do_tmpl_lang_rows_all = rows
+        self._apply_do_tmpl_lang_filter()
+
+    def _apply_do_tmpl_lang_filter(self) -> None:
+        if self._do_tmpl_lang_tree is None:
+            return
+
+        flt = ""
+        try:
+            if self.var_do_tmpl_lang_filter is not None:
+                flt = (self.var_do_tmpl_lang_filter.get() or "").strip().lower()
+        except Exception:
+            flt = ""
+
+        self._do_tmpl_lang_tree.delete(*self._do_tmpl_lang_tree.get_children())
+
+        filtered: list[dict[str, str]] = []
+        for row in self._do_tmpl_lang_rows_all or []:
+            if flt:
+                hay = f"{row.get('name','')} {row.get('id','')} {row.get('desc','')}".lower()
+                if flt not in hay:
+                    continue
+            filtered.append(row)
+            self._do_tmpl_lang_tree.insert(
+                "",
+                "end",
+                iid=row.get("iid") or "",
+                values=(row.get("name", ""), row.get("id", ""), row.get("desc", "")),
+            )
+
+        self._do_tmpl_lang_rows_filtered = filtered
+
+        try:
+            if self.lbl_do_tmpl_lang_match is not None:
+                self.lbl_do_tmpl_lang_match.configure(
+                    text=f"{len(filtered)}/{len(self._do_tmpl_lang_rows_all or [])}"
+                )
+        except Exception:
+            pass
+
+    def _on_do_tmpl_lang_left_click(self, _evt=None) -> None:
+        try:
+            self._end_do_tmpl_lang_inline(commit=True)
+        except Exception:
+            pass
+
+    def _on_do_tmpl_lang_double_click(self, evt) -> None:
+        if self._do_tmpl_lang_tree is None:
+            return
+        try:
+            iid = self._do_tmpl_lang_tree.identify_row(evt.y)
+            col = self._do_tmpl_lang_tree.identify_column(evt.x)
+        except Exception:
+            return
+
+        if not iid or col != "#2":
+            return
+
+        self._start_do_tmpl_lang_inline(iid)
+
+    def _start_do_tmpl_lang_inline(self, iid: str) -> None:
+        if self._do_tmpl_lang_tree is None:
+            return
+        self._end_do_tmpl_lang_inline(commit=True)
+
+        try:
+            bbox = self._do_tmpl_lang_tree.bbox(iid, "#2")
+        except Exception:
+            bbox = None
+        if not bbox:
+            return
+
+        x, y, w, h = bbox
+        cur = ""
+        try:
+            cur = (self._do_tmpl_lang_tree.set(iid, "id") or "").strip()
+        except Exception:
+            cur = ""
+
+        ent = ttk.Entry(self._do_tmpl_lang_tree)
+        ent.insert(0, cur)
+        ent.select_range(0, tk.END)
+        ent.focus_set()
+        ent.place(x=x, y=y, width=w, height=h)
+
+        self._do_tmpl_lang_inline = ent
+        self._do_tmpl_lang_inline_iid = iid
+
+        ent.bind("<Return>", lambda _e: self._end_do_tmpl_lang_inline(commit=True))
+        ent.bind("<Escape>", lambda _e: self._end_do_tmpl_lang_inline(commit=False))
+        ent.bind("<FocusOut>", lambda _e: self._end_do_tmpl_lang_inline(commit=True))
+
+    def _end_do_tmpl_lang_inline(self, commit: bool) -> None:
+        ent = self._do_tmpl_lang_inline
+        iid = self._do_tmpl_lang_inline_iid
+        if ent is None or iid is None:
+            return
+
+        new_val = (ent.get() or "").strip()
+
+        try:
+            ent.place_forget()
+        except Exception:
+            pass
+        try:
+            ent.destroy()
+        except Exception:
+            pass
+
+        self._do_tmpl_lang_inline = None
+        self._do_tmpl_lang_inline_iid = None
+
+        if not commit:
+            return
+
+        if new_val and not re.fullmatch(r"\d+(?:\.\d+)?", new_val):
+            messagebox.showerror(
+                "Invalid Language reference",
+                "Language reference must be empty or like 12 or 12.34",
+                parent=self,
+            )
+            return
+
+        try:
+            idx = int(iid)
+        except Exception:
+            return
+
+        if self._do_tmpl_table is None or idx < 0 or idx >= len(self._do_tmpl_table.rows):
+            return
+        self._do_tmpl_table.rows[idx]["langRef"] = new_val
+
+        try:
+            for r in (self._do_tmpl_lang_rows_all or []):
+                if (r.get("iid") or "") == iid:
+                    r["id"] = new_val
+                    break
+        except Exception:
+            pass
+
+        try:
+            if self._do_tmpl_lang_tree is not None:
+                self._do_tmpl_lang_tree.set(iid, "id", new_val)
+        except Exception:
+            pass
+
+    def _scan_do_cdc_qt_presence(self) -> dict[str, tuple[int, int, int]]:
+        do_dir = self._do_type_dir()
+        if not do_dir.exists():
+            return {}
+
+        # cdc -> (total, q_count, t_count)
+        stats: dict[str, list[int]] = {}
+        for rel in self._scan_xml_relpaths(do_dir):
+            p = do_dir / rel
+            try:
+                root = ET.parse(p).getroot()
+            except Exception:
+                continue
+
+            do_el: ET.Element | None = None
+            for el in root.iter():
+                if isinstance(el.tag, str) and _local_name(el.tag) == "DOType":
+                    do_el = el
+                    break
+            if do_el is None:
+                continue
+
+            cdc = (do_el.attrib.get("cdc") or "").strip().upper()
+            if not cdc:
+                continue
+
+            has_q = False
+            has_t = False
+            try:
+                for child in list(do_el):
+                    if not isinstance(child.tag, str) or _local_name(child.tag) != "DA":
+                        continue
+                    n = (child.attrib.get("name") or "").strip()
+                    if n == "q":
+                        has_q = True
+                    elif n == "t":
+                        has_t = True
+                    if has_q and has_t:
+                        break
+            except Exception:
+                pass
+
+            cur = stats.setdefault(cdc, [0, 0, 0])
+            cur[0] += 1
+            cur[1] += 1 if has_q else 0
+            cur[2] += 1 if has_t else 0
+
+        return {k: (v[0], v[1], v[2]) for k, v in stats.items()}
+
+    def _get_do_cdc_qt_presence(self) -> dict[str, tuple[int, int, int]]:
+        cache = getattr(self, "_do_cdc_qt_presence_cache", None)
+        if cache is None:
+            cache = self._scan_do_cdc_qt_presence()
+            setattr(self, "_do_cdc_qt_presence_cache", dict(cache))
+        return dict(cache)
+
+    def _default_new_do_template_da_names_for_cdc(self, cdc: str) -> list[str]:
+        # Always include 'd'.
+        cdc = (cdc or "").strip().upper()
+        names: list[str] = ["d"]
+        if not cdc:
+            return names
+
+        stats = self._get_do_cdc_qt_presence().get(cdc)
+        if not stats:
+            return names
+
+        total, q_cnt, t_cnt = stats
+        if total <= 0:
+            return names
+
+        q_all = q_cnt == total
+        t_all = t_cnt == total
+        q_any = q_cnt > 0
+
+        # Conservative defaults:
+        # - if q+t are universal for that CDC, include both
+        # - if only t is universal and q never appears, include only t
+        if q_all and t_all:
+            return ["q", "t", "d"]
+        if t_all and not q_any:
+            return ["t", "d"]
+        return names
+
+    def _new_do_template(self, *, default_cdc: str = "") -> None:
+        self._do_tmpl_file_path = None
+        self._do_tmpl_root = None
+        self._do_tmpl_dotype = None
+        self._do_tmpl_child_specs = []
+        self._do_tmpl_da_elements = []
+        if self._do_tmpl_table is None or self._do_tmpl_id is None or self._do_tmpl_cdc is None or self._do_tmpl_desc is None:
+            return
+
+        # Create a minimal in-memory SCL root and DOType skeleton.
+        ET.register_namespace("", SCL_NS)
+        ET.register_namespace("xsi", "http://www.w3.org/2001/XMLSchema-instance")
+        ET.register_namespace("xsd", "http://www.w3.org/2001/XMLSchema")
+
+        root = ET.Element(_q(SCL_NS, "SCL"))
+        root.attrib[_q("http://www.w3.org/2001/XMLSchema-instance", "schemaLocation")] = f"{SCL_NS} SCL.xsd"
+        do_el = ET.SubElement(root, _q(SCL_NS, "DOType"))
+        do_el.attrib["id"] = ""
+        do_el.attrib["cdc"] = (default_cdc or "").strip().upper()
+        do_el.attrib["desc"] = ""
+
+        # Default DA rows for a new DOType: always 'd', and optionally q/t depending on CDC.
+        chosen_names = self._default_new_do_template_da_names_for_cdc(do_el.attrib.get("cdc") or "")
+        da_elements: list[ET.Element] = []
+        table_rows: list[dict[str, str]] = []
+
+        def add_q() -> None:
+            da = ET.Element(_q(SCL_NS, "DA"))
+            da.attrib.update(
+                {
+                    "name": "q",
+                    "fc": "ST",
+                    "bType": "Quality",
+                    "qchg": "true",
+                    "desc": "The quality of the value",
+                }
+            )
+            da_elements.append(da)
+            table_rows.append(
+                {
+                    "name": "q",
+                    "fc": "ST",
+                    "bType": "Quality",
+                    "type": "",
+                    "valKind": "",
+                    "valImport": "",
+                    "dchg": "",
+                    "val": "",
+                    "langRef": "",
+                    "desc": "The quality of the value",
+                }
+            )
+
+        def add_t() -> None:
+            da = ET.Element(_q(SCL_NS, "DA"))
+            da.attrib.update(
+                {
+                    "name": "t",
+                    "fc": "ST",
+                    "bType": "Timestamp",
+                    "desc": "Timestamp of the last change in state",
+                }
+            )
+            da_elements.append(da)
+            table_rows.append(
+                {
+                    "name": "t",
+                    "fc": "ST",
+                    "bType": "Timestamp",
+                    "type": "",
+                    "valKind": "",
+                    "valImport": "",
+                    "dchg": "",
+                    "val": "",
+                    "langRef": "",
+                    "desc": "Timestamp of the last change in state",
+                }
+            )
+
+        def add_d() -> None:
+            da = ET.Element(_q(SCL_NS, "DA"))
+            da.attrib.update(
+                {
+                    "name": "d",
+                    "fc": "DC",
+                    "bType": "VisString255",
+                    "valKind": "RO",
+                    "valImport": "false",
+                    "desc": "English label",
+                }
+            )
+            da_elements.append(da)
+            table_rows.append(
+                {
+                    "name": "d",
+                    "fc": "DC",
+                    "bType": "VisString255",
+                    "type": "",
+                    "valKind": "RO",
+                    "valImport": "false",
+                    "dchg": "",
+                    "val": "",
+                    "langRef": "",
+                    "desc": "English label",
+                }
+            )
+
+        for n in chosen_names:
+            if n == "q":
+                add_q()
+            elif n == "t":
+                add_t()
+            elif n == "d":
+                add_d()
+
+        self._do_tmpl_root = root
+        self._do_tmpl_dotype = do_el
+        self._do_tmpl_child_specs = []
+        self._do_tmpl_da_elements = list(da_elements)
+
+        self._do_tmpl_id.set("")
+        self._do_tmpl_cdc.set(do_el.attrib.get("cdc") or "")
+        self._do_tmpl_desc.set("")
+        self._do_tmpl_table.set_rows(list(table_rows))
+
+        try:
+            self._refresh_do_tmpl_language_reference()
+        except Exception:
+            pass
+
+        if self._do_tmpl_private_enabled is not None:
+            try:
+                self._do_tmpl_private_enabled.set(False)
+            except Exception:
+                pass
+
+        if self.var_do_tmpl_selected is not None:
+            try:
+                self.var_do_tmpl_selected.set("")
+            except Exception:
+                pass
+        self._set_status("New DO template created (unsaved)")
+
+    def _on_do_tmpl_private_toggle(self) -> None:
+        if self._do_tmpl_private_enabled is None or self._do_tmpl_table is None:
+            return
+
+        enabled = bool(self._do_tmpl_private_enabled.get())
+        if not enabled:
+            # Remove the managed dataNs DA row when Private is unchecked.
+            try:
+                rows0 = self._do_tmpl_table.get_rows()
+            except Exception:
+                rows0 = []
+            rows = [r for r in rows0 if (r.get("name") or "").strip() != "dataNs"]
+            if len(rows) != len(rows0):
+                self._do_tmpl_table.set_rows(rows)
+                # Drop DA placeholders in child specs to avoid stale indices after structural edits.
+                try:
+                    self._do_tmpl_child_specs = [x for x in (self._do_tmpl_child_specs or []) if x[0] == "ELEM"]
+                except Exception:
+                    pass
+                try:
+                    self._apply_do_template_ui_to_xml()
+                except Exception:
+                    pass
+            return
+
+        if self._do_tmpl_root is None or self._do_tmpl_dotype is None:
+            self._new_do_template()
+        if self._do_tmpl_root is None or self._do_tmpl_dotype is None:
+            return
+
+        # Normalize current DA XML list before appending.
+        try:
+            self._apply_do_template_ui_to_xml()
+        except Exception:
+            pass
+
+        rows = self._do_tmpl_table.get_rows()
+        if any((r.get("name") or "").strip() == "dataNs" for r in rows):
+            return
+
+        rows.append(
+            {
+                "name": "dataNs",
+                "fc": "EX",
+                "bType": "VisString255",
+                "type": "",
+                "valKind": "",
+                "valImport": "",
+                "dchg": "",
+                "val": "SE_PowerLogic_dataNs_V001:2016",
+                "langRef": "",
+                "desc": "Private name space",
+            }
+        )
+        self._do_tmpl_table.set_rows(rows)
+
+        do_el = self._do_tmpl_dotype
+        ns = ""
+        if isinstance(do_el.tag, str) and do_el.tag.startswith("{"):
+            ns = do_el.tag.split("}", 1)[0][1:]
+        ns = ns or SCL_NS
+
+        da_el = ET.Element(_q(ns, "DA"))
+        da_el.attrib.update(
+            {
+                "name": "dataNs",
+                "fc": "EX",
+                "bType": "VisString255",
+                "desc": "Private name space",
+            }
+        )
+        v = ET.SubElement(da_el, _q(ns, "Val"))
+        v.text = "SE_PowerLogic_dataNs_V001:2016"
+        self._do_tmpl_da_elements.append(da_el)
+
+    def _open_do_template_from_path(self, path: Path) -> None:
+        path = Path(path)
+        if self._do_tmpl_table is None or self._do_tmpl_id is None or self._do_tmpl_cdc is None or self._do_tmpl_desc is None:
+            return
+
+        try:
+            tree = ET.parse(path)
+            root = tree.getroot()
+        except Exception as e:
+            messagebox.showerror("Open failed", str(e), parent=self)
+            return
+
+        # Resolve namespace from root tag
+        ns = ""
+        if isinstance(root.tag, str) and root.tag.startswith("{"):
+            ns = root.tag.split("}", 1)[0][1:]
+
+        do_el = None
+        for cand in root.iter():
+            if not isinstance(cand.tag, str):
+                continue
+            if _local_name(cand.tag) == "DOType":
+                do_el = cand
+                break
+        if do_el is None:
+            messagebox.showerror("Invalid", "No <DOType> found in file", parent=self)
+            return
+
+        # Capture children spec to preserve non-DA nodes and ordering.
+        specs: list[tuple[str, object]] = []
+        da_elems: list[ET.Element] = []
+        da_rows: list[dict[str, str]] = []
+        for ch in list(do_el):
+            if not isinstance(ch.tag, str):
+                specs.append(("ELEM", _deepcopy_et_element(ch)))
+                continue
+            if _local_name(ch.tag) != "DA":
+                # Skip the legacy empty Private marker; it isn't needed.
+                if _local_name(ch.tag) == "Private":
+                    t = (ch.attrib.get("type") or "").strip()
+                    if t == "SchneiderElectric-PowerLogic-PrivateDOType" and not list(ch) and not (ch.text or "").strip():
+                        continue
+                specs.append(("ELEM", _deepcopy_et_element(ch)))
+                continue
+            idx = len(da_elems)
+            da_copy = _deepcopy_et_element(ch)
+            da_elems.append(da_copy)
+            specs.append(("DA", idx))
+
+            val_text = ""
+            lang_ref = ""
+            try:
+                for sub in list(ch):
+                    if isinstance(sub.tag, str) and _local_name(sub.tag) == "Val":
+                        val_text = sub.text or ""
+                    if isinstance(sub.tag, str) and _local_name(sub.tag) == "Private":
+                        if (sub.attrib.get("type") or "").strip() == self._do_tmpl_langref_private_type():
+                            lang_ref = (sub.text or "").strip()
+            except Exception:
+                val_text = ""
+            val_text = (val_text or "").replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+            da_rows.append(
+                {
+                    "name": (ch.attrib.get("name") or ""),
+                    "fc": (ch.attrib.get("fc") or ""),
+                    "bType": (ch.attrib.get("bType") or ""),
+                    "type": (ch.attrib.get("type") or ""),
+                    "valKind": (ch.attrib.get("valKind") or ""),
+                    "valImport": (ch.attrib.get("valImport") or ""),
+                    "dchg": (ch.attrib.get("dchg") or ""),
+                    "val": val_text,
+                    "langRef": lang_ref,
+                    "desc": (ch.attrib.get("desc") or ""),
+                }
+            )
+
+        self._do_tmpl_root = root
+        self._do_tmpl_dotype = do_el
+        self._do_tmpl_child_specs = specs
+        self._do_tmpl_da_elements = da_elems
+
+        self._do_tmpl_id.set((do_el.attrib.get("id") or "").strip())
+        self._do_tmpl_cdc.set((do_el.attrib.get("cdc") or "").strip())
+        self._do_tmpl_desc.set((do_el.attrib.get("desc") or ""))
+
+        # Keep CDC dropdown values fresh.
+        try:
+            if self._do_tmpl_cdc_cb is not None:
+                self._do_tmpl_cdc_cb["values"] = self._get_do_cdc_types()
+        except Exception:
+            pass
+        self._do_tmpl_table.set_rows(da_rows)
+
+        if self._do_tmpl_private_enabled is not None:
+            try:
+                self._do_tmpl_private_enabled.set(any((r.get("name") or "").strip() == "dataNs" for r in da_rows))
+            except Exception:
+                pass
+
+        self._do_tmpl_file_path = path
+        try:
+            do_dir = self._do_type_dir()
+            rel = os.fspath(path.resolve().relative_to(do_dir.resolve()))
+            if self.var_do_tmpl_selected is not None:
+                self.var_do_tmpl_selected.set(rel)
+            self._refresh_do_template_search_list(select_rel=rel)
+        except Exception:
+            self._refresh_do_template_search_list(select_rel=None)
+
+        try:
+            self._refresh_do_tmpl_language_reference()
+        except Exception:
+            pass
+
+        self._set_status(f"Opened DO template: {os.fspath(path)}")
+
+    def _open_do_template(self) -> None:
+        do_dir = self._do_type_dir()
+        initialdir = do_dir if do_dir.exists() else self.workspace_root
+        target = filedialog.askopenfilename(
+            parent=self,
+            title="Open DO template file",
+            initialdir=os.fspath(initialdir),
+            filetypes=[("XML", "*.xml"), ("All", "*")],
+        )
+        if not target:
+            return
+        self._open_do_template_from_path(Path(target))
+
+    def _open_do_template_from_search(self) -> None:
+        if self.var_do_tmpl_selected is None:
+            return
+        rel = (self.var_do_tmpl_selected.get() or "").strip()
+        if not rel:
+            return
+        do_dir = self._do_type_dir()
+        target = do_dir / rel
+        if not target.exists():
+            messagebox.showerror("Missing", f"File not found:\n\n{os.fspath(target)}", parent=self)
+            return
+        self._open_do_template_from_path(target)
+
+    def _save_do_template(self) -> None:
+        if self._do_tmpl_table is None or self._do_tmpl_id is None or self._do_tmpl_cdc is None or self._do_tmpl_desc is None:
+            return
+
+        # Commit any active inline edits before reading table rows.
+        try:
+            self._end_do_tmpl_lang_inline(commit=True)
+        except Exception:
+            pass
+        try:
+            self._do_tmpl_table.commit_any_edit()
+        except Exception:
+            pass
+
+        do_id = (self._do_tmpl_id.get() or "").strip()
+        if not do_id:
+            messagebox.showerror("Missing", "DOType id is required (used as file name)", parent=self)
+            return
+
+        # Validate: FC and bType must not be empty.
+        rows = self._do_tmpl_table.get_rows()
+        for r in rows:
+            name = (r.get("name") or "").strip() or "(unnamed)"
+            fc = (r.get("fc") or "").strip()
+            if not fc:
+                messagebox.showerror("Missing", f"FC is required for DA: {name}", parent=self)
+                return
+            bt = (r.get("bType") or "").strip()
+            if not bt:
+                messagebox.showerror("Missing", f"bType is required for DA: {name}", parent=self)
+                return
+
+        # Use id as file name under DOType folder.
+        stem = re.sub(r'[<>:"/\\|?*]', "_", do_id).strip() or "DOType"
+        target_path = self._do_type_dir() / f"{stem}.xml"
+
+        try:
+            self._apply_do_template_ui_to_xml()
+            # Drop DA placeholders in child specs to avoid stale indices after add/delete/reorder.
+            try:
+                da_count = sum(1 for k, _p in (self._do_tmpl_child_specs or []) if k == "DA")
+                if da_count != len(rows):
+                    self._do_tmpl_child_specs = [x for x in (self._do_tmpl_child_specs or []) if x[0] == "ELEM"]
+            except Exception:
+                pass
+
+            self._write_do_template_xml(target_path)
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e), parent=self)
+            return
+
+        # Keep DoTypeList.xml up-to-date: append new ref at the end with id+1.
+        try:
+            self._ensure_do_type_in_list(do_id)
+        except Exception as e:
+            messagebox.showwarning(
+                "DoTypeList.xml",
+                "DO template was saved, but DoTypeList.xml could not be updated.\n\n"
+                f"{e}",
+                parent=self,
+            )
+
+        self._do_tmpl_file_path = target_path
+
+        try:
+            do_dir = self._do_type_dir()
+            rel = os.fspath(target_path.relative_to(do_dir))
+        except Exception:
+            rel = os.fspath(target_path.name)
+        self._refresh_do_template_search_list(select_rel=rel)
+        self._set_status(f"Saved DO template: {os.fspath(target_path)}")
+
+    def _save_do_template_as(self) -> None:
+        if self._do_tmpl_table is None or self._do_tmpl_id is None:
+            return
+
+        cur_id = (self._do_tmpl_id.get() or "").strip()
+        initial = f"{cur_id}_copy" if cur_id else ""
+        dlg = _DoTemplateSaveAsDialog(self, initial_id=initial)
+        new_id = dlg.show()
+        if not new_id:
+            return
+
+        # Compute target path exactly like Save does.
+        stem = re.sub(r'[<>:"/\\|?*]', "_", new_id).strip() or "DOType"
+        target_path = self._do_type_dir() / f"{stem}.xml"
+
+        # If saving to an existing file (and it's not the current file), confirm overwrite.
+        try:
+            cur_path = self._do_tmpl_file_path.resolve() if self._do_tmpl_file_path is not None else None
+        except Exception:
+            cur_path = self._do_tmpl_file_path
+
+        try:
+            tgt_resolved = target_path.resolve()
+        except Exception:
+            tgt_resolved = target_path
+
+        if target_path.exists() and (cur_path is None or tgt_resolved != cur_path):
+            ok = messagebox.askyesno(
+                "Overwrite?",
+                f"File already exists:\n\n{os.fspath(target_path)}\n\nOverwrite?",
+                parent=self,
+            )
+            if not ok:
+                return
+
+        old_id = cur_id
+        old_path = self._do_tmpl_file_path
+        try:
+            self._do_tmpl_id.set(new_id)
+        except Exception:
+            return
+
+        # Save using the normal pipeline.
+        self._save_do_template()
+
+        # If save failed, revert id/path.
+        try:
+            saved_ok = self._do_tmpl_file_path is not None and self._do_tmpl_file_path.resolve() == tgt_resolved
+        except Exception:
+            saved_ok = self._do_tmpl_file_path == target_path
+
+        if not saved_ok:
+            try:
+                self._do_tmpl_id.set(old_id)
+            except Exception:
+                pass
+            self._do_tmpl_file_path = old_path
+
+    def _apply_do_template_ui_to_xml(self) -> None:
+        if self._do_tmpl_table is None or self._do_tmpl_id is None or self._do_tmpl_cdc is None or self._do_tmpl_desc is None:
+            return
+        if self._do_tmpl_root is None or self._do_tmpl_dotype is None:
+            # If user never opened/created, start from skeleton.
+            self._new_do_template()
+        if self._do_tmpl_root is None or self._do_tmpl_dotype is None:
+            return
+
+        do_el = self._do_tmpl_dotype
+        ns = ""
+        if isinstance(do_el.tag, str) and do_el.tag.startswith("{"):
+            ns = do_el.tag.split("}", 1)[0][1:]
+
+        do_el.attrib["id"] = (self._do_tmpl_id.get() or "").strip()
+        do_el.attrib["cdc"] = (self._do_tmpl_cdc.get() or "").strip()
+        do_el.attrib["desc"] = self._do_tmpl_desc.get() or ""
+
+        # Rebuild DA elements list and apply attribute edits.
+        rows = self._do_tmpl_table.get_rows()
+        new_da_elems: list[ET.Element] = []
+        for i, row in enumerate(rows):
+            base = None
+            if i < len(self._do_tmpl_da_elements):
+                base = _deepcopy_et_element(self._do_tmpl_da_elements[i])
+            if base is None:
+                base = ET.Element(_q(ns, "DA"))
+            # Apply attributes
+            for k in ["name", "fc", "bType", "type", "valKind", "valImport", "dchg", "desc"]:
+                val = (row.get(k) or "").strip() if k != "desc" else (row.get(k) or "")
+                if val:
+                    base.attrib[k] = val
+                else:
+                    if k in base.attrib:
+                        del base.attrib[k]
+
+            # Apply <Val> (optional)
+            raw_val = row.get("val") or ""
+            if (raw_val or "").strip():
+                val_el = None
+                for sub in list(base):
+                    if isinstance(sub.tag, str) and _local_name(sub.tag) == "Val":
+                        val_el = sub
+                        break
+                if val_el is None:
+                    val_el = ET.SubElement(base, _q(ns, "Val"))
+                val_el.text = raw_val
+            else:
+                # Remove any existing Val if user clears it.
+                for sub in list(base):
+                    if isinstance(sub.tag, str) and _local_name(sub.tag) == "Val":
+                        try:
+                            base.remove(sub)
+                        except Exception:
+                            pass
+
+            # Apply Language reference (<Private type="...LangRef">) from hidden row field.
+            try:
+                self._do_tmpl_set_da_langref_id(base, (row.get("langRef") or "").strip())
+            except Exception:
+                pass
+            new_da_elems.append(base)
+
+        self._do_tmpl_da_elements = new_da_elems
+
+    def _write_do_template_xml(self, path: Path) -> None:
+        if self._do_tmpl_root is None or self._do_tmpl_dotype is None:
+            raise ValueError("No DO template loaded")
+
+        root = self._do_tmpl_root
+        do_el = self._do_tmpl_dotype
+
+        ns = ""
+        if isinstance(root.tag, str) and root.tag.startswith("{"):
+            ns = root.tag.split("}", 1)[0][1:]
+
+        # Rebuild DOType children preserving non-DA nodes and ordering.
+        for ch in list(do_el):
+            do_el.remove(ch)
+
+        rows = self._do_tmpl_table.get_rows() if self._do_tmpl_table is not None else []
+        # Ensure DA elements list length matches rows.
+        if len(self._do_tmpl_da_elements) != len(rows):
+            # Re-apply will normalize.
+            self._apply_do_template_ui_to_xml()
+
+        for kind, payload in (self._do_tmpl_child_specs or []):
+            if kind == "ELEM":
+                try:
+                    do_el.append(_deepcopy_et_element(payload))  # type: ignore[arg-type]
+                except Exception:
+                    continue
+            elif kind == "DA":
+                try:
+                    idx = int(payload)  # type: ignore[arg-type]
+                except Exception:
+                    continue
+                if idx < 0 or idx >= len(self._do_tmpl_da_elements):
+                    continue
+                do_el.append(_deepcopy_et_element(self._do_tmpl_da_elements[idx]))
+
+        # If specs were empty (new template), append non-DA from current do_el and then all DAs.
+        if not self._do_tmpl_child_specs:
+            for da in self._do_tmpl_da_elements:
+                do_el.append(_deepcopy_et_element(da))
+
+        # If user added more DAs than originally existed, append extras at the end.
+        existing_da_count = sum(1 for k, _p in (self._do_tmpl_child_specs or []) if k == "DA")
+        for extra in self._do_tmpl_da_elements[existing_da_count:]:
+            do_el.append(_deepcopy_et_element(extra))
+
+        # Serialize with required header/footer formatting.
+        schema_ns = "http://www.w3.org/2001/XMLSchema"
+        xsi_ns = "http://www.w3.org/2001/XMLSchema-instance"
+
+        # Ensure schemaLocation exists (content is fixed per requirement).
+        root.attrib[_q(xsi_ns, "schemaLocation")] = f"{SCL_NS} SCL.xsd"
+
+        ET.register_namespace("", ns or SCL_NS)
+        ET.register_namespace("xsi", xsi_ns)
+        ET.register_namespace("xsd", schema_ns)
+        try:
+            ET.indent(root, space="    ")
+        except Exception:
+            pass
+
+        body = ET.tostring(root, encoding="unicode", short_empty_elements=True)
+        # Replace the root opening tag to exactly match required attribute order.
+        open_end = body.find(">")
+        if open_end != -1:
+            required_open = (
+                f'<SCL xmlns:xsd="{schema_ns}" '
+                f'xmlns="{SCL_NS}" '
+                f'xmlns:xsi="{xsi_ns}" '
+                f'xsi:schemaLocation="{SCL_NS} SCL.xsd">'
+            )
+            body = required_open + body[open_end + 1 :]
+        # Ensure closing tag is </SCL>
+        body = re.sub(r"</[^>]*:?SCL\s*>", "</SCL>", body)
+
+        text = "<?xml version=\"1.0\" encoding=\"utf-8\" ?>\n" + body.rstrip() + "\n"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Use CRLF for saved XML files on Windows.
+        with open(path, "w", encoding="utf-8", newline="\r\n") as f:
+            f.write(text)
+
+    def _refresh_application_search_list(self, *, select_rel: str | None) -> None:
+        """Refresh the Application Search combobox items."""
+        if self.cb_app is None or self.var_app_selected is None or self.lbl_app_match is None:
+            return
+        app_dir = self._application_dir()
+        self._all_app_files = self._scan_xml_relpaths(app_dir)
+
+        def apply_filter(*_args) -> None:
+            raw = ""
+            if self.var_app_filter is not None:
+                raw = self.var_app_filter.get().strip().lower()
+            if not raw:
+                filtered = list(self._all_app_files)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    lv = (v or "").lower()
+                    return all(t in lv for t in tokens)
+
+                filtered = [v for v in self._all_app_files if ok(v)]
+
+            cur = (self.var_app_selected.get() or "").strip()
+            if cur and cur not in filtered:
+                filtered = [cur] + filtered
+
+            max_show = 1200
+            shown = filtered[:max_show]
+            self.cb_app["values"] = shown
+            suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
+            self.lbl_app_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
+
+        # Wire filter only once per UI lifetime.
+        if getattr(self, "_app_apply_filter", None) is None:
+            if self.var_app_filter is not None:
+                self.var_app_filter.trace_add("write", apply_filter)
+            setattr(self, "_app_apply_filter", apply_filter)
+        else:
+            apply_filter = getattr(self, "_app_apply_filter")
+
+        if select_rel:
+            try:
+                self.var_app_selected.set(select_rel)
+            except Exception:
+                pass
+
+        try:
+            apply_filter()
+        except Exception:
+            pass
+
+    def _open_application_from_search(self) -> None:
+        if self.var_app_selected is None:
+            return
+        rel = (self.var_app_selected.get() or "").strip()
+        if not rel:
+            return
+        app_dir = self._application_dir()
+        target = app_dir / rel
+        if not target.exists():
+            messagebox.showerror("Missing", f"File not found:\n\n{os.fspath(target)}", parent=self)
+            return
+        self._open_application_from_path(target)
 
     def _scan_application_input_types(self) -> list[str]:
         app_dir = self._application_dir()
@@ -6716,6 +11593,7 @@ class MainWindow(tk.Tk):
 
         btn("Add", lambda t=table: self._app_table_add(t))
         btn("Insert", lambda t=table: self._app_table_insert(t), padx=(6, 0))
+        btn("Edit", lambda t=table: self._app_table_edit(t), padx=(6, 0))
         btn("Copy", lambda t=table: self._app_table_copy(t), padx=(6, 0))
         btn("Cut", lambda t=table: self._app_table_cut(t), padx=(6, 0))
         btn("Paste", lambda t=table: self._app_table_paste(t), padx=(6, 0))
@@ -6747,6 +11625,7 @@ class MainWindow(tk.Tk):
 
         m.add_command(label="Add", command=lambda: self._app_table_add(self._app_ctx_table or ""))
         m.add_command(label="Insert", command=lambda: self._app_table_insert(self._app_ctx_table or ""))
+        m.add_command(label="Edit", command=lambda: self._app_table_edit(self._app_ctx_table or ""))
 
         if table == "input":
             m.add_command(label="Add shared setting", command=self._app_add_shared_setting_from_input)
@@ -6776,7 +11655,7 @@ class MainWindow(tk.Tk):
         if table == "input" and has_sel and idx is not None and 0 <= idx < len(self._app_input_rows):
             can_add_shared = (self._app_input_rows[idx].get("confpin") or "").lower() == "true"
 
-        for label in ("Copy", "Cut", "Delete"):
+        for label in ("Edit", "Copy", "Cut", "Delete"):
             try:
                 m.entryconfigure(label, state=("normal" if has_sel else "disabled"))
             except Exception:
@@ -7067,6 +11946,89 @@ class MainWindow(tk.Tk):
         if tv is not None:
             try:
                 tv.selection_set(str(insert_at))
+            except Exception:
+                pass
+
+    def _app_table_edit(self, table: str) -> None:
+        if not table:
+            return
+
+        # Commit any open inline editors first.
+        try:
+            self._end_app_input_inline_editor(commit=True)
+            self._end_app_setting_inline_editor(commit=True)
+            self._end_app_output_inline_editor(commit=True)
+            self._end_app_conf_inline_editor(commit=True)
+            self._end_app_control_inline_editor(commit=True)
+        except Exception:
+            pass
+
+        if table == "input":
+            self._edit_selected_app_input()
+            return
+
+        idx = self._app_table_selected_index(table)
+        rows = self._app_table_rows(table)
+        if idx is None or idx < 0 or idx >= len(rows):
+            return
+
+        current = dict(rows[idx])
+
+        if table == "output":
+            dlg = _EditApplicationOutputDialog(
+                self,
+                title="Edit output",
+                output_types=self._get_app_output_types(),
+                initial=current,
+            )
+            res = dlg.show()
+            if not res:
+                return
+            current.update(res)
+        elif table == "setting":
+            dlg = _EditApplicationSimpleDialog(
+                self,
+                title="Edit setting",
+                type_values=self._get_app_setting_types(),
+                initial=current,
+            )
+            res = dlg.show()
+            if not res:
+                return
+            current.update(res)
+        elif table == "conf":
+            dlg = _EditApplicationSimpleDialog(
+                self,
+                title="Edit conf",
+                type_values=self._get_app_conf_types(),
+                initial=current,
+            )
+            res = dlg.show()
+            if not res:
+                return
+            current.update(res)
+        elif table == "control":
+            dlg = _EditApplicationSimpleDialog(
+                self,
+                title="Edit control",
+                type_values=self._get_app_control_types(),
+                initial=current,
+            )
+            res = dlg.show()
+            if not res:
+                return
+            current.update(res)
+        else:
+            return
+
+        new_rows = [dict(r) for r in rows]
+        new_rows[idx] = current
+        self._app_table_set_rows(table, new_rows)
+
+        tv = self._app_table_tv(table)
+        if tv is not None:
+            try:
+                tv.selection_set(str(idx))
             except Exception:
                 pass
 
@@ -8495,6 +13457,11 @@ class MainWindow(tk.Tk):
         self._app_conf_types_cache = None
         self._app_control_types_cache = None
         self._open_application_from_path(dst)
+        try:
+            rel = os.fspath(dst.relative_to(app_dir))
+        except Exception:
+            rel = os.fspath(dst.name)
+        self._refresh_application_search_list(select_rel=rel)
 
     def _local_name(self, tag: str) -> str:
         if tag.startswith("{"):
@@ -8584,6 +13551,16 @@ class MainWindow(tk.Tk):
         self._app_table_set_rows("conf", _rows("conf", ["name", "type", "src", "desc"]))
         self._app_table_set_rows("control", _rows("control", ["name", "type", "src", "desc"]))
 
+        # Sync search selection if file is under application/.
+        try:
+            app_dir = self._application_dir()
+            rel = os.fspath(Path(path).resolve().relative_to(app_dir.resolve()))
+            if self.var_app_selected is not None:
+                self.var_app_selected.set(rel)
+            self._refresh_application_search_list(select_rel=rel)
+        except Exception:
+            pass
+
         self._set_status(f"Opened application: {os.fspath(path)}")
 
     def _open_application(self) -> None:
@@ -8662,6 +13639,12 @@ class MainWindow(tk.Tk):
             messagebox.showerror("Save failed", str(e), parent=self)
             return
         self._app_file_path = target_path
+        try:
+            app_dir = self._application_dir()
+            rel = os.fspath(target_path.relative_to(app_dir))
+        except Exception:
+            rel = os.fspath(target_path.name)
+        self._refresh_application_search_list(select_rel=rel)
         self._set_status(f"Saved application: {os.fspath(target_path)}")
 
     def _save_application_as(self) -> None:

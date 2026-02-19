@@ -156,6 +156,218 @@ class LangRefRef:
 
 
 @dataclass
+class LNPrivateRef:
+    """A reference to an LN-level <Private> element.
+
+    This intentionally targets only direct children of the LN/LN0/LNode element
+    (vendor convention: LN-level privates are defined before any <DOI>)."""
+
+    index: int
+    private_element: ET.Element
+    before_first_doi: bool
+
+    def get_type(self) -> str:
+        return (self.private_element.attrib.get("type") or "").strip()
+
+    def set_type(self, private_type: str) -> None:
+        t = (private_type or "").strip()
+        if t:
+            self.private_element.attrib["type"] = t
+        else:
+            # Keep attribute absent rather than empty string.
+            try:
+                self.private_element.attrib.pop("type", None)
+            except Exception:
+                pass
+
+    def has_child_elements(self) -> bool:
+        for ch in list(self.private_element):
+            if isinstance(ch.tag, str):
+                return True
+        return False
+
+    def get_text(self) -> str:
+        return (self.private_element.text or "").strip()
+
+    def set_text(self, text: str) -> None:
+        # Note: if the Private element contains nested child elements, setting text
+        # would intermix text nodes with XML. Callers should check has_child_elements().
+        self.private_element.text = (text or "")
+
+    def get_compact_content(self) -> str:
+        if self.has_child_elements():
+            # Show a small hint for UI; full XML can be inspected via file view.
+            names: list[str] = []
+            for ch in list(self.private_element):
+                if isinstance(ch.tag, str):
+                    names.append(_local_name(ch.tag))
+            names = [n for n in names if n]
+            return "<xml>" if not names else "<xml: " + ",".join(names[:3]) + ("..." if len(names) > 3 else "") + ">"
+        return self.get_text()
+
+
+def extract_ln_private_refs(
+    doc: LNInstanceDocument,
+    ln_index: int,
+    *,
+    before_first_doi_only: bool = True,
+) -> list[LNPrivateRef]:
+    """Extract LN-level <Private> nodes (direct LN children).
+
+    By default, returns only those appearing before the first <DOI> child, matching
+    the typical vendor layout and the user's intent for a "Private" tab.
+    """
+
+    if ln_index < 0 or ln_index >= len(doc.ln_elements):
+        raise IndexError("ln_index out of range")
+
+    ln = doc.ln_elements[ln_index]
+    children = list(_iter_child_elems(ln))
+
+    first_doi_idx: int | None = None
+    for i, ch in enumerate(children):
+        if _local_name(ch.tag) == "DOI":
+            first_doi_idx = i
+            break
+
+    out: list[LNPrivateRef] = []
+    for i, ch in enumerate(children):
+        if _local_name(ch.tag) != "Private":
+            continue
+        before_first_doi = (first_doi_idx is None) or (i < first_doi_idx)
+        if before_first_doi_only and not before_first_doi:
+            continue
+        out.append(LNPrivateRef(index=i, private_element=ch, before_first_doi=before_first_doi))
+    return out
+
+
+def find_ln_private_elements(
+    doc: LNInstanceDocument,
+    ln_index: int,
+    private_type: str,
+    *,
+    before_first_doi_only: bool = True,
+) -> list[ET.Element]:
+    """Find LN-level <Private> elements by type.
+
+    This targets direct children of the LN element. By default it only considers
+    those before the first <DOI> child (vendor convention).
+    """
+
+    t = (private_type or "").strip()
+    if not t:
+        return []
+
+    out: list[ET.Element] = []
+    for ref in extract_ln_private_refs(doc, ln_index, before_first_doi_only=before_first_doi_only):
+        if (ref.private_element.attrib.get("type") or "").strip() == t:
+            out.append(ref.private_element)
+    return out
+
+
+def get_ln_private_text(
+    doc: LNInstanceDocument,
+    ln_index: int,
+    private_type: str,
+    *,
+    before_first_doi_only: bool = True,
+) -> str | None:
+    """Return the text for the first matching LN-level <Private> (or None)."""
+
+    matches = find_ln_private_elements(doc, ln_index, private_type, before_first_doi_only=before_first_doi_only)
+    if not matches:
+        return None
+    return (matches[0].text or "").strip()
+
+
+def _ln_first_doi_child_index(ln: ET.Element) -> int | None:
+    children = list(_iter_child_elems(ln))
+    for i, ch in enumerate(children):
+        if _local_name(ch.tag) == "DOI":
+            return i
+    return None
+
+
+def ensure_ln_private_element(
+    doc: LNInstanceDocument,
+    ln_index: int,
+    private_type: str,
+    *,
+    text: str | None = None,
+) -> ET.Element:
+    """Ensure an LN-level <Private type=...> exists (before first <DOI>).
+
+    If multiple exist, returns the first match.
+    """
+
+    t = (private_type or "").strip()
+    if not t:
+        raise ValueError("private_type is required")
+
+    matches = find_ln_private_elements(doc, ln_index, t, before_first_doi_only=False)
+    if matches:
+        el = matches[0]
+    else:
+        if ln_index < 0 or ln_index >= len(doc.ln_elements):
+            raise IndexError("ln_index out of range")
+        ln = doc.ln_elements[ln_index]
+        el = ET.Element(doc.q("Private"))
+        el.attrib["type"] = t
+
+        insert_at = _ln_first_doi_child_index(ln)
+        if insert_at is None:
+            ln.append(el)
+        else:
+            ln.insert(insert_at, el)
+
+    if text is not None:
+        el.text = text
+
+    return el
+
+
+def remove_ln_private_elements(
+    doc: LNInstanceDocument,
+    ln_index: int,
+    private_type: str,
+    *,
+    before_first_doi_only: bool = False,
+) -> int:
+    """Remove matching LN-level <Private> nodes. Returns count removed."""
+
+    t = (private_type or "").strip()
+    if not t:
+        return 0
+    if ln_index < 0 or ln_index >= len(doc.ln_elements):
+        raise IndexError("ln_index out of range")
+
+    ln = doc.ln_elements[ln_index]
+    children = list(_iter_child_elems(ln))
+
+    first_doi_idx: int | None = None
+    if before_first_doi_only:
+        for i, ch in enumerate(children):
+            if _local_name(ch.tag) == "DOI":
+                first_doi_idx = i
+                break
+
+    removed = 0
+    for i, ch in enumerate(children):
+        if _local_name(ch.tag) != "Private":
+            continue
+        if before_first_doi_only and first_doi_idx is not None and i >= first_doi_idx:
+            continue
+        if (ch.attrib.get("type") or "").strip() != t:
+            continue
+        try:
+            ln.remove(ch)
+            removed += 1
+        except Exception:
+            pass
+    return removed
+
+
+@dataclass
 class LNInstanceDocument:
     file_path: Path
     tree: ET.ElementTree
@@ -564,6 +776,35 @@ def save_ln_instance_document(doc: LNInstanceDocument, *, target_path: Path | No
                 # Drop wrapper open/close lines.
                 inner_lines = wrap_lines[1:-1]
 
+    # Formatting compatibility:
+    # Legacy files prefer explicit open/close tags for <Private> even when the value is empty.
+    # ElementTree typically serializes empty elements as self-closing (<Private ... />).
+    # Normalize all self-closing <Private .../> into <Private ...></Private>.
+    def _expand_private_self_closing(line: str) -> str:
+        s = line
+        if "Private" not in s or "/>" not in s:
+            return line
+        if "</" in s:
+            return line
+
+        try:
+            import re
+
+            # Capture an optional prefix (e.g., ns:Private) so we can close with the same name.
+            m = re.search(r"<\s*((?:[A-Za-z_][\w.\-]*:)?Private)\b[^>]*/>\s*$", s)
+            if not m:
+                return line
+            tag_name = m.group(1)
+            return re.sub(r"\s*/>\s*$", f"></{tag_name}>", s)
+        except Exception:
+            if s.rstrip().endswith("/>"):
+                # Fallback assumes unprefixed Private.
+                return s.rstrip()[:-2] + "></Private>"
+            return line
+
+    if inner_lines:
+        inner_lines = [_expand_private_self_closing(ln) for ln in inner_lines]
+
     lines: list[str] = []
     lines.append('<?xml version="1.0" encoding="utf-8" ?>')
     lines.append(
@@ -696,11 +937,32 @@ def save_execution_scheme_root(root: ET.Element, *, target_path: Path) -> Path:
 def compute_signature(doc: LNInstanceDocument) -> str:
     # Deterministic signature for dirty tracking: for each LN, collect sorted attrib + values.
     parts: list[str] = []
+    managed_ln_private_types = {
+        "SchneiderElectric-PowerLogic-LNName",
+        "SchneiderElectric-PowerLogic-NoMatrix",
+        "SchneiderElectric-PowerLogic-PrivateLN",
+        "SchneiderElectric-PowerLogic-NameANSI",
+        "SchneiderElectric-PowerLogic-PackageLN",
+        # Note: LicenseLevel is intentionally not managed by the UI anymore.
+    }
     for idx, ln in enumerate(doc.ln_elements):
         attrib_items = sorted((k, str(v)) for k, v in ln.attrib.items())
         parts.append(f"LN[{idx}]:{_local_name(ln.tag)}")
         for k, v in attrib_items:
             parts.append(f"A:{k}={v}")
+
+        # Include managed LN-level <Private> nodes (direct children, vendor convention: before DOI).
+        try:
+            for ch in list(ln):
+                if not isinstance(ch.tag, str) or _local_name(ch.tag) != "Private":
+                    continue
+                t = (ch.attrib.get("type") or "").strip()
+                if t not in managed_ln_private_types:
+                    continue
+                txt = (ch.text or "").strip()
+                parts.append(f"P:{t}={txt}")
+        except Exception:
+            pass
         try:
             refs = extract_value_refs(doc, idx)
         except Exception:
@@ -1210,6 +1472,16 @@ def create_ln_instance_from_template(
     ln.attrib["lnType"] = ln_id
     if desc0:
         ln.attrib["desc"] = desc0
+
+    # Vendor convention: LN-level privates are defined before all DOI.
+    # Requirement: LNName exists by default and its value is Prefix + LNClass + '#'.
+    try:
+        pe = ET.SubElement(ln, q("Private"))
+        pe.attrib["type"] = "SchneiderElectric-PowerLogic-LNName"
+        auto_ln_name = f"{(prefix or '').strip()}{ln_class}#" if ln_class else ""
+        pe.text = auto_ln_name if auto_ln_name else None
+    except Exception:
+        pass
 
     visited_do: set[str] = set()
     visited_da: set[str] = set()

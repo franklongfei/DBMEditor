@@ -1,0 +1,193 @@
+{
+  "lndm_dir": "d:\\01_Work\\01_P7project\\07_Code\\ep7_datamodel\\datamodel\\lndm",
+  "file_count": 280,
+  "files_with_private": 275,
+  "private_count": 423,
+  "private_before_first_doi_count": 423,
+  "unique_private_types": 8,
+  "types": [
+    {
+      "type": "SchneiderElectric-PowerLogic-LNName",
+      "count": 275,
+      "before_first_doi": 275,
+      "files": 275,
+      "top_texts": [
+        {
+          "text": "BayLDLLN0",
+          "count": 2
+        },
+        {
+          "text": "CALH#",
+          "count": 2
+        },
+        {
+          "text": "CBCSWI#",
+          "count": 2
+        },
+        {
+          "text": "CTGAPC#",
+          "count": 2
+        },
+        {
+          "text": "EthLCCH#",
+          "count": 2
+        },
+        {
+          "text": "EthRedLCCH#",
+          "count": 2
+        },
+        {
+          "text": "FKEY#",
+          "count": 2
+        },
+        {
+          "text": "HMON#",
+          "count": 2
+        }
+      ],
+      "sample_files": [
+        "ACSMSQI.xml",
+        "AIDPSCH.xml",
+        "ALARMGAPC.xml",
+        "ALARMGGIO.xml",
+        "AMSQI.xml",
+        "ANGMMXU.xml",
+        "BAYMMXU.xml",
+        "BBPDIF.xml",
+        "BCPTOC.xml",
+        "BCPTRC.xml"
+      ]
+    },
+    {
+      "type": "SchneiderElectric-PowerLogic-NoMatrix",
+      "count": 61,
+      "before_first_doi": 61,
+      "files": 61,
+      "top_texts": [],
+      "sample_files": [
+        "ALARMGAPC.xml",
+        "ALARMGGIO.xml",
+        "ANGMMXU.xml",
+        "CBGAPC.xml",
+        "CBLGAPC.xml",
+        "COMDISGAPC.xml",
+        "CSGAPC.xml",
+        "CSHCTGAPC.xml",
+        "CSHTCTS.xml",
+        "CSTCTT.xml"
+      ]
+    },
+    {
+      "type": "SchneiderElectric-PowerLogic-PrivateLN",
+      "count": 43,
+      "before_first_doi": 43,
+      "files": 43,
+      "top_texts": [],
+      "sample_files": [
+        "ALARMGAPC.xml",
+        "ALARMGGIO.xml",
+        "ANGMMXU.xml",
+        "CBGAPC.xml",
+        "CBLGAPC.xml",
+        "COMDISGAPC.xml",
+        "CSGAPC.xml",
+        "CSHCTGAPC.xml",
+        "CTBRLN.xml",
+        "DISGAPC.xml"
+      ]
+    },
+    {
+      "type": "SchneiderElectric-PowerLogic-LicenseLevel",
+      "count": 21,
+      "before_first_doi": 21,
+      "files": 21,
+      "top_texts": [
+        {
+          "text": "Basic",
+          "count": 21
+        }
+      ],
+      "sample_files": [
+        "AIDPSCH.xml",
+        "CommonPDIS.xml",
+        "DISGAPC.xml",
+        "DISMMXU.xml",
+        "PLCGAPC.xml",
+        "PLCSUPE.xml",
+        "RPSB.xml",
+        "T4LPDI.xml",
+        "TESTPDIS.xml",
+        "ZNPDIS.xml"
+      ]
+    },
+    {
+      "type": "SchneiderElectric-PowerLogic-PackageLN",
+      "count": 15,
+      "before_first_doi": 15,
+      "files": 15,
+      "top_texts": [],
+      "sample_files": [
+        "CBGAPC.xml",
+        "CBLGAPC.xml",
+        "COMDISGAPC.xml",
+        "CSGAPC.xml",
+        "CSHCTGAPC.xml",
+        "DISGAPC.xml",
+        "P3Plus\\CTGAPC.xml",
+        "P7\\CTGAPC.xml",
+        "SPCTGAPC.xml",
+        "SPVSGAPC.xml"
+      ]
+    },
+    {
+      "type": "SchneiderElectric-PowerLogic-NameANSI",
+      "count": 6,
+      "before_first_doi": 6,
+      "files": 6,
+      "top_texts": [
+        {
+          "text": "21",
+          "count": 5
+        },
+        {
+          "text": "85",
+          "count": 1
+        }
+      ],
+      "sample_files": [
+        "AIDPSCH.xml",
+        "CommonPDIS.xml",
+        "RPSB.xml",
+        "TESTPDIS.xml",
+        "ZNPDIS.xml",
+        "ZPHSDGAPC.xml"
+      ]
+    },
+    {
+      "type": "SchneiderElectric-PowerLogic-CommType",
+      "count": 1,
+      "before_first_doi": 1,
+      "files": 1,
+      "top_texts": [
+        {
+          "text": "SerialPort",
+          "count": 1
+        }
+      ],
+      "sample_files": [
+        "SerLCCH.xml"
+      ]
+    },
+    {
+      "type": "eTr-IEC61850-90-11:LogicUnit",
+      "count": 1,
+      "before_first_doi": 1,
+      "files": 1,
+      "top_texts": [],
+      "sample_files": [
+        "LMODELGAPC.xml"
+      ]
+    }
+  ],
+  "parse_errors": []
+}

@@ -19,9 +19,13 @@ from ln_instance_scanner import (
     create_application_file_for_ln_instance,
     create_ln_instance_from_template,
     ensure_all_dai_present_from_template,
+    extract_ln_private_refs,
     extract_langref_refs,
     extract_value_refs,
+    ensure_ln_private_element,
+    get_ln_private_text,
     load_ln_instance_document,
+    remove_ln_private_elements,
     save_ln_instance_document,
     update_ln_header,
 )
@@ -31,6 +35,21 @@ APP_TITLE = "DBMEditor"
 
 
 _INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
+
+
+_PRIV_TYPE_LNNAME = "SchneiderElectric-PowerLogic-LNName"
+_PRIV_TYPE_NOMATRIX = "SchneiderElectric-PowerLogic-NoMatrix"
+_PRIV_TYPE_PRIVATELN = "SchneiderElectric-PowerLogic-PrivateLN"
+_PRIV_TYPE_NAMEANSI = "SchneiderElectric-PowerLogic-NameANSI"
+_PRIV_TYPE_PACKAGELN = "SchneiderElectric-PowerLogic-PackageLN"
+
+_MANAGED_PRIV_TYPES: tuple[str, ...] = (
+    _PRIV_TYPE_LNNAME,
+    _PRIV_TYPE_NAMEANSI,
+    _PRIV_TYPE_PACKAGELN,
+    _PRIV_TYPE_NOMATRIX,
+    _PRIV_TYPE_PRIVATELN,
+)
 
 
 def _sanitize_filename_stem(stem: str) -> str:
@@ -357,6 +376,15 @@ class _LangRow:
     ref: LangRefRef
 
 
+@dataclass
+class _PrivRow:
+    private_type: str
+    value_text: str
+    enabled: bool
+    is_custom: bool
+    has_nested_xml: bool = False
+
+
 class LNInstanceEditorFrame(ttk.Frame):
     def __init__(
         self,
@@ -380,6 +408,7 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._rows_filtered: list[_Row] = []
         self._lang_rows_all: list[_LangRow] = []
         self._lang_rows_filtered: list[_LangRow] = []
+        self._priv_rows: list[_PrivRow] = []
         self._saved_sig: str | None = None
         self._current_ln_index: int = 0
 
@@ -391,6 +420,9 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._lang_edit_entry: ttk.Entry | None = None
         self._lang_edit_iid: str | None = None
         self._lang_edit_col: str | None = None
+        self._priv_edit_entry: ttk.Entry | None = None
+        self._priv_edit_iid: str | None = None
+        self._priv_edit_col: str | None = None
         self._tree_menu: tk.Menu | None = None
 
         self._iid_to_ref: dict[str, ValueRef] = {}
@@ -403,6 +435,9 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._lang_header_key_by_iid: dict[str, str] = {}
         self._lang_header_iid_by_key: dict[str, str] = {}
         self._lang_collapsed_groups: set[str] = set()
+
+        self._priv_iid_to_row: dict[str, _PrivRow] = {}
+        self._priv_tree_menu: tk.Menu | None = None
 
         self.var_path = tk.StringVar(value="")
         self.var_instance_filter = tk.StringVar(value="")
@@ -424,6 +459,7 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._tpl_lang_order_index: dict[str, int] = {}
 
         self._col_resize_after: str | None = None
+        self._priv_col_resize_after: str | None = None
 
         self.var_lnClass = tk.StringVar(value="")
         self.var_inst = tk.StringVar(value="")
@@ -443,6 +479,9 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         self._build_ui()
 
+        # No document loaded at startup.
+        self._update_doc_dependent_ui()
+
         self.refresh_instance_list()
 
         if initial_path is not None:
@@ -457,11 +496,12 @@ class LNInstanceEditorFrame(ttk.Frame):
         self.btn_save = ttk.Button(row1, text="Save", command=self.save)
         self.btn_save.pack(side="left", padx=(8, 0))
         ttk.Button(row1, text="Save As", command=self.save_as).pack(side="left", padx=(8, 0))
-        ttk.Button(
+        self.btn_create_app = ttk.Button(
             row1,
             text="Create application file with this template",
             command=self.create_application_file_with_template,
-        ).pack(side="left", padx=(8, 0))
+        )
+        self.btn_create_app.pack(side="left", padx=(8, 0))
 
         row2 = ttk.Frame(self, padding=(10, 8, 10, 0))
         row2.pack(fill="x")
@@ -514,8 +554,10 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         tab_values = ttk.Frame(self.details_nb)
         tab_lang = ttk.Frame(self.details_nb)
+        tab_priv = ttk.Frame(self.details_nb)
         self.details_nb.add(tab_values, text="Values")
         self.details_nb.add(tab_lang, text="Language reference")
+        self.details_nb.add(tab_priv, text="Private")
 
         # Values tab
         valbox = ttk.LabelFrame(tab_values, text="Values (<Val>)", padding=8)
@@ -624,6 +666,54 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         self._lang_tree_menu = tk.Menu(self, tearoff=0)
         self._lang_tree_menu.add_command(label="Apply template ID", command=self.apply_template_langref_to_selected)
+
+        # Private tab (LN-level <Private> before DOI)
+        privbox = ttk.LabelFrame(tab_priv, text="Private (LN-level <Private> before <DOI>)", padding=8)
+        privbox.pack(fill="both", expand=True)
+        privbox.columnconfigure(0, weight=1)
+        privbox.rowconfigure(1, weight=1)
+
+        priv_btns = ttk.Frame(privbox)
+        priv_btns.grid(row=0, column=0, sticky="we")
+        ttk.Button(priv_btns, text="Add", command=self.priv_add).pack(side="left")
+        self.btn_priv_delete = ttk.Button(priv_btns, text="Delete", command=self.priv_delete_selected)
+        self.btn_priv_delete.pack(side="left", padx=(8, 0))
+
+        self.tree_priv = ttk.Treeview(
+            privbox,
+            columns=("type", "value", "enabled"),
+            show="headings",
+            selectmode="browse",
+        )
+        self.tree_priv.heading("type", text="Private type")
+        self.tree_priv.heading("value", text="Value")
+        self.tree_priv.heading("enabled", text="Use")
+        # Widths are set dynamically; these are safe defaults.
+        self.tree_priv.column("type", width=360, minwidth=220, anchor="w", stretch=True)
+        self.tree_priv.column("value", width=360, minwidth=220, anchor="w", stretch=True)
+        # Keep checkbox column always visible.
+        self.tree_priv.column("enabled", width=70, minwidth=70, anchor="center", stretch=False)
+        self.tree_priv.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+
+        pvsb = ttk.Scrollbar(privbox, orient="vertical", command=self.tree_priv.yview)
+        phsb = ttk.Scrollbar(privbox, orient="horizontal", command=self.tree_priv.xview)
+        self.tree_priv.configure(yscrollcommand=pvsb.set, xscrollcommand=phsb.set)
+        pvsb.grid(row=1, column=1, sticky="ns", pady=(8, 0))
+        phsb.grid(row=2, column=0, sticky="we")
+
+        self.tree_priv.bind("<Double-1>", self._on_priv_tree_double_click)
+        self.tree_priv.bind("<Button-1>", self._on_priv_tree_left_click)
+        self.tree_priv.bind("<Button-3>", self._on_priv_tree_right_click)
+        self.tree_priv.bind("<space>", lambda _e: self.priv_toggle_selected())
+        self.tree_priv.bind("<<TreeviewSelect>>", lambda _e: self._update_priv_delete_button_state())
+        self.tree_priv.bind("<Configure>", lambda _e: self._schedule_priv_column_resize())
+
+        self._priv_tree_menu = tk.Menu(self, tearoff=0)
+        self._priv_tree_menu.add_command(label="Add", command=self.priv_add)
+        self._priv_tree_menu.add_command(label="Delete", command=self.priv_delete_selected)
+
+        # First layout pass after widgets are realized.
+        self.after_idle(self._resize_priv_columns)
 
         self.status = tk.StringVar(value="")
         if self._show_status_bar:
@@ -764,11 +854,77 @@ class LNInstanceEditorFrame(ttk.Frame):
         if drift != 0:
             widths["path"] = max(mins["path"], widths["path"] + drift)
 
-        for k, ww in widths.items():
+    def _schedule_priv_column_resize(self) -> None:
+        try:
+            if self._priv_col_resize_after is not None:
+                self.after_cancel(self._priv_col_resize_after)
+        except Exception:
+            pass
+
+        try:
+            self._priv_col_resize_after = self.after(50, self._resize_priv_columns)
+        except Exception:
+            self._priv_col_resize_after = None
+
+    def _resize_priv_columns(self) -> None:
+        if not hasattr(self, "tree_priv"):
+            return
+        try:
+            w = int(self.tree_priv.winfo_width())
+        except Exception:
+            return
+        if w <= 50:
+            return
+
+        avail = max(0, w - 6)
+
+        enabled_w = 70
+        type_min = 220
+        value_min = 220
+
+        # If too narrow, keep checkbox visible and let horizontal scrollbar handle the rest.
+        if avail <= enabled_w + type_min + value_min:
             try:
-                self.tree.column(k, width=int(ww))
+                self.tree_priv.column("enabled", width=enabled_w)
+                self.tree_priv.column("type", width=type_min)
+                self.tree_priv.column("value", width=value_min)
             except Exception:
                 pass
+            return
+
+        rem = avail - enabled_w
+        type_w = int(round(rem * 0.55))
+        value_w = rem - type_w
+
+        type_w = max(type_min, type_w)
+        value_w = max(value_min, value_w)
+
+        # Fix rounding drift by adjusting Value.
+        drift = avail - (enabled_w + type_w + value_w)
+        if drift != 0:
+            value_w = max(value_min, value_w + drift)
+
+        try:
+            self.tree_priv.column("enabled", width=enabled_w)
+            self.tree_priv.column("type", width=type_w)
+            self.tree_priv.column("value", width=value_w)
+        except Exception:
+            pass
+
+    def _update_priv_delete_button_state(self) -> None:
+        if not hasattr(self, "tree_priv") or not hasattr(self, "btn_priv_delete"):
+            return
+        can_delete = False
+        try:
+            sel = self.tree_priv.selection()
+            if sel and (sel[0] in self._priv_iid_to_row):
+                can_delete = bool(self._priv_iid_to_row[sel[0]].is_custom)
+        except Exception:
+            can_delete = False
+        try:
+            self.btn_priv_delete.configure(state=("normal" if can_delete else "disabled"))
+        except Exception:
+            pass
 
     def bind_shortcuts_to(self, widget: tk.Misc) -> None:
         widget.bind("<Control-o>", lambda _e: self.open_dialog())
@@ -1073,6 +1229,13 @@ class LNInstanceEditorFrame(ttk.Frame):
         self.doc = doc
         self.var_path.set(os.fspath(path))
 
+        # During initial UI population, header variable traces may call _update_dirty_ui(),
+        # which calls is_dirty() and _apply_header_to_doc(). If _saved_sig still reflects
+        # the previous document, that can write stale header values into the newly loaded
+        # document (and the UI may appear not to update). Clear _saved_sig to disable
+        # is_dirty() writeback until after the UI is populated.
+        self._saved_sig = None
+
         # Always edit the first LN element found.
         self._current_ln_index = 0
         if len(doc.ln_elements) > 1:
@@ -1082,6 +1245,7 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         self._load_current_ln_into_ui()
         self._saved_sig = compute_signature(doc)
+        self._update_doc_dependent_ui()
         self._update_dirty_ui()
         if self.status.get().strip() == "":
             self._set_status(f"Loaded: {os.fspath(path)}")
@@ -1120,6 +1284,7 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         self._rows_all = []
         self._lang_rows_all = []
+        self._priv_rows = []
         try:
             refs = extract_value_refs(self.doc, idx, sort=False)
         except Exception as e:
@@ -1167,6 +1332,9 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         self._apply_filter()
         self._apply_lang_filter()
+
+        self._load_priv_rows_from_doc()
+        self._render_priv_tree()
 
     def _apply_filter(self) -> None:
         q = self.var_value_filter.get().strip()
@@ -1227,6 +1395,351 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._end_cell_edit(commit=True)
         self._end_meta_edit(commit=True)
         self._end_lang_cell_edit(commit=True)
+        self._end_priv_cell_edit(commit=True)
+
+    def _default_lnname_text(self) -> str:
+        prefix = (self.var_prefix.get() or "").strip()
+        ln_class = (self.var_lnClass.get() or "").strip()
+        return f"{prefix}{ln_class}#" if (prefix or ln_class) else "#"
+
+    def _priv_checkbox_text(self, enabled: bool) -> str:
+        return "☑" if enabled else "☐"
+
+    def _is_priv_type_editable(self, row: _PrivRow) -> bool:
+        return bool(row.is_custom)
+
+    def _is_priv_value_editable(self, row: _PrivRow) -> bool:
+        if row.has_nested_xml:
+            return False
+        if row.is_custom:
+            return True
+        return row.private_type in {_PRIV_TYPE_LNNAME, _PRIV_TYPE_NAMEANSI}
+
+    def _load_priv_rows_from_doc(self) -> None:
+        if not self.doc:
+            return
+        idx = self._current_ln_index
+
+        managed_set = set(_MANAGED_PRIV_TYPES)
+        out: list[_PrivRow] = []
+
+        # Managed rows (always visible)
+        for t in _MANAGED_PRIV_TYPES:
+            txt = get_ln_private_text(self.doc, idx, t, before_first_doi_only=True)
+            enabled = txt is not None
+            val = ""
+            if t == _PRIV_TYPE_LNNAME:
+                val = (txt or "").strip() if txt is not None else self._default_lnname_text()
+            elif t == _PRIV_TYPE_NAMEANSI:
+                val = (txt or "").strip() if txt is not None else ""
+            else:
+                val = (txt or "").strip() if txt is not None else ""
+            out.append(_PrivRow(private_type=t, value_text=val, enabled=bool(enabled), is_custom=False))
+
+        # Existing custom rows (from file)
+        try:
+            refs = extract_ln_private_refs(self.doc, idx, before_first_doi_only=True)
+        except Exception:
+            refs = []
+
+        seen_custom: set[str] = set()
+        for r in refs:
+            t = (r.get_type() or "").strip()
+            if not t or t in managed_set:
+                continue
+            if t in seen_custom:
+                continue
+            seen_custom.add(t)
+            out.append(
+                _PrivRow(
+                    private_type=t,
+                    value_text=r.get_compact_content(),
+                    enabled=True,
+                    is_custom=True,
+                    has_nested_xml=bool(r.has_child_elements()),
+                )
+            )
+
+        self._priv_rows = out
+
+    def _render_priv_tree(self) -> None:
+        if not hasattr(self, "tree_priv"):
+            return
+        try:
+            self.tree_priv.delete(*self.tree_priv.get_children())
+        except Exception:
+            return
+
+        self._priv_iid_to_row.clear()
+        for i, row in enumerate(self._priv_rows):
+            iid = f"p_{i:05d}"
+            try:
+                self.tree_priv.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=(
+                        row.private_type,
+                        row.value_text,
+                        self._priv_checkbox_text(row.enabled),
+                    ),
+                )
+                self._priv_iid_to_row[iid] = row
+            except Exception:
+                pass
+
+            self._update_priv_delete_button_state()
+
+    def _apply_priv_row_to_doc(self, row: _PrivRow, *, old_type: str | None = None) -> None:
+        if not self.doc:
+            return
+        idx = self._current_ln_index
+
+        t = (row.private_type or "").strip()
+        if old_type is not None and (old_type or "").strip() and (old_type or "").strip() != t:
+            remove_ln_private_elements(self.doc, idx, (old_type or "").strip())
+
+        if not t:
+            return
+
+        if row.enabled:
+            # Normalize: keep a single node per type.
+            remove_ln_private_elements(self.doc, idx, t)
+            ensure_ln_private_element(self.doc, idx, t, text=(row.value_text or ""))
+        else:
+            remove_ln_private_elements(self.doc, idx, t)
+
+    def _on_priv_tree_left_click(self, event: tk.Event) -> None:
+        # Commit any in-progress edit first.
+        self._end_priv_cell_edit(commit=True)
+
+        try:
+            region = self.tree_priv.identify("region", event.x, event.y)
+            if region != "cell":
+                return
+            col = self.tree_priv.identify_column(event.x)
+            iid = self.tree_priv.identify_row(event.y)
+            if not iid:
+                return
+            self.tree_priv.selection_set(iid)
+            if col != "#3":
+                return
+            row = self._priv_iid_to_row.get(iid)
+            if row is None:
+                return
+            row.enabled = not row.enabled
+            self._apply_priv_row_to_doc(row)
+            try:
+                self.tree_priv.item(iid, values=(row.private_type, row.value_text, self._priv_checkbox_text(row.enabled)))
+            except Exception:
+                pass
+            self._update_dirty_ui()
+        except Exception:
+            return
+
+    def priv_toggle_selected(self) -> None:
+        if not hasattr(self, "tree_priv"):
+            return
+        sel = self.tree_priv.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        row = self._priv_iid_to_row.get(iid)
+        if row is None:
+            return
+        row.enabled = not row.enabled
+        self._apply_priv_row_to_doc(row)
+        try:
+            self.tree_priv.item(iid, values=(row.private_type, row.value_text, self._priv_checkbox_text(row.enabled)))
+        except Exception:
+            pass
+        self._update_dirty_ui()
+
+    def priv_add(self) -> None:
+        # Adds a new custom private row; user will edit the type/value.
+        self._end_priv_cell_edit(commit=True)
+        self._priv_rows.append(_PrivRow(private_type="", value_text="", enabled=True, is_custom=True))
+        self._render_priv_tree()
+        try:
+            iid = f"p_{(len(self._priv_rows)-1):05d}"
+            self.tree_priv.selection_set(iid)
+            self.tree_priv.see(iid)
+            self._begin_priv_cell_edit(iid, "type")
+        except Exception:
+            pass
+
+    def priv_delete_selected(self) -> None:
+        self._end_priv_cell_edit(commit=True)
+        if not hasattr(self, "tree_priv"):
+            return
+        sel = self.tree_priv.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        row = self._priv_iid_to_row.get(iid)
+        if row is None:
+            return
+        if not row.is_custom:
+            self._set_status("Managed Private rows cannot be deleted (uncheck to remove from file).")
+            return
+        try:
+            t = (row.private_type or "").strip()
+            if t and self.doc:
+                remove_ln_private_elements(self.doc, self._current_ln_index, t)
+        except Exception:
+            pass
+
+        try:
+            # Remove by identity
+            for i, r in enumerate(self._priv_rows):
+                if r is row:
+                    self._priv_rows.pop(i)
+                    break
+        except Exception:
+            pass
+
+        self._render_priv_tree()
+        self._update_dirty_ui()
+
+    def _on_priv_tree_right_click(self, event: tk.Event) -> None:
+        if self._priv_tree_menu is None:
+            return
+        self._end_priv_cell_edit(commit=True)
+        try:
+            iid = self.tree_priv.identify_row(event.y)
+            if iid:
+                self.tree_priv.selection_set(iid)
+            # Disable Delete when selection is managed.
+            can_delete = False
+            try:
+                sel = self.tree_priv.selection()
+                if sel and (sel[0] in self._priv_iid_to_row):
+                    can_delete = bool(self._priv_iid_to_row[sel[0]].is_custom)
+            except Exception:
+                can_delete = False
+            try:
+                self._priv_tree_menu.entryconfigure(1, state=("normal" if can_delete else "disabled"))
+            except Exception:
+                pass
+            self._priv_tree_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self._priv_tree_menu.grab_release()
+            except Exception:
+                pass
+
+    def _on_priv_tree_double_click(self, event: tk.Event) -> None:
+        try:
+            region = self.tree_priv.identify("region", event.x, event.y)
+            if region != "cell":
+                return
+            col = self.tree_priv.identify_column(event.x)
+            iid = self.tree_priv.identify_row(event.y)
+            if not iid or iid not in self._priv_iid_to_row:
+                return
+            self.tree_priv.selection_set(iid)
+            column_id = "type" if col == "#1" else ("value" if col == "#2" else "enabled")
+            if column_id == "enabled":
+                self.priv_toggle_selected()
+                return
+            self._begin_priv_cell_edit(iid, column_id)
+        except Exception:
+            return
+
+    def _begin_priv_cell_edit(self, iid: str, column_id: str) -> None:
+        row = self._priv_iid_to_row.get(iid)
+        if row is None:
+            return
+
+        self._end_priv_cell_edit(commit=False)
+        self._end_lang_cell_edit(commit=True)
+        self._end_cell_edit(commit=True)
+
+        if column_id == "type" and not self._is_priv_type_editable(row):
+            return
+        if column_id == "value" and not self._is_priv_value_editable(row):
+            if row.has_nested_xml:
+                self._set_status("This <Private> contains nested XML; value editing is disabled.")
+            return
+
+        bbox = self.tree_priv.bbox(iid, column=column_id)
+        if not bbox:
+            return
+        x, y, w, h = bbox
+
+        value_text = row.private_type if column_id == "type" else row.value_text
+
+        ent = ttk.Entry(self.tree_priv)
+        ent.place(x=x, y=y, width=w, height=h)
+        ent.insert(0, value_text)
+        ent.selection_range(0, "end")
+        ent.focus_set()
+
+        ent.bind("<Return>", lambda _e: self._end_priv_cell_edit(commit=True))
+        ent.bind("<Escape>", lambda _e: self._end_priv_cell_edit(commit=False))
+        ent.bind("<FocusOut>", lambda _e: self._end_priv_cell_edit(commit=True))
+
+        self._priv_edit_entry = ent
+        self._priv_edit_iid = iid
+        self._priv_edit_col = column_id
+
+    def _end_priv_cell_edit(self, *, commit: bool) -> None:
+        if self._priv_edit_entry is None or self._priv_edit_iid is None or self._priv_edit_col is None:
+            return
+
+        ent = self._priv_edit_entry
+        iid = self._priv_edit_iid
+        col = self._priv_edit_col
+        self._priv_edit_entry = None
+        self._priv_edit_iid = None
+        self._priv_edit_col = None
+
+        new_text = (ent.get() or "")
+        try:
+            ent.place_forget()
+        except Exception:
+            pass
+        try:
+            ent.destroy()
+        except Exception:
+            pass
+
+        if not commit:
+            return
+
+        row = self._priv_iid_to_row.get(iid)
+        if row is None:
+            return
+
+        old_type: str | None = None
+
+        if col == "type":
+            if not self._is_priv_type_editable(row):
+                return
+            old_type = (row.private_type or "").strip()
+            row.private_type = (new_text or "").strip()
+            # Prevent custom rows from shadowing managed ones.
+            if row.private_type in set(_MANAGED_PRIV_TYPES):
+                self._set_status("This private type is managed; edit the managed row instead.")
+                row.private_type = old_type
+                return
+        elif col == "value":
+            if not self._is_priv_value_editable(row):
+                return
+            row.value_text = (new_text or "")
+
+        if row.enabled:
+            self._apply_priv_row_to_doc(row, old_type=old_type)
+
+        try:
+            self.tree_priv.item(
+                iid,
+                values=(row.private_type, row.value_text, self._priv_checkbox_text(row.enabled)),
+            )
+        except Exception:
+            pass
+
+        self._update_dirty_ui()
 
     def _render_lang_tree(
         self,
@@ -1995,6 +2508,21 @@ class LNInstanceEditorFrame(ttk.Frame):
             self._begin_lang_cell_edit(iid, "#2")
             return
 
+        if tab_text == "Private":
+            sel = self.tree_priv.selection() if hasattr(self, "tree_priv") else ()
+            if not sel:
+                return
+            iid = sel[0]
+            row = self._priv_iid_to_row.get(iid)
+            if row is None:
+                return
+            # Default to editing value; for new custom rows, type first.
+            if row.is_custom and not (row.private_type or "").strip():
+                self._begin_priv_cell_edit(iid, "type")
+                return
+            self._begin_priv_cell_edit(iid, "value")
+            return
+
         sel = self.tree.selection()
         if not sel:
             return
@@ -2291,6 +2819,16 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         try:
             self.btn_save.configure(style=("Dirty.TButton" if dirty else "TButton"))
+        except Exception:
+            pass
+
+    def _update_doc_dependent_ui(self) -> None:
+        """Enable/disable actions that require an open LN instance."""
+
+        has_doc = self.doc is not None
+        try:
+            if hasattr(self, "btn_create_app") and self.btn_create_app is not None:
+                self.btn_create_app.configure(state=("normal" if has_doc else "disabled"))
         except Exception:
             pass
 
