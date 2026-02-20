@@ -189,6 +189,396 @@ class _EnumTypeSaveAsDialog(tk.Toplevel):
         return self._result
 
 
+class _AfgNewDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        initial_name: str = "",
+        initial_proxy: str = "",
+        initial_chapter: str = "",
+        initial_topic: str = "",
+    ):
+        super().__init__(parent)
+        self.title("New AFG")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: dict[str, str] | None = None
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        ttk.Label(frm, text="name (file name is <name>.xml):").grid(row=0, column=0, sticky="w")
+        self.var_name = tk.StringVar(value=initial_name)
+        ent_name = ttk.Entry(frm, textvariable=self.var_name, width=48)
+        ent_name.grid(row=0, column=1, sticky="we", padx=(8, 0))
+
+        ttk.Label(frm, text="proxyName:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.var_proxy = tk.StringVar(value=initial_proxy)
+        ttk.Entry(frm, textvariable=self.var_proxy, width=48).grid(row=1, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(frm, text="chapterName:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.var_chapter = tk.StringVar(value=initial_chapter)
+        ttk.Entry(frm, textvariable=self.var_chapter, width=48).grid(row=2, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(frm, text="topicName:").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.var_topic = tk.StringVar(value=initial_topic)
+        ttk.Entry(frm, textvariable=self.var_topic, width=48).grid(row=3, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+
+        try:
+            ent_name.focus_set()
+            ent_name.select_range(0, tk.END)
+        except Exception:
+            pass
+
+    def _ok(self) -> None:
+        name = (self.var_name.get() or "").strip()
+        if not name:
+            messagebox.showerror("Missing", "AFG name is required", parent=self)
+            return
+        self._result = {
+            "name": name,
+            "proxyName": (self.var_proxy.get() or ""),
+            "chapterName": (self.var_chapter.get() or ""),
+            "topicName": (self.var_topic.get() or ""),
+        }
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, str] | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _AfgSaveAsDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Misc, *, initial_name: str = ""):
+        super().__init__(parent)
+        self.title("Save AFG as")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: str | None = None
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="New AFG name (file name is <name>.xml):").grid(row=0, column=0, sticky="w")
+        self.var_name = tk.StringVar(value=initial_name)
+        ent = ttk.Entry(frm, textvariable=self.var_name, width=48)
+        ent.grid(row=1, column=0, sticky="we", pady=(6, 0))
+        frm.columnconfigure(0, weight=1)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+
+        try:
+            ent.focus_set()
+            ent.select_range(0, tk.END)
+        except Exception:
+            pass
+
+    def _ok(self) -> None:
+        new_name = (self.var_name.get() or "").strip()
+        if not new_name:
+            messagebox.showerror("Missing", "AFG name is required", parent=self)
+            return
+        self._result = new_name
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> str | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _AfgFbEditDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Misc, *, name: str, pos_x: str, pos_y: str):
+        super().__init__(parent)
+        self.title("Edit AFB")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: dict[str, str] | None = None
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        ttk.Label(frm, text="name:").grid(row=0, column=0, sticky="w")
+        self.var_name = tk.StringVar(value=name)
+        ent_name = ttk.Entry(frm, textvariable=self.var_name, width=40, state="readonly")
+        ent_name.grid(row=0, column=1, sticky="we", padx=(8, 0))
+
+        ttk.Label(frm, text="posX:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.var_x = tk.StringVar(value=pos_x)
+        ent_x = ttk.Entry(frm, textvariable=self.var_x, width=18)
+        ent_x.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(frm, text="posY:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.var_y = tk.StringVar(value=pos_y)
+        ttk.Entry(frm, textvariable=self.var_y, width=18).grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+
+        try:
+            # name is readonly; focus the first editable field
+            ent_x.focus_set()
+            ent_x.select_range(0, tk.END)
+        except Exception:
+            pass
+
+    def _ok(self) -> None:
+        self._result = {
+            "name": (self.var_name.get() or "").strip(),
+            "posX": (self.var_x.get() or "").strip(),
+            "posY": (self.var_y.get() or "").strip(),
+        }
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, str] | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _AfgInEditDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        name: str,
+        pos_x: str,
+        pos_y: str,
+        src: str,
+        do_ref: str,
+        do_ref_values: list[str] | None,
+        confpin: bool,
+        softlink: bool,
+    ):
+        super().__init__(parent)
+        self.title("Edit AFG Input")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: dict[str, object] | None = None
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        ttk.Label(frm, text="name:").grid(row=0, column=0, sticky="w")
+        self.var_name = tk.StringVar(value=(name or ""))
+        ent_name = ttk.Entry(frm, textvariable=self.var_name, width=40)
+        ent_name.grid(row=0, column=1, sticky="we", padx=(8, 0))
+
+        ttk.Label(frm, text="posX:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.var_x = tk.StringVar(value=(pos_x or ""))
+        ttk.Entry(frm, textvariable=self.var_x, width=18).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(frm, text="posY:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.var_y = tk.StringVar(value=(pos_y or ""))
+        ttk.Entry(frm, textvariable=self.var_y, width=18).grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(frm, text="src:").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.var_src = tk.StringVar(value=(src or ""))
+        ttk.Entry(frm, textvariable=self.var_src, width=60).grid(row=3, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(frm, text="doRef:").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        self.var_do = tk.StringVar(value=(do_ref or ""))
+        vals = list(do_ref_values or [])
+        cur0 = (do_ref or "").strip()
+        if cur0 and cur0 not in vals:
+            vals = [cur0] + vals
+        cb_do = ttk.Combobox(frm, textvariable=self.var_do, values=tuple(vals), width=58)
+        cb_do.grid(row=4, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+
+        self.var_confpin = tk.BooleanVar(value=bool(confpin))
+        self.var_softlink = tk.BooleanVar(value=bool(softlink))
+        cfrm = ttk.Frame(frm)
+        cfrm.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(cfrm, text="confpin", variable=self.var_confpin).pack(side="left")
+        ttk.Checkbutton(cfrm, text="softlink", variable=self.var_softlink).pack(side="left", padx=(12, 0))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+
+        try:
+            ent_name.focus_set()
+            ent_name.select_range(0, tk.END)
+        except Exception:
+            pass
+
+    def _ok(self) -> None:
+        res = {
+            "name": (self.var_name.get() or "").strip(),
+            "posX": (self.var_x.get() or "").strip(),
+            "posY": (self.var_y.get() or "").strip(),
+            "src": (self.var_src.get() or "").strip(),
+            "doRef": (self.var_do.get() or "").strip(),
+            "confpin": bool(self.var_confpin.get()),
+            "softlink": bool(self.var_softlink.get()),
+        }
+        if not res["name"]:
+            messagebox.showerror("Missing", "name is required", parent=self)
+            return
+        self._result = res
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, object] | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _AfgOutEditDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        name: str,
+        pos_x: str,
+        pos_y: str,
+        do_ref: str,
+        do_ref_values_status: list[str] | None,
+        do_ref_values_inref: list[str] | None,
+        confpin: bool,
+    ):
+        super().__init__(parent)
+        self.title("Edit AFG Output")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: dict[str, object] | None = None
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        ttk.Label(frm, text="name:").grid(row=0, column=0, sticky="w")
+        self.var_name = tk.StringVar(value=(name or ""))
+        ent_name = ttk.Entry(frm, textvariable=self.var_name, width=40)
+        ent_name.grid(row=0, column=1, sticky="we", padx=(8, 0))
+
+        ttk.Label(frm, text="posX:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.var_x = tk.StringVar(value=(pos_x or ""))
+        ttk.Entry(frm, textvariable=self.var_x, width=18).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(frm, text="posY:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.var_y = tk.StringVar(value=(pos_y or ""))
+        ttk.Entry(frm, textvariable=self.var_y, width=18).grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+
+        ttk.Label(frm, text="doRef:").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.var_do = tk.StringVar(value=(do_ref or ""))
+        cb_do = ttk.Combobox(frm, textvariable=self.var_do, width=58)
+        cb_do.grid(row=3, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+
+        self.var_confpin = tk.BooleanVar(value=bool(confpin))
+
+        status_vals = list(do_ref_values_status or [])
+        inref_vals = list(do_ref_values_inref or [])
+
+        def apply_do_values() -> None:
+            cur = (self.var_do.get() or "").strip()
+            base = inref_vals if bool(self.var_confpin.get()) else status_vals
+            vals = list(base)
+            if cur and cur not in vals:
+                vals = [cur] + vals
+            try:
+                cb_do.configure(values=tuple(vals))
+            except Exception:
+                try:
+                    cb_do["values"] = tuple(vals)
+                except Exception:
+                    pass
+
+        def on_confpin_toggle() -> None:
+            apply_do_values()
+
+        ttk.Checkbutton(frm, text="confpin", variable=self.var_confpin, command=on_confpin_toggle).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(8, 0)
+        )
+        apply_do_values()
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+
+        try:
+            ent_name.focus_set()
+            ent_name.select_range(0, tk.END)
+        except Exception:
+            pass
+
+    def _ok(self) -> None:
+        res = {
+            "name": (self.var_name.get() or "").strip(),
+            "posX": (self.var_x.get() or "").strip(),
+            "posY": (self.var_y.get() or "").strip(),
+            "doRef": (self.var_do.get() or "").strip(),
+            "confpin": bool(self.var_confpin.get()),
+        }
+        if not res["name"]:
+            messagebox.showerror("Missing", "name is required", parent=self)
+            return
+        self._result = res
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, object] | None:
+        self.wait_window(self)
+        return self._result
+
+
 class _PickFromListDialog(tk.Toplevel):
     def __init__(
         self,
@@ -7708,6 +8098,53 @@ class MainWindow(tk.Tk):
         self.cb_app: ttk.Combobox | None = None
         self.lbl_app_match: ttk.Label | None = None
 
+        # AFG (Application Group) viewer state (files under datamodel/applicationgroup)
+        self._afg_file_path: Path | None = None
+        self._afg_root: ET.Element | None = None
+
+        # AFG -> LN instance (lndm) suggestion state (for doRef dropdowns)
+        self._afg_ln_cached_name: str = ""
+        self._afg_ln_instance_path: Path | None = None
+        self._afg_ln_inref_doref_values: list[str] = []
+        self._afg_ln_status_doref_values: list[str] = []
+        self._all_afg_files: list[str] = []
+        self.var_afg_filter: tk.StringVar | None = None
+        self.var_afg_selected: tk.StringVar | None = None
+        self.cb_afg: ttk.Combobox | None = None
+        self.lbl_afg_match: ttk.Label | None = None
+
+        self._afg_meta_name: tk.StringVar | None = None
+        self._afg_meta_proxy: tk.StringVar | None = None
+        self._afg_meta_chapter: tk.StringVar | None = None
+        self._afg_meta_topic: tk.StringVar | None = None
+        self._afg_meta_loading: bool = False
+
+        self._afg_tv_fb: ttk.Treeview | None = None
+        self._afg_tv_fb_inputs: ttk.Treeview | None = None
+        self._afg_tv_fb_outputs: ttk.Treeview | None = None
+        self._afg_tv_in: ttk.Treeview | None = None
+        self._afg_tv_out: ttk.Treeview | None = None
+        self._afg_fb_iid_to_item: dict[str, ET.Element] = {}
+        self._afg_fb_clipboard: ET.Element | None = None
+        self._afg_fb_ctx_menu: tk.Menu | None = None
+
+        self._afg_fb_inline: tk.Widget | None = None
+        self._afg_fb_inline_iid: str | None = None
+        self._afg_fb_inline_col: str | None = None
+
+        self._afg_in_iid_to_item: dict[str, ET.Element] = {}
+        self._afg_out_iid_to_item: dict[str, ET.Element] = {}
+        self._afg_in_clipboard: ET.Element | None = None
+        self._afg_out_clipboard: ET.Element | None = None
+        self._afg_in_ctx_menu: tk.Menu | None = None
+        self._afg_out_ctx_menu: tk.Menu | None = None
+        self._afg_in_inline: tk.Widget | None = None
+        self._afg_in_inline_iid: str | None = None
+        self._afg_in_inline_col: str | None = None
+        self._afg_out_inline: tk.Widget | None = None
+        self._afg_out_inline_iid: str | None = None
+        self._afg_out_inline_col: str | None = None
+
         self._set_status("Scanning IEC 61850 types...")
         self.update_idletasks()
 
@@ -7737,11 +8174,13 @@ class MainWindow(tk.Tk):
         self.tab_template = ttk.Frame(self.notebook)
         self.tab_instance = ttk.Frame(self.notebook)
         self.tab_application = ttk.Frame(self.notebook)
+        self.tab_afg = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_enum_type, text="Enum")
         self.notebook.add(self.tab_do_template, text="DO template")
         self.notebook.add(self.tab_template, text="LN template")
         self.notebook.add(self.tab_instance, text="LN instance")
         self.notebook.add(self.tab_application, text="Application")
+        self.notebook.add(self.tab_afg, text="AFG")
 
         # EnumType tab UI (files under iec61850/EnumType)
         if self.tab_enum_type is not None:
@@ -8168,6 +8607,228 @@ class MainWindow(tk.Tk):
                 self._app_tv_setting.bind("<Double-1>", self._on_app_setting_double_click)
                 self._app_tv_setting.bind("<Escape>", lambda _e: self._end_app_setting_inline_editor(commit=False))
 
+        # AFG tab UI (files under datamodel/applicationgroup)
+        if self.tab_afg is not None:
+            toolbar = ttk.Frame(self.tab_afg, padding=(10, 10, 10, 0))
+            toolbar.pack(fill="x")
+            ttk.Button(toolbar, text="New", command=self._new_afg).pack(side="left")
+            ttk.Button(toolbar, text="Open", command=self._open_afg).pack(side="left", padx=(8, 0))
+            ttk.Button(toolbar, text="Save", command=self._save_afg).pack(side="left", padx=(8, 0))
+            ttk.Button(toolbar, text="Save As", command=self._save_afg_as).pack(side="left", padx=(8, 0))
+
+            row2 = ttk.Frame(self.tab_afg, padding=(10, 8, 10, 0))
+            row2.pack(fill="x")
+            ttk.Label(row2, text="Search").pack(side="left")
+            self.var_afg_filter = tk.StringVar(value="")
+            ent_filter = ttk.Entry(row2, textvariable=self.var_afg_filter, width=28)
+            ent_filter.pack(side="left", padx=(8, 0))
+
+            self.var_afg_selected = tk.StringVar(value="")
+            self.cb_afg = ttk.Combobox(row2, textvariable=self.var_afg_selected, values=[], width=66)
+            self.cb_afg.pack(side="left", padx=(10, 0))
+            ttk.Button(row2, text="Load", command=self._open_afg_from_search).pack(side="left", padx=(8, 0))
+
+            self.lbl_afg_match = ttk.Label(row2, text="")
+            self.lbl_afg_match.pack(side="left", padx=(10, 0))
+
+            try:
+                self.cb_afg.bind("<Return>", lambda _e: self._open_afg_from_search())
+            except Exception:
+                pass
+
+            body = ttk.Frame(self.tab_afg, padding=10)
+            body.pack(fill="both", expand=True)
+            body.columnconfigure(0, weight=1)
+            body.rowconfigure(1, weight=1)
+
+            meta = ttk.LabelFrame(body, text="AFG", padding=10)
+            meta.grid(row=0, column=0, sticky="we")
+            for col in (1, 3, 5, 7):
+                meta.columnconfigure(col, weight=1)
+
+            self._afg_meta_name = tk.StringVar(value="")
+            self._afg_meta_proxy = tk.StringVar(value="")
+            self._afg_meta_chapter = tk.StringVar(value="")
+            self._afg_meta_topic = tk.StringVar(value="")
+
+            try:
+                self._afg_meta_name.trace_add("write", lambda *_a: self._sync_afg_meta_vars_to_root())
+                self._afg_meta_proxy.trace_add("write", lambda *_a: self._sync_afg_meta_vars_to_root())
+                self._afg_meta_chapter.trace_add("write", lambda *_a: self._sync_afg_meta_vars_to_root())
+                self._afg_meta_topic.trace_add("write", lambda *_a: self._sync_afg_meta_vars_to_root())
+            except Exception:
+                pass
+
+            ttk.Label(meta, text="name").grid(row=0, column=0, sticky="w")
+            ttk.Entry(meta, textvariable=self._afg_meta_name, width=18).grid(
+                row=0, column=1, sticky="we", padx=(6, 12)
+            )
+            ttk.Label(meta, text="proxyName").grid(row=0, column=2, sticky="w")
+            ttk.Entry(meta, textvariable=self._afg_meta_proxy, width=18).grid(
+                row=0, column=3, sticky="we", padx=(6, 12)
+            )
+            ttk.Label(meta, text="chapterName").grid(row=0, column=4, sticky="w")
+            ttk.Entry(meta, textvariable=self._afg_meta_chapter, width=18).grid(
+                row=0, column=5, sticky="we", padx=(6, 12)
+            )
+            ttk.Label(meta, text="topicName").grid(row=0, column=6, sticky="w")
+            ttk.Entry(meta, textvariable=self._afg_meta_topic, width=18).grid(
+                row=0, column=7, sticky="we", padx=(6, 0)
+            )
+
+            sub = ttk.Notebook(body)
+            sub.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+
+            tab_fb = ttk.Frame(sub)
+            tab_in = ttk.Frame(sub)
+            tab_out = ttk.Frame(sub)
+            sub.add(tab_fb, text="AFBs")
+            sub.add(tab_in, text="AFG Inputs")
+            sub.add(tab_out, text="AFG Outputs")
+
+            # AFBs tab
+            fb_wrap = ttk.Frame(tab_fb)
+            fb_wrap.pack(fill="both", expand=True)
+            fb_wrap.columnconfigure(0, weight=1)
+            fb_wrap.rowconfigure(1, weight=1)
+
+            fb_toolbar = ttk.Frame(fb_wrap, padding=(0, 6, 0, 6))
+            fb_toolbar.grid(row=0, column=0, sticky="we")
+            ttk.Button(fb_toolbar, text="Add", command=self._afg_fb_add).pack(side="left")
+            ttk.Button(fb_toolbar, text="Insert", command=self._afg_fb_insert).pack(side="left", padx=(6, 0))
+            ttk.Button(fb_toolbar, text="Edit", command=self._afg_fb_edit).pack(side="left", padx=(6, 0))
+            ttk.Button(fb_toolbar, text="Copy", command=self._afg_fb_copy).pack(side="left", padx=(6, 0))
+            ttk.Button(fb_toolbar, text="Cut", command=self._afg_fb_cut).pack(side="left", padx=(6, 0))
+            ttk.Button(fb_toolbar, text="Paste", command=self._afg_fb_paste).pack(side="left", padx=(6, 0))
+            ttk.Button(fb_toolbar, text="Delete", command=self._afg_fb_delete).pack(side="left", padx=(6, 0))
+            ttk.Button(fb_toolbar, text="Up", command=self._afg_fb_up).pack(side="left", padx=(18, 0))
+            ttk.Button(fb_toolbar, text="Down", command=self._afg_fb_down).pack(side="left", padx=(6, 0))
+
+            left = ttk.LabelFrame(fb_wrap, text="AFBs", padding=6)
+            left.grid(row=1, column=0, sticky="nsew")
+            left.columnconfigure(0, weight=1)
+            left.rowconfigure(0, weight=1)
+            self._afg_tv_fb = ttk.Treeview(
+                left,
+                columns=("name", "posX", "posY", "inputs", "outputs"),
+                show="headings",
+                selectmode="browse",
+            )
+            self._afg_tv_fb.heading("name", text="name")
+            self._afg_tv_fb.heading("posX", text="posX")
+            self._afg_tv_fb.heading("posY", text="posY")
+            self._afg_tv_fb.heading("inputs", text="inputs")
+            self._afg_tv_fb.heading("outputs", text="outputs")
+            self._afg_tv_fb.column("name", width=260, anchor="w")
+            self._afg_tv_fb.column("posX", width=90, anchor="e")
+            self._afg_tv_fb.column("posY", width=90, anchor="e")
+            self._afg_tv_fb.column("inputs", width=70, anchor="center")
+            self._afg_tv_fb.column("outputs", width=70, anchor="center")
+            self._afg_tv_fb.grid(row=0, column=0, sticky="nsew")
+            sb_fb = ttk.Scrollbar(left, orient="vertical", command=self._afg_tv_fb.yview)
+            self._afg_tv_fb.configure(yscrollcommand=sb_fb.set)
+            sb_fb.grid(row=0, column=1, sticky="ns")
+
+            try:
+                if self._afg_tv_fb is not None:
+                    self._afg_tv_fb.bind("<Double-1>", self._on_afg_fb_double_click)
+                    self._afg_tv_fb.bind("<Escape>", lambda _e: self._end_afg_fb_inline_editor(commit=False))
+                    self._afg_tv_fb.bind("<Button-3>", self._on_afg_fb_right_click)
+            except Exception:
+                pass
+
+            # AFG Inputs tab
+            in_wrap = ttk.Frame(tab_in)
+            in_wrap.pack(fill="both", expand=True)
+            in_wrap.columnconfigure(0, weight=1)
+            in_wrap.rowconfigure(1, weight=1)
+
+            in_toolbar = ttk.Frame(in_wrap, padding=(0, 6, 0, 6))
+            in_toolbar.grid(row=0, column=0, columnspan=2, sticky="we")
+            ttk.Button(in_toolbar, text="Add", command=self._afg_in_add).pack(side="left")
+            ttk.Button(in_toolbar, text="Insert", command=self._afg_in_insert).pack(side="left", padx=(6, 0))
+            ttk.Button(in_toolbar, text="Edit", command=self._afg_in_edit).pack(side="left", padx=(6, 0))
+            ttk.Button(in_toolbar, text="Copy", command=self._afg_in_copy).pack(side="left", padx=(6, 0))
+            ttk.Button(in_toolbar, text="Cut", command=self._afg_in_cut).pack(side="left", padx=(6, 0))
+            ttk.Button(in_toolbar, text="Paste", command=self._afg_in_paste).pack(side="left", padx=(6, 0))
+            ttk.Button(in_toolbar, text="Delete", command=self._afg_in_delete).pack(side="left", padx=(6, 0))
+            ttk.Button(in_toolbar, text="Up", command=self._afg_in_up).pack(side="left", padx=(18, 0))
+            ttk.Button(in_toolbar, text="Down", command=self._afg_in_down).pack(side="left", padx=(6, 0))
+            self._afg_tv_in = ttk.Treeview(
+                in_wrap,
+                columns=("name", "posX", "posY", "src", "doRef", "confpin", "softlink"),
+                show="headings",
+                selectmode="browse",
+            )
+            for c, h, w, a in (
+                ("name", "name", 130, "w"),
+                ("posX", "posX", 80, "e"),
+                ("posY", "posY", 80, "e"),
+                ("src", "src", 320, "w"),
+                ("doRef", "doRef", 180, "w"),
+                ("confpin", "confpin", 70, "center"),
+                ("softlink", "softlink", 70, "center"),
+            ):
+                self._afg_tv_in.heading(c, text=h)
+                self._afg_tv_in.column(c, width=w, anchor=a)
+            self._afg_tv_in.grid(row=1, column=0, sticky="nsew")
+            sb_io_in = ttk.Scrollbar(in_wrap, orient="vertical", command=self._afg_tv_in.yview)
+            self._afg_tv_in.configure(yscrollcommand=sb_io_in.set)
+            sb_io_in.grid(row=1, column=1, sticky="ns")
+
+            # AFG Outputs tab
+            out_wrap = ttk.Frame(tab_out)
+            out_wrap.pack(fill="both", expand=True)
+            out_wrap.columnconfigure(0, weight=1)
+            out_wrap.rowconfigure(1, weight=1)
+
+            out_toolbar = ttk.Frame(out_wrap, padding=(0, 6, 0, 6))
+            out_toolbar.grid(row=0, column=0, columnspan=2, sticky="we")
+            ttk.Button(out_toolbar, text="Add", command=self._afg_out_add).pack(side="left")
+            ttk.Button(out_toolbar, text="Insert", command=self._afg_out_insert).pack(side="left", padx=(6, 0))
+            ttk.Button(out_toolbar, text="Edit", command=self._afg_out_edit).pack(side="left", padx=(6, 0))
+            ttk.Button(out_toolbar, text="Copy", command=self._afg_out_copy).pack(side="left", padx=(6, 0))
+            ttk.Button(out_toolbar, text="Cut", command=self._afg_out_cut).pack(side="left", padx=(6, 0))
+            ttk.Button(out_toolbar, text="Paste", command=self._afg_out_paste).pack(side="left", padx=(6, 0))
+            ttk.Button(out_toolbar, text="Delete", command=self._afg_out_delete).pack(side="left", padx=(6, 0))
+            ttk.Button(out_toolbar, text="Up", command=self._afg_out_up).pack(side="left", padx=(18, 0))
+            ttk.Button(out_toolbar, text="Down", command=self._afg_out_down).pack(side="left", padx=(6, 0))
+            self._afg_tv_out = ttk.Treeview(
+                out_wrap,
+                columns=("name", "posX", "posY", "doRef", "confpin"),
+                show="headings",
+                selectmode="browse",
+            )
+            for c, h, w, a in (
+                ("name", "name", 130, "w"),
+                ("posX", "posX", 80, "e"),
+                ("posY", "posY", 80, "e"),
+                ("doRef", "doRef", 200, "w"),
+                ("confpin", "confpin", 70, "center"),
+            ):
+                self._afg_tv_out.heading(c, text=h)
+                self._afg_tv_out.column(c, width=w, anchor=a)
+            self._afg_tv_out.grid(row=1, column=0, sticky="nsew")
+            sb_io_out = ttk.Scrollbar(out_wrap, orient="vertical", command=self._afg_tv_out.yview)
+            self._afg_tv_out.configure(yscrollcommand=sb_io_out.set)
+            sb_io_out.grid(row=1, column=1, sticky="ns")
+
+            try:
+                if self._afg_tv_in is not None:
+                    self._afg_tv_in.bind("<Button-1>", self._on_afg_in_click)
+                    self._afg_tv_in.bind("<Double-1>", self._on_afg_in_double_click)
+                    self._afg_tv_in.bind("<Escape>", lambda _e: self._end_afg_in_inline_editor(commit=False))
+                    self._afg_tv_in.bind("<Button-3>", self._on_afg_in_right_click)
+                if self._afg_tv_out is not None:
+                    self._afg_tv_out.bind("<Button-1>", self._on_afg_out_click)
+                    self._afg_tv_out.bind("<Double-1>", self._on_afg_out_double_click)
+                    self._afg_tv_out.bind("<Escape>", lambda _e: self._end_afg_out_inline_editor(commit=False))
+                    self._afg_tv_out.bind("<Button-3>", self._on_afg_out_right_click)
+            except Exception:
+                pass
+
+            self._refresh_afg_search_list(select_rel=None)
+
             if self._app_tv_output is not None:
                 self._app_tv_output.bind("<Button-1>", self._on_app_output_click)
                 self._app_tv_output.bind("<Double-1>", self._on_app_output_double_click)
@@ -8294,8 +8955,10 @@ class MainWindow(tk.Tk):
             if self.instance_editor is None:
                 return
             self.instance_editor.new_instance()
-        else:
+        elif tab == 4:
             self._new_application()
+        else:
+            self._new_afg()
 
     def _open_shortcut(self) -> None:
         tab = self._active_tab()
@@ -8313,8 +8976,10 @@ class MainWindow(tk.Tk):
             self.instance_editor.open_dialog()
             if self.instance_editor.doc is not None:
                 self._set_status(f"Opened: {os.fspath(self.instance_editor.doc.file_path)}")
-        else:
+        elif tab == 4:
             self._open_application()
+        else:
+            self._open_afg()
 
     def _save_shortcut(self) -> None:
         tab = self._active_tab()
@@ -8332,8 +8997,10 @@ class MainWindow(tk.Tk):
             self.instance_editor.save()
             if self.instance_editor.doc is not None:
                 self._set_status(f"Saved: {os.fspath(self.instance_editor.doc.file_path)}")
-        else:
+        elif tab == 4:
             self._save_application()
+        else:
+            self._save_afg()
 
     def _save_as_shortcut(self) -> None:
         tab = self._active_tab()
@@ -8351,8 +9018,10 @@ class MainWindow(tk.Tk):
             self.instance_editor.save_as()
             if self.instance_editor.doc is not None:
                 self._set_status(f"Saved As: {os.fspath(self.instance_editor.doc.file_path)}")
-        else:
+        elif tab == 4:
             self._save_application_as()
+        else:
+            self._save_afg_as()
 
     def _application_dir(self) -> Path:
         return self.workspace_root / "ep7_datamodel" / "datamodel" / "application"
@@ -8362,6 +9031,204 @@ class MainWindow(tk.Tk):
 
     def _enum_type_dir(self) -> Path:
         return self.workspace_root / "ep7_datamodel" / "datamodel" / "iec61850" / "EnumType"
+
+    def _applicationgroup_dir(self) -> Path:
+        return self.workspace_root / "ep7_datamodel" / "datamodel" / "applicationgroup"
+
+    def _lndm_dir(self) -> Path:
+        return self.workspace_root / "ep7_datamodel" / "datamodel" / "lndm"
+
+    def _afg_reset_ln_suggestions(self) -> None:
+        self._afg_ln_cached_name = ""
+        self._afg_ln_instance_path = None
+        self._afg_ln_inref_doref_values = []
+        self._afg_ln_status_doref_values = []
+
+    def _afg_ensure_ln_suggestions_loaded(self) -> None:
+        root = self._afg_root
+        if root is None:
+            self._afg_reset_ln_suggestions()
+            return
+
+        name = (root.attrib.get("name") or "").strip()
+        if name == self._afg_ln_cached_name:
+            return
+        self._afg_ln_cached_name = name
+
+        if not name:
+            self._afg_ln_instance_path = None
+            self._afg_ln_inref_doref_values = []
+            self._afg_ln_status_doref_values = []
+            return
+
+        path = self._afg_guess_ln_instance_path(name)
+        if path is None:
+            self._afg_ln_instance_path = None
+            self._afg_ln_inref_doref_values = []
+            self._afg_ln_status_doref_values = []
+            return
+
+        try:
+            parsed = self._afg_parse_ln_instance_for_doref(path)
+        except Exception:
+            parsed = None
+
+        if not parsed:
+            self._afg_ln_instance_path = None
+            self._afg_ln_inref_doref_values = []
+            self._afg_ln_status_doref_values = []
+            return
+
+        self._afg_ln_instance_path = path
+        self._afg_ln_inref_doref_values = list(parsed.get("inref", []))
+        self._afg_ln_status_doref_values = list(parsed.get("status", []))
+
+    def _afg_guess_ln_instance_path(self, afg_name: str) -> Path | None:
+        name = (afg_name or "").strip()
+        if not name:
+            return None
+        lndm_dir = self._lndm_dir()
+        if not lndm_dir.exists():
+            return None
+
+        preferred = lndm_dir / f"{name}GAPC.xml"
+        candidates: list[Path] = []
+        if preferred.exists():
+            candidates.append(preferred)
+
+        def add_glob(base: Path) -> None:
+            try:
+                for p in base.glob(f"{name}*.xml"):
+                    if p.is_file():
+                        candidates.append(p)
+            except Exception:
+                return
+
+        add_glob(lndm_dir)
+        for sub in ("P7", "P3Plus"):
+            try:
+                pdir = lndm_dir / sub
+                if pdir.exists():
+                    add_glob(pdir)
+            except Exception:
+                pass
+
+        # De-dup, keep order
+        seen: set[str] = set()
+        uniq: list[Path] = []
+        for p in candidates:
+            sp = os.fspath(p)
+            if sp in seen:
+                continue
+            seen.add(sp)
+            uniq.append(p)
+        candidates = uniq[:50]
+
+        best: tuple[int, Path] | None = None
+        for p in candidates:
+            try:
+                prefix, ln_class = self._afg_peek_ln_prefix_and_class(p)
+            except Exception:
+                continue
+            score = 0
+            if (prefix or "").strip() == name:
+                score += 100
+            if (ln_class or "").strip() == "GAPC":
+                score += 10
+            if best is None or score > best[0]:
+                best = (score, p)
+
+        if best is not None and best[0] > 0:
+            return best[1]
+        return preferred if preferred.exists() else (candidates[0] if candidates else None)
+
+    def _afg_peek_ln_prefix_and_class(self, path: Path) -> tuple[str, str]:
+        tree = ET.parse(path)
+        root = tree.getroot()
+        ln_el: ET.Element | None = None
+        for el in root.iter():
+            if isinstance(el.tag, str) and _local_name(el.tag) == "LN":
+                ln_el = el
+                break
+        if ln_el is None:
+            return ("", "")
+        return ((ln_el.attrib.get("prefix") or ""), (ln_el.attrib.get("lnClass") or ""))
+
+    def _afg_parse_ln_instance_for_doref(self, path: Path) -> dict[str, list[str]] | None:
+        tree = ET.parse(path)
+        root = tree.getroot()
+        ln_el: ET.Element | None = None
+        for el in root.iter():
+            if isinstance(el.tag, str) and _local_name(el.tag) == "LN":
+                ln_el = el
+                break
+        if ln_el is None:
+            return None
+
+        doi_names: list[str] = []
+        inref_purposes: list[str] = []
+
+        for doi in ln_el.iter():
+            if not (isinstance(doi.tag, str) and _local_name(doi.tag) == "DOI"):
+                continue
+            dn = (doi.attrib.get("name") or "").strip()
+            if not dn:
+                continue
+            doi_names.append(dn)
+
+            if dn.startswith("InRef"):
+                purpose = ""
+                for dai in doi.iter():
+                    if not (isinstance(dai.tag, str) and _local_name(dai.tag) == "DAI"):
+                        continue
+                    if (dai.attrib.get("name") or "") != "purpose":
+                        continue
+                    for v in dai.iter():
+                        if isinstance(v.tag, str) and _local_name(v.tag) == "Val":
+                            purpose = (v.text or "").strip()
+                            break
+                    break
+                if purpose:
+                    inref_purposes.append(purpose)
+
+        # Build dropdown values
+        inref_vals: list[str] = []
+        seen_p: set[str] = set()
+        for p in inref_purposes:
+            if p in seen_p:
+                continue
+            seen_p.add(p)
+            inref_vals.append(f".InRef%{p}")
+
+        status_vals: list[str] = []
+        seen_d: set[str] = set()
+        for dn in doi_names:
+            if dn.startswith("InRef"):
+                continue
+            if dn in {"NamPlt", "Beh"}:
+                continue
+            if dn in seen_d:
+                continue
+            seen_d.add(dn)
+            status_vals.append(f".{dn}")
+
+        return {"inref": inref_vals, "status": status_vals}
+
+    def _afg_doref_values_inref(self, *, current: str = "") -> list[str]:
+        self._afg_ensure_ln_suggestions_loaded()
+        base = [""] + list(self._afg_ln_inref_doref_values or [])
+        cur = (current or "").strip()
+        if cur and cur not in base:
+            base.insert(1, cur)
+        return base
+
+    def _afg_doref_values_status(self, *, current: str = "") -> list[str]:
+        self._afg_ensure_ln_suggestions_loaded()
+        base = [""] + list(self._afg_ln_status_doref_values or [])
+        cur = (current or "").strip()
+        if cur and cur not in base:
+            base.insert(1, cur)
+        return base
 
     def _enum_langref_private_type(self) -> str:
         return "SchneiderElectric-PowerLogic-LangRef"
@@ -8407,6 +9274,51 @@ class MainWindow(tk.Tk):
         if select_rel:
             try:
                 self.var_enum_selected.set(select_rel)
+            except Exception:
+                pass
+        apply_filter()
+
+    def _refresh_afg_search_list(self, *, select_rel: str | None) -> None:
+        if self.cb_afg is None or self.var_afg_selected is None or self.lbl_afg_match is None:
+            return
+        base_dir = self._applicationgroup_dir()
+        self._all_afg_files = self._scan_xml_relpaths(base_dir)
+
+        def apply_filter(*_args) -> None:
+            raw = ""
+            if self.var_afg_filter is not None:
+                raw = self.var_afg_filter.get().strip().lower()
+            if not raw:
+                filtered = list(self._all_afg_files)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    lv = (v or "").lower()
+                    return all(t in lv for t in tokens)
+
+                filtered = [v for v in self._all_afg_files if ok(v)]
+
+            cur = (self.var_afg_selected.get() or "").strip()
+            if cur and cur not in filtered:
+                filtered = [cur] + filtered
+
+            max_show = 1200
+            shown = filtered[:max_show]
+            self.cb_afg["values"] = shown
+            suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
+            self.lbl_afg_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
+
+        if getattr(self, "_afg_apply_filter", None) is None:
+            if self.var_afg_filter is not None:
+                self.var_afg_filter.trace_add("write", apply_filter)
+            setattr(self, "_afg_apply_filter", apply_filter)
+        else:
+            apply_filter = getattr(self, "_afg_apply_filter")
+
+        if select_rel:
+            try:
+                self.var_afg_selected.set(select_rel)
             except Exception:
                 pass
         apply_filter()
@@ -8493,6 +9405,1871 @@ class MainWindow(tk.Tk):
             messagebox.showerror("Missing", f"File not found:\n\n{os.fspath(target)}", parent=self)
             return
         self._open_enum_type_from_path(target)
+
+    # -----------------
+    # AFG editor/viewer
+    # -----------------
+
+    def _new_afg(self) -> None:
+        dlg = _AfgNewDialog(self, initial_name="", initial_proxy="", initial_chapter="", initial_topic="")
+        res = dlg.show()
+        if not res:
+            return
+
+        root = ET.Element("AfgDiagramXml")
+        root.attrib["name"] = (res.get("name") or "").strip()
+        root.attrib["proxyName"] = res.get("proxyName") or ""
+        root.attrib["chapterName"] = res.get("chapterName") or ""
+        root.attrib["topicName"] = res.get("topicName") or ""
+        root.attrib["maxPinID"] = "0"
+
+        ET.SubElement(root, "fbItems")
+        ET.SubElement(root, "afgInItems")
+        ET.SubElement(root, "afgOutItems")
+        ET.SubElement(root, "arrows")
+
+        self._afg_root = root
+        self._afg_file_path = None
+        self._afg_fb_clipboard = None
+        self._afg_in_clipboard = None
+        self._afg_out_clipboard = None
+
+        self._afg_reset_ln_suggestions()
+
+        self._refresh_afg_views(select_first_fb=False)
+        self._set_status("New AFG created (unsaved)")
+
+    def _sync_afg_meta_vars_to_root(self) -> None:
+        root = self._afg_root
+        if root is None:
+            return
+
+        # While we're populating the meta StringVars from XML (open/refresh),
+        # their trace callbacks must not write back partial/empty state.
+        if getattr(self, "_afg_meta_loading", False):
+            return
+
+        try:
+            if self._afg_meta_name is not None:
+                root.attrib["name"] = (self._afg_meta_name.get() or "").strip()
+            if self._afg_meta_proxy is not None:
+                root.attrib["proxyName"] = self._afg_meta_proxy.get() or ""
+            if self._afg_meta_chapter is not None:
+                root.attrib["chapterName"] = self._afg_meta_chapter.get() or ""
+            if self._afg_meta_topic is not None:
+                root.attrib["topicName"] = self._afg_meta_topic.get() or ""
+        except Exception:
+            pass
+
+    def _save_afg(self) -> None:
+        if self._afg_root is None:
+            messagebox.showerror("Missing", "No AFG loaded", parent=self)
+            return
+
+        self._sync_afg_meta_vars_to_root()
+
+        name = (self._afg_root.attrib.get("name") or "").strip()
+        if not name:
+            messagebox.showerror("Missing", "AFG name is required (used as file name)", parent=self)
+            return
+
+        stem = re.sub(r'[<>:"/\\|?*]', "_", name).strip() or "AFG"
+        target_path = self._applicationgroup_dir() / f"{stem}.xml"
+
+        try:
+            self._normalize_afg_pin_ids_and_arrows()
+            self._write_afg_xml(target_path)
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e), parent=self)
+            return
+
+        self._afg_file_path = target_path
+        try:
+            base_dir = self._applicationgroup_dir()
+            rel = os.fspath(target_path.relative_to(base_dir))
+        except Exception:
+            rel = os.fspath(target_path.name)
+        self._refresh_afg_search_list(select_rel=rel)
+        self._set_status(f"Saved AFG: {os.fspath(target_path)}")
+
+    def _save_afg_as(self) -> None:
+        if self._afg_root is None:
+            messagebox.showerror("Missing", "No AFG loaded", parent=self)
+            return
+
+        self._sync_afg_meta_vars_to_root()
+
+        cur_name = (self._afg_root.attrib.get("name") or "").strip()
+        initial = f"{cur_name}_copy" if cur_name else ""
+        dlg = _AfgSaveAsDialog(self, initial_name=initial)
+        new_name = dlg.show()
+        if not new_name:
+            return
+
+        stem = re.sub(r'[<>:"/\\|?*]', "_", new_name).strip() or "AFG"
+        target_path = self._applicationgroup_dir() / f"{stem}.xml"
+
+        try:
+            cur_path = self._afg_file_path.resolve() if self._afg_file_path is not None else None
+        except Exception:
+            cur_path = self._afg_file_path
+        try:
+            tgt_resolved = target_path.resolve()
+        except Exception:
+            tgt_resolved = target_path
+
+        if target_path.exists() and (cur_path is None or tgt_resolved != cur_path):
+            ok = messagebox.askyesno(
+                "Overwrite?",
+                f"File already exists:\n\n{os.fspath(target_path)}\n\nOverwrite?",
+                parent=self,
+            )
+            if not ok:
+                return
+
+        self._afg_root.attrib["name"] = new_name
+        self._afg_file_path = target_path
+        self._save_afg()
+
+    def _write_afg_xml(self, path: Path) -> None:
+        if self._afg_root is None:
+            raise ValueError("No AFG loaded")
+
+        root = self._afg_root
+        try:
+            ET.indent(root, space="    ")
+        except Exception:
+            pass
+        body = ET.tostring(root, encoding="unicode", short_empty_elements=True)
+        text = "<?xml version=\"1.0\" encoding=\"utf-8\" ?>\n" + body.rstrip() + "\n"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\r\n") as f:
+            f.write(text)
+
+    def _refresh_afg_views(self, *, select_first_fb: bool) -> None:
+        # Meta
+        try:
+            self._afg_meta_loading = True
+            root = self._afg_root
+            if root is None:
+                if self._afg_meta_name is not None:
+                    self._afg_meta_name.set("")
+                if self._afg_meta_proxy is not None:
+                    self._afg_meta_proxy.set("")
+                if self._afg_meta_chapter is not None:
+                    self._afg_meta_chapter.set("")
+                if self._afg_meta_topic is not None:
+                    self._afg_meta_topic.set("")
+            else:
+                if self._afg_meta_name is not None:
+                    self._afg_meta_name.set(root.attrib.get("name") or "")
+                if self._afg_meta_proxy is not None:
+                    self._afg_meta_proxy.set(root.attrib.get("proxyName") or "")
+                if self._afg_meta_chapter is not None:
+                    self._afg_meta_chapter.set(root.attrib.get("chapterName") or "")
+                if self._afg_meta_topic is not None:
+                    self._afg_meta_topic.set(root.attrib.get("topicName") or "")
+        except Exception:
+            pass
+        finally:
+            try:
+                self._afg_meta_loading = False
+            except Exception:
+                pass
+
+        self._refresh_afg_fb_table(select_first=select_first_fb)
+        self._refresh_afg_io_tables()
+
+    def _afg_get_child(self, root: ET.Element, local: str) -> ET.Element | None:
+        for ch in list(root):
+            if isinstance(ch.tag, str) and _local_name(ch.tag) == local:
+                return ch
+        return None
+
+    def _afg_get_or_create_child(self, root: ET.Element, local: str) -> ET.Element:
+        el = self._afg_get_child(root, local)
+        if el is not None:
+            return el
+        return ET.SubElement(root, local)
+
+    def _parse_pos(self, raw: str) -> tuple[str, str]:
+        s = (raw or "").strip()
+        if not s:
+            return ("", "")
+        parts = [p.strip() for p in s.split(",")]
+        if len(parts) >= 2:
+            return (parts[0], parts[1])
+        return (s, "")
+
+    def _refresh_afg_fb_table(self, *, select_first: bool) -> None:
+        if self._afg_tv_fb is None:
+            return
+
+        self._clear_tv(self._afg_tv_fb)
+        self._afg_fb_iid_to_item = {}
+
+        root = self._afg_root
+        if root is None:
+            return
+        fb_items_el = self._afg_get_child(root, "fbItems")
+        if fb_items_el is None:
+            return
+
+        def _count_io(fb: ET.Element, local: str, child_local: str) -> int:
+            box = None
+            for x in list(fb):
+                if isinstance(x.tag, str) and _local_name(x.tag) == local:
+                    box = x
+                    break
+            if box is None:
+                return 0
+            return sum(1 for x in list(box) if isinstance(x.tag, str) and _local_name(x.tag) == child_local)
+
+        for i, fb in enumerate([x for x in list(fb_items_el) if isinstance(x.tag, str) and _local_name(x.tag) == "fbItem"]):
+            name = (fb.attrib.get("name") or "").strip()
+            pos_x, pos_y = self._parse_pos(fb.attrib.get("pos") or "")
+            in_n = _count_io(fb, "Inputs", "Input")
+            out_n = _count_io(fb, "Outputs", "Output")
+            iid = str(i)
+            self._afg_fb_iid_to_item[iid] = fb
+            self._afg_tv_fb.insert("", "end", iid=iid, values=(name, pos_x, pos_y, str(in_n), str(out_n)))
+
+        if select_first:
+            try:
+                kids = self._afg_tv_fb.get_children("")
+                if kids:
+                    self._afg_tv_fb.selection_set(kids[0])
+                    self._afg_tv_fb.focus(kids[0])
+            except Exception:
+                pass
+
+    def _refresh_afg_io_tables(self) -> None:
+        root = self._afg_root
+        if root is None:
+            self._clear_tv(self._afg_tv_in)
+            self._clear_tv(self._afg_tv_out)
+            self._afg_in_iid_to_item = {}
+            self._afg_out_iid_to_item = {}
+            return
+
+        self._clear_tv(self._afg_tv_in)
+        self._clear_tv(self._afg_tv_out)
+        self._afg_in_iid_to_item = {}
+        self._afg_out_iid_to_item = {}
+
+        def _is_true(v: str | None) -> bool:
+            return (v or "").strip().lower() == "true"
+
+        in_items_el = self._afg_get_child(root, "afgInItems")
+        if in_items_el is not None and self._afg_tv_in is not None:
+            i = 0
+            for it in list(in_items_el):
+                if not (isinstance(it.tag, str) and _local_name(it.tag) == "afgInItem"):
+                    continue
+                iid = str(i)
+                self._afg_in_iid_to_item[iid] = it
+                px, py = self._parse_pos(it.attrib.get("pos") or "")
+                vals = (
+                    (it.attrib.get("name") or ""),
+                    px,
+                    py,
+                    (it.attrib.get("src") or ""),
+                    (it.attrib.get("doRef") or ""),
+                    "☑" if _is_true(it.attrib.get("confpin")) else "☐",
+                    "☑" if _is_true(it.attrib.get("softlink")) else "☐",
+                )
+                self._afg_tv_in.insert("", "end", iid=iid, values=vals)
+                i += 1
+
+        out_items_el = self._afg_get_child(root, "afgOutItems")
+        if out_items_el is not None and self._afg_tv_out is not None:
+            i = 0
+            for it in list(out_items_el):
+                if not (isinstance(it.tag, str) and _local_name(it.tag) == "afgOutItem"):
+                    continue
+                iid = str(i)
+                self._afg_out_iid_to_item[iid] = it
+                px, py = self._parse_pos(it.attrib.get("pos") or "")
+                vals = (
+                    (it.attrib.get("name") or ""),
+                    px,
+                    py,
+                    (it.attrib.get("doRef") or ""),
+                    "☑" if _is_true(it.attrib.get("confpin")) else "☐",
+                )
+                self._afg_tv_out.insert("", "end", iid=iid, values=vals)
+                i += 1
+
+    def _afg_selected_fb_iid(self) -> str | None:
+        if self._afg_tv_fb is None:
+            return None
+        try:
+            cur = self._afg_tv_fb.selection()
+            return cur[0] if cur else None
+        except Exception:
+            return None
+
+    def _afg_selected_fb(self) -> ET.Element | None:
+        iid = self._afg_selected_fb_iid()
+        if not iid:
+            return None
+        return self._afg_fb_iid_to_item.get(iid)
+
+    def _afg_selected_in_iid(self) -> str | None:
+        tv = self._afg_tv_in
+        if tv is None:
+            return None
+        sel = tv.selection()
+        if not sel:
+            return None
+        return sel[0]
+
+    def _afg_selected_in(self) -> ET.Element | None:
+        iid = self._afg_selected_in_iid()
+        if iid is None:
+            return None
+        return self._afg_in_iid_to_item.get(iid)
+
+    def _afg_selected_out_iid(self) -> str | None:
+        tv = self._afg_tv_out
+        if tv is None:
+            return None
+        sel = tv.selection()
+        if not sel:
+            return None
+        return sel[0]
+
+    def _afg_selected_out(self) -> ET.Element | None:
+        iid = self._afg_selected_out_iid()
+        if iid is None:
+            return None
+        return self._afg_out_iid_to_item.get(iid)
+
+    def _select_afg_in_element(self, el: ET.Element) -> None:
+        tv = self._afg_tv_in
+        if tv is None:
+            return
+        for iid, it in self._afg_in_iid_to_item.items():
+            if it is el:
+                try:
+                    tv.selection_set(iid)
+                    tv.focus(iid)
+                    tv.see(iid)
+                except Exception:
+                    pass
+                return
+
+    def _select_afg_out_element(self, el: ET.Element) -> None:
+        tv = self._afg_tv_out
+        if tv is None:
+            return
+        for iid, it in self._afg_out_iid_to_item.items():
+            if it is el:
+                try:
+                    tv.selection_set(iid)
+                    tv.focus(iid)
+                    tv.see(iid)
+                except Exception:
+                    pass
+                return
+
+    def _afg_suggest_new_io_pos(self, *, parent_local: str, default_x: float) -> tuple[float, float]:
+        root = self._afg_root
+        if root is None:
+            return (default_x, 100.0)
+        parent = self._afg_get_or_create_child(root, parent_local)
+        max_y = None
+        for it in list(parent):
+            if not isinstance(it.tag, str):
+                continue
+            px, py = self._parse_pos(it.attrib.get("pos") or "")
+            try:
+                fy = float(py) if py.strip() else 0.0
+            except Exception:
+                fy = 0.0
+            if max_y is None or fy > max_y:
+                max_y = fy
+        y = 100.0 if max_y is None else (max_y + 100.0)
+        return (default_x, y)
+
+    def _afg_make_new_in_item(self) -> ET.Element:
+        x, y = self._afg_suggest_new_io_pos(parent_local="afgInItems", default_x=100.0)
+        el = ET.Element(
+            "afgInItem",
+            attrib={
+                "pos": f"{x:.6f},{y:.6f}",
+                "name": "NewIn",
+                "src": "",
+                "softlink": "false",
+                "confpin": "false",
+                "doRef": "",
+                "daRef": "",
+                "lineColor": "#000000",
+                "itemColor": "#ffffff",
+                "pinLineColor": "#000000",
+            },
+        )
+        return el
+
+    def _afg_make_new_out_item(self) -> ET.Element:
+        x, y = self._afg_suggest_new_io_pos(parent_local="afgOutItems", default_x=2600.0)
+        el = ET.Element(
+            "afgOutItem",
+            attrib={
+                "pos": f"{x:.6f},{y:.6f}",
+                "name": "NewOut",
+                "confpin": "false",
+                "doRef": "",
+                "daRef": "",
+                "lineColor": "#000000",
+                "itemColor": "#ffffff",
+                "pinLineColor": "#000000",
+            },
+        )
+        return el
+
+    def _afg_in_add(self) -> None:
+        self._afg_in_add_impl(insert_mode="append")
+
+    def _afg_in_insert(self) -> None:
+        self._afg_in_add_impl(insert_mode="before")
+
+    def _afg_in_add_impl(self, *, insert_mode: str) -> None:
+        root = self._afg_root
+        if root is None:
+            messagebox.showerror("Missing", "No AFG loaded", parent=self)
+            return
+        parent = self._afg_get_or_create_child(root, "afgInItems")
+        new_el = self._afg_make_new_in_item()
+
+        selected = self._afg_selected_in()
+        if insert_mode == "before" and selected is not None:
+            try:
+                idx = list(parent).index(selected)
+                parent.insert(idx, new_el)
+            except Exception:
+                parent.append(new_el)
+        else:
+            parent.append(new_el)
+
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_io_tables()
+        self._select_afg_in_element(new_el)
+        try:
+            self.after_idle(lambda: self._begin_afg_in_inline_edit_for_selected(col="#1"))
+        except Exception:
+            pass
+
+    def _afg_in_edit(self) -> None:
+        el = self._afg_selected_in()
+        if el is None:
+            return
+
+        name = (el.attrib.get("name") or "")
+        pos_x, pos_y = self._parse_pos(el.attrib.get("pos") or "")
+        src = (el.attrib.get("src") or "")
+        do_ref = (el.attrib.get("doRef") or "")
+        confpin = (el.attrib.get("confpin") or "").strip().lower() == "true"
+        softlink = (el.attrib.get("softlink") or "").strip().lower() == "true"
+
+        self._afg_ensure_ln_suggestions_loaded()
+        do_ref_values = self._afg_doref_values_inref(current=do_ref)
+
+        dlg = _AfgInEditDialog(
+            self,
+            name=name,
+            pos_x=pos_x,
+            pos_y=pos_y,
+            src=src,
+            do_ref=do_ref,
+            do_ref_values=do_ref_values,
+            confpin=confpin,
+            softlink=softlink,
+        )
+        res = dlg.show()
+        if not res:
+            return
+
+        el.attrib["name"] = (res.get("name") or "").strip()
+        x = (res.get("posX") or "").strip()
+        y = (res.get("posY") or "").strip()
+        if x or y or "pos" in el.attrib:
+            el.attrib["pos"] = f"{x},{y}" if y != "" else x
+        el.attrib["src"] = (res.get("src") or "").strip()
+        el.attrib["doRef"] = (res.get("doRef") or "").strip()
+        el.attrib["confpin"] = "true" if bool(res.get("confpin")) else "false"
+        el.attrib["softlink"] = "true" if bool(res.get("softlink")) else "false"
+
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_io_tables()
+        self._select_afg_in_element(el)
+
+    def _afg_in_copy(self) -> None:
+        el = self._afg_selected_in()
+        if el is None:
+            return
+        self._afg_in_clipboard = _deepcopy_et_element(el)
+
+    def _afg_in_cut(self) -> None:
+        el = self._afg_selected_in()
+        if el is None:
+            return
+        self._afg_in_clipboard = _deepcopy_et_element(el)
+        self._afg_in_delete()
+
+    def _afg_in_paste(self) -> None:
+        if self._afg_in_clipboard is None:
+            return
+        root = self._afg_root
+        if root is None:
+            return
+        parent = self._afg_get_or_create_child(root, "afgInItems")
+        new_el = _deepcopy_et_element(self._afg_in_clipboard)
+        try:
+            if "pinID" in new_el.attrib:
+                del new_el.attrib["pinID"]
+        except Exception:
+            pass
+
+        selected = self._afg_selected_in()
+        if selected is not None:
+            try:
+                idx = list(parent).index(selected)
+                parent.insert(idx + 1, new_el)
+            except Exception:
+                parent.append(new_el)
+        else:
+            parent.append(new_el)
+
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_io_tables()
+        self._select_afg_in_element(new_el)
+
+    def _afg_in_delete(self) -> None:
+        root = self._afg_root
+        el = self._afg_selected_in()
+        if root is None or el is None:
+            return
+        parent = self._afg_get_child(root, "afgInItems")
+        if parent is None:
+            return
+        try:
+            parent.remove(el)
+        except Exception:
+            return
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_io_tables()
+
+    def _afg_in_up(self) -> None:
+        self._afg_in_move(delta=-1)
+
+    def _afg_in_down(self) -> None:
+        self._afg_in_move(delta=1)
+
+    def _afg_in_move(self, *, delta: int) -> None:
+        root = self._afg_root
+        el = self._afg_selected_in()
+        if root is None or el is None:
+            return
+        parent = self._afg_get_child(root, "afgInItems")
+        if parent is None:
+            return
+        items = [x for x in list(parent) if isinstance(x.tag, str) and _local_name(x.tag) == "afgInItem"]
+        try:
+            idx = items.index(el)
+        except Exception:
+            return
+        new_idx = idx + delta
+        if new_idx < 0 or new_idx >= len(items):
+            return
+        parent.remove(el)
+        items2 = [x for x in list(parent) if isinstance(x.tag, str) and _local_name(x.tag) == "afgInItem"]
+        if new_idx >= len(items2):
+            parent.append(el)
+        else:
+            parent.insert(new_idx, el)
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_io_tables()
+        self._select_afg_in_element(el)
+
+    def _afg_out_add(self) -> None:
+        self._afg_out_add_impl(insert_mode="append")
+
+    def _afg_out_insert(self) -> None:
+        self._afg_out_add_impl(insert_mode="before")
+
+    def _afg_out_add_impl(self, *, insert_mode: str) -> None:
+        root = self._afg_root
+        if root is None:
+            messagebox.showerror("Missing", "No AFG loaded", parent=self)
+            return
+        parent = self._afg_get_or_create_child(root, "afgOutItems")
+        new_el = self._afg_make_new_out_item()
+
+        selected = self._afg_selected_out()
+        if insert_mode == "before" and selected is not None:
+            try:
+                idx = list(parent).index(selected)
+                parent.insert(idx, new_el)
+            except Exception:
+                parent.append(new_el)
+        else:
+            parent.append(new_el)
+
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_io_tables()
+        self._select_afg_out_element(new_el)
+        try:
+            self.after_idle(lambda: self._begin_afg_out_inline_edit_for_selected(col="#1"))
+        except Exception:
+            pass
+
+    def _afg_out_edit(self) -> None:
+        el = self._afg_selected_out()
+        if el is None:
+            return
+
+        name = (el.attrib.get("name") or "")
+        pos_x, pos_y = self._parse_pos(el.attrib.get("pos") or "")
+        do_ref = (el.attrib.get("doRef") or "")
+        confpin = (el.attrib.get("confpin") or "").strip().lower() == "true"
+
+        self._afg_ensure_ln_suggestions_loaded()
+        do_ref_values_status = self._afg_doref_values_status(current=do_ref)
+        do_ref_values_inref = self._afg_doref_values_inref(current=do_ref)
+
+        dlg = _AfgOutEditDialog(
+            self,
+            name=name,
+            pos_x=pos_x,
+            pos_y=pos_y,
+            do_ref=do_ref,
+            do_ref_values_status=do_ref_values_status,
+            do_ref_values_inref=do_ref_values_inref,
+            confpin=confpin,
+        )
+        res = dlg.show()
+        if not res:
+            return
+
+        el.attrib["name"] = (res.get("name") or "").strip()
+        x = (res.get("posX") or "").strip()
+        y = (res.get("posY") or "").strip()
+        if x or y or "pos" in el.attrib:
+            el.attrib["pos"] = f"{x},{y}" if y != "" else x
+        el.attrib["doRef"] = (res.get("doRef") or "").strip()
+        el.attrib["confpin"] = "true" if bool(res.get("confpin")) else "false"
+
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_io_tables()
+        self._select_afg_out_element(el)
+
+    def _afg_out_copy(self) -> None:
+        el = self._afg_selected_out()
+        if el is None:
+            return
+        self._afg_out_clipboard = _deepcopy_et_element(el)
+
+    def _afg_out_cut(self) -> None:
+        el = self._afg_selected_out()
+        if el is None:
+            return
+        self._afg_out_clipboard = _deepcopy_et_element(el)
+        self._afg_out_delete()
+
+    def _afg_out_paste(self) -> None:
+        if self._afg_out_clipboard is None:
+            return
+        root = self._afg_root
+        if root is None:
+            return
+        parent = self._afg_get_or_create_child(root, "afgOutItems")
+        new_el = _deepcopy_et_element(self._afg_out_clipboard)
+        try:
+            if "pinID" in new_el.attrib:
+                del new_el.attrib["pinID"]
+        except Exception:
+            pass
+
+        selected = self._afg_selected_out()
+        if selected is not None:
+            try:
+                idx = list(parent).index(selected)
+                parent.insert(idx + 1, new_el)
+            except Exception:
+                parent.append(new_el)
+        else:
+            parent.append(new_el)
+
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_io_tables()
+        self._select_afg_out_element(new_el)
+
+    def _afg_out_delete(self) -> None:
+        root = self._afg_root
+        el = self._afg_selected_out()
+        if root is None or el is None:
+            return
+        parent = self._afg_get_child(root, "afgOutItems")
+        if parent is None:
+            return
+        try:
+            parent.remove(el)
+        except Exception:
+            return
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_io_tables()
+
+    def _afg_out_up(self) -> None:
+        self._afg_out_move(delta=-1)
+
+    def _afg_out_down(self) -> None:
+        self._afg_out_move(delta=1)
+
+    def _afg_out_move(self, *, delta: int) -> None:
+        root = self._afg_root
+        el = self._afg_selected_out()
+        if root is None or el is None:
+            return
+        parent = self._afg_get_child(root, "afgOutItems")
+        if parent is None:
+            return
+        items = [x for x in list(parent) if isinstance(x.tag, str) and _local_name(x.tag) == "afgOutItem"]
+        try:
+            idx = items.index(el)
+        except Exception:
+            return
+        new_idx = idx + delta
+        if new_idx < 0 or new_idx >= len(items):
+            return
+        parent.remove(el)
+        items2 = [x for x in list(parent) if isinstance(x.tag, str) and _local_name(x.tag) == "afgOutItem"]
+        if new_idx >= len(items2):
+            parent.append(el)
+        else:
+            parent.insert(new_idx, el)
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_io_tables()
+        self._select_afg_out_element(el)
+
+    def _begin_afg_in_inline_edit_for_selected(self, *, col: str) -> None:
+        iid = self._afg_selected_in_iid()
+        if iid is None:
+            return
+        self._begin_afg_in_inline_edit(iid, col)
+
+    def _begin_afg_out_inline_edit_for_selected(self, *, col: str) -> None:
+        iid = self._afg_selected_out_iid()
+        if iid is None:
+            return
+        self._begin_afg_out_inline_edit(iid, col)
+
+    def _on_afg_in_inline_combobox_focus_out(self, event: tk.Event) -> None:
+        """Commit AFG-in inline edit on focus-out, but avoid committing while dropdown is open."""
+        try:
+            widget = event.widget
+        except Exception:
+            widget = None
+
+        if not isinstance(widget, ttk.Combobox):
+            self._end_afg_in_inline_editor(commit=True)
+            return
+
+        cb = widget
+        try:
+            popdown = cb.tk.call("ttk::combobox::PopdownWindow", str(cb))
+            focus_w = str(cb.tk.call("focus") or "")
+            if popdown and focus_w and focus_w.startswith(str(popdown)):
+                return
+        except Exception:
+            pass
+
+        if self._combobox_is_posted(cb):
+            try:
+                self.after(
+                    75,
+                    lambda: (
+                        self._end_afg_in_inline_editor(commit=True)
+                        if self._afg_in_inline is cb and not self._combobox_is_posted(cb)
+                        else None
+                    ),
+                )
+            except Exception:
+                pass
+            return
+
+        self._end_afg_in_inline_editor(commit=True)
+
+    def _on_afg_out_inline_combobox_focus_out(self, event: tk.Event) -> None:
+        """Commit AFG-out inline edit on focus-out, but avoid committing while dropdown is open."""
+        try:
+            widget = event.widget
+        except Exception:
+            widget = None
+
+        if not isinstance(widget, ttk.Combobox):
+            self._end_afg_out_inline_editor(commit=True)
+            return
+
+        cb = widget
+        try:
+            popdown = cb.tk.call("ttk::combobox::PopdownWindow", str(cb))
+            focus_w = str(cb.tk.call("focus") or "")
+            if popdown and focus_w and focus_w.startswith(str(popdown)):
+                return
+        except Exception:
+            pass
+
+        if self._combobox_is_posted(cb):
+            try:
+                self.after(
+                    75,
+                    lambda: (
+                        self._end_afg_out_inline_editor(commit=True)
+                        if self._afg_out_inline is cb and not self._combobox_is_posted(cb)
+                        else None
+                    ),
+                )
+            except Exception:
+                pass
+            return
+
+        self._end_afg_out_inline_editor(commit=True)
+
+    def _begin_afg_in_inline_edit(self, iid: str, col: str) -> None:
+        tv = self._afg_tv_in
+        if tv is None:
+            return
+        el = self._afg_in_iid_to_item.get(iid)
+        if el is None:
+            return
+
+        # Commit any existing inline editors
+        self._end_afg_out_inline_editor(commit=True)
+        self._end_afg_in_inline_editor(commit=True)
+        self._end_afg_fb_inline_editor(commit=True)
+
+        key_by_col = {"#1": "name", "#2": "posX", "#3": "posY", "#4": "src", "#5": "doRef"}
+        key = key_by_col.get(col)
+        if key is None:
+            return
+
+        bbox = tv.bbox(iid, col)
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        if key == "posX":
+            value, _y0 = self._parse_pos(el.attrib.get("pos") or "")
+        elif key == "posY":
+            _x0, value = self._parse_pos(el.attrib.get("pos") or "")
+        else:
+            value = el.attrib.get(key) or ""
+        if key == "doRef":
+            self._afg_ensure_ln_suggestions_loaded()
+            values = tuple(self._afg_doref_values_inref(current=value))
+            cb = ttk.Combobox(tv, values=values)
+            cb.place(x=x, y=y, width=w, height=h)
+            cb.set(value)
+            cb.focus_set()
+
+            cb.bind("<<ComboboxSelected>>", lambda _e: self._end_afg_in_inline_editor(commit=True))
+            cb.bind("<Return>", lambda _e: self._end_afg_in_inline_editor(commit=True))
+            cb.bind("<Escape>", lambda _e: self._end_afg_in_inline_editor(commit=False))
+            cb.bind("<FocusOut>", self._on_afg_in_inline_combobox_focus_out)
+            cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+            try:
+                tv.after_idle(lambda: self._combobox_post(cb))
+            except Exception:
+                self._combobox_post(cb)
+
+            self._afg_in_inline = cb
+            self._afg_in_inline_iid = iid
+            self._afg_in_inline_col = col
+            return
+
+        ent = ttk.Entry(tv)
+        ent.insert(0, value)
+
+        def commit_and_close(_e=None) -> None:
+            self._end_afg_in_inline_editor(commit=True)
+
+        ent.bind("<Return>", commit_and_close)
+        ent.bind("<Escape>", lambda _e: self._end_afg_in_inline_editor(commit=False))
+        ent.bind("<FocusOut>", lambda _e: self._end_afg_in_inline_editor(commit=True))
+        ent.place(x=x, y=y, width=w, height=h)
+        ent.focus_set()
+        try:
+            ent.select_range(0, tk.END)
+        except Exception:
+            pass
+
+        self._afg_in_inline = ent
+        self._afg_in_inline_iid = iid
+        self._afg_in_inline_col = col
+
+    def _begin_afg_out_inline_edit(self, iid: str, col: str) -> None:
+        tv = self._afg_tv_out
+        if tv is None:
+            return
+        el = self._afg_out_iid_to_item.get(iid)
+        if el is None:
+            return
+
+        self._end_afg_in_inline_editor(commit=True)
+        self._end_afg_out_inline_editor(commit=True)
+        self._end_afg_fb_inline_editor(commit=True)
+
+        key_by_col = {"#1": "name", "#2": "posX", "#3": "posY", "#4": "doRef"}
+        key = key_by_col.get(col)
+        if key is None:
+            return
+
+        bbox = tv.bbox(iid, col)
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        if key == "posX":
+            value, _y0 = self._parse_pos(el.attrib.get("pos") or "")
+        elif key == "posY":
+            _x0, value = self._parse_pos(el.attrib.get("pos") or "")
+        else:
+            value = el.attrib.get(key) or ""
+        if key == "doRef":
+            self._afg_ensure_ln_suggestions_loaded()
+            confpin = (el.attrib.get("confpin") or "").strip().lower() == "true"
+            values = (
+                self._afg_doref_values_inref(current=value)
+                if confpin
+                else self._afg_doref_values_status(current=value)
+            )
+            cb = ttk.Combobox(tv, values=tuple(values))
+            cb.place(x=x, y=y, width=w, height=h)
+            cb.set(value)
+            cb.focus_set()
+
+            cb.bind("<<ComboboxSelected>>", lambda _e: self._end_afg_out_inline_editor(commit=True))
+            cb.bind("<Return>", lambda _e: self._end_afg_out_inline_editor(commit=True))
+            cb.bind("<Escape>", lambda _e: self._end_afg_out_inline_editor(commit=False))
+            cb.bind("<FocusOut>", self._on_afg_out_inline_combobox_focus_out)
+            cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+            try:
+                tv.after_idle(lambda: self._combobox_post(cb))
+            except Exception:
+                self._combobox_post(cb)
+
+            self._afg_out_inline = cb
+            self._afg_out_inline_iid = iid
+            self._afg_out_inline_col = col
+            return
+
+        ent = ttk.Entry(tv)
+        ent.insert(0, value)
+
+        def commit_and_close(_e=None) -> None:
+            self._end_afg_out_inline_editor(commit=True)
+
+        ent.bind("<Return>", commit_and_close)
+        ent.bind("<Escape>", lambda _e: self._end_afg_out_inline_editor(commit=False))
+        ent.bind("<FocusOut>", lambda _e: self._end_afg_out_inline_editor(commit=True))
+        ent.place(x=x, y=y, width=w, height=h)
+        ent.focus_set()
+        try:
+            ent.select_range(0, tk.END)
+        except Exception:
+            pass
+
+        self._afg_out_inline = ent
+        self._afg_out_inline_iid = iid
+        self._afg_out_inline_col = col
+
+    def _end_afg_in_inline_editor(self, *, commit: bool) -> None:
+        ent = self._afg_in_inline
+        if ent is None:
+            return
+        iid = self._afg_in_inline_iid
+        col = self._afg_in_inline_col
+        self._afg_in_inline = None
+        self._afg_in_inline_iid = None
+        self._afg_in_inline_col = None
+
+        tv = self._afg_tv_in
+        el = self._afg_in_iid_to_item.get(iid or "") if iid is not None else None
+        key_by_col = {"#1": "name", "#2": "posX", "#3": "posY", "#4": "src", "#5": "doRef"}
+        key = key_by_col.get(col or "")
+        try:
+            value = ent.get()
+        except Exception:
+            value = ""
+        try:
+            ent.destroy()
+        except Exception:
+            pass
+
+        if commit and el is not None and key is not None:
+            if key in {"posX", "posY"}:
+                x0, y0 = self._parse_pos(el.attrib.get("pos") or "")
+                x1, y1 = x0, y0
+                if key == "posX":
+                    x1 = (value or "").strip()
+                else:
+                    y1 = (value or "").strip()
+                if x1 or y1 or "pos" in el.attrib:
+                    el.attrib["pos"] = f"{x1},{y1}" if y1 != "" else x1
+            else:
+                el.attrib[key] = (value or "").strip()
+                self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_io_tables()
+        if el is not None:
+            self._select_afg_in_element(el)
+        try:
+            if tv is not None:
+                tv.focus_set()
+        except Exception:
+            pass
+
+    def _end_afg_out_inline_editor(self, *, commit: bool) -> None:
+        ent = self._afg_out_inline
+        if ent is None:
+            return
+        iid = self._afg_out_inline_iid
+        col = self._afg_out_inline_col
+        self._afg_out_inline = None
+        self._afg_out_inline_iid = None
+        self._afg_out_inline_col = None
+
+        tv = self._afg_tv_out
+        el = self._afg_out_iid_to_item.get(iid or "") if iid is not None else None
+        key_by_col = {"#1": "name", "#2": "posX", "#3": "posY", "#4": "doRef"}
+        key = key_by_col.get(col or "")
+        try:
+            value = ent.get()
+        except Exception:
+            value = ""
+        try:
+            ent.destroy()
+        except Exception:
+            pass
+
+        if commit and el is not None and key is not None:
+            if key in {"posX", "posY"}:
+                x0, y0 = self._parse_pos(el.attrib.get("pos") or "")
+                x1, y1 = x0, y0
+                if key == "posX":
+                    x1 = (value or "").strip()
+                else:
+                    y1 = (value or "").strip()
+                if x1 or y1 or "pos" in el.attrib:
+                    el.attrib["pos"] = f"{x1},{y1}" if y1 != "" else x1
+            else:
+                el.attrib[key] = (value or "").strip()
+                self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_io_tables()
+        if el is not None:
+            self._select_afg_out_element(el)
+        try:
+            if tv is not None:
+                tv.focus_set()
+        except Exception:
+            pass
+
+    def _on_afg_in_click(self, event: tk.Event) -> str | None:
+        tv = self._afg_tv_in
+        if tv is None:
+            return None
+        region = tv.identify("region", event.x, event.y)
+        if region != "cell":
+            return None
+        col = tv.identify_column(event.x)
+        iid = tv.identify_row(event.y)
+        if not iid:
+            return None
+        try:
+            tv.selection_set(iid)
+        except Exception:
+            pass
+
+        # Checkbox columns: confpin (#6), softlink (#7)
+        if col in {"#6", "#7"}:
+            # Close any active inline editor (discard edits) before toggling.
+            if self._afg_in_inline is not None:
+                try:
+                    self._afg_in_inline.destroy()
+                except Exception:
+                    pass
+                self._afg_in_inline = None
+                self._afg_in_inline_iid = None
+                self._afg_in_inline_col = None
+
+            el = self._afg_in_iid_to_item.get(iid)
+            if el is None:
+                return None
+            key = "confpin" if col == "#6" else "softlink"
+            cur = (el.attrib.get(key) or "").strip().lower() == "true"
+            el.attrib[key] = "false" if cur else "true"
+            self._normalize_afg_pin_ids_and_arrows()
+            self._refresh_afg_io_tables()
+            self._select_afg_in_element(el)
+            return "break"
+        return None
+
+    def _on_afg_out_click(self, event: tk.Event) -> str | None:
+        tv = self._afg_tv_out
+        if tv is None:
+            return None
+        region = tv.identify("region", event.x, event.y)
+        if region != "cell":
+            return None
+        col = tv.identify_column(event.x)
+        iid = tv.identify_row(event.y)
+        if not iid:
+            return None
+        try:
+            tv.selection_set(iid)
+        except Exception:
+            pass
+        # Checkbox column: confpin (#5)
+        if col == "#5":
+            if self._afg_out_inline is not None:
+                try:
+                    self._afg_out_inline.destroy()
+                except Exception:
+                    pass
+                self._afg_out_inline = None
+                self._afg_out_inline_iid = None
+                self._afg_out_inline_col = None
+
+            el = self._afg_out_iid_to_item.get(iid)
+            if el is None:
+                return None
+            cur = (el.attrib.get("confpin") or "").strip().lower() == "true"
+            el.attrib["confpin"] = "false" if cur else "true"
+            self._normalize_afg_pin_ids_and_arrows()
+            self._refresh_afg_io_tables()
+            self._select_afg_out_element(el)
+            return "break"
+        return None
+
+    def _on_afg_in_double_click(self, event: tk.Event) -> str:
+        tv = self._afg_tv_in
+        if tv is None:
+            return "break"
+        region = tv.identify("region", event.x, event.y)
+        if region != "cell":
+            return "break"
+        col = tv.identify_column(event.x)
+        iid = tv.identify_row(event.y)
+        if not iid:
+            return "break"
+        try:
+            tv.selection_set(iid)
+        except Exception:
+            pass
+        if col in {"#1", "#2", "#3", "#4", "#5"}:
+            try:
+                tv.after_idle(lambda: self._begin_afg_in_inline_edit(iid, col))
+            except Exception:
+                self._begin_afg_in_inline_edit(iid, col)
+        return "break"
+
+    def _on_afg_out_double_click(self, event: tk.Event) -> str:
+        tv = self._afg_tv_out
+        if tv is None:
+            return "break"
+        region = tv.identify("region", event.x, event.y)
+        if region != "cell":
+            return "break"
+        col = tv.identify_column(event.x)
+        iid = tv.identify_row(event.y)
+        if not iid:
+            return "break"
+        try:
+            tv.selection_set(iid)
+        except Exception:
+            pass
+        if col in {"#1", "#2", "#3", "#4"}:
+            try:
+                tv.after_idle(lambda: self._begin_afg_out_inline_edit(iid, col))
+            except Exception:
+                self._begin_afg_out_inline_edit(iid, col)
+        return "break"
+
+    def _on_afg_in_right_click(self, e: tk.Event) -> None:
+        tv = self._afg_tv_in
+        if tv is None:
+            return
+        iid = None
+        try:
+            iid = tv.identify_row(e.y)
+        except Exception:
+            iid = None
+        if iid:
+            try:
+                tv.selection_set(iid)
+                tv.focus(iid)
+            except Exception:
+                pass
+
+        if self._afg_in_ctx_menu is None:
+            m = tk.Menu(self, tearoff=0)
+            m.add_command(label="Add", command=self._afg_in_add)
+            m.add_command(label="Insert", command=self._afg_in_insert)
+            m.add_command(label="Edit", command=self._afg_in_edit)
+            m.add_separator()
+            m.add_command(label="Copy", command=self._afg_in_copy)
+            m.add_command(label="Cut", command=self._afg_in_cut)
+            m.add_command(label="Paste", command=self._afg_in_paste)
+            m.add_separator()
+            m.add_command(label="Delete", command=self._afg_in_delete)
+            m.add_separator()
+            m.add_command(label="Up", command=self._afg_in_up)
+            m.add_command(label="Down", command=self._afg_in_down)
+            self._afg_in_ctx_menu = m
+
+        try:
+            self._afg_in_ctx_menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            try:
+                self._afg_in_ctx_menu.grab_release()
+            except Exception:
+                pass
+
+    def _on_afg_out_right_click(self, e: tk.Event) -> None:
+        tv = self._afg_tv_out
+        if tv is None:
+            return
+        iid = None
+        try:
+            iid = tv.identify_row(e.y)
+        except Exception:
+            iid = None
+        if iid:
+            try:
+                tv.selection_set(iid)
+                tv.focus(iid)
+            except Exception:
+                pass
+
+        if self._afg_out_ctx_menu is None:
+            m = tk.Menu(self, tearoff=0)
+            m.add_command(label="Add", command=self._afg_out_add)
+            m.add_command(label="Insert", command=self._afg_out_insert)
+            m.add_command(label="Edit", command=self._afg_out_edit)
+            m.add_separator()
+            m.add_command(label="Copy", command=self._afg_out_copy)
+            m.add_command(label="Cut", command=self._afg_out_cut)
+            m.add_command(label="Paste", command=self._afg_out_paste)
+            m.add_separator()
+            m.add_command(label="Delete", command=self._afg_out_delete)
+            m.add_separator()
+            m.add_command(label="Up", command=self._afg_out_up)
+            m.add_command(label="Down", command=self._afg_out_down)
+            self._afg_out_ctx_menu = m
+
+        try:
+            self._afg_out_ctx_menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            try:
+                self._afg_out_ctx_menu.grab_release()
+            except Exception:
+                pass
+
+    def _afg_max_pin_id(self) -> int:
+        root = self._afg_root
+        if root is None:
+            return 0
+        m = 0
+        try:
+            m = int((root.attrib.get("maxPinID") or "0").strip() or "0")
+        except Exception:
+            m = 0
+        for el in root.iter():
+            if not isinstance(el.tag, str):
+                continue
+            v = (el.attrib.get("pinID") or "").strip()
+            if not v:
+                continue
+            try:
+                iv = int(v)
+            except Exception:
+                continue
+            if iv > m:
+                m = iv
+        return m
+
+    def _afg_suggest_new_fb_pos(self) -> tuple[float, float]:
+        root = self._afg_root
+        if root is None:
+            return (0.0, 0.0)
+        fb_items_el = self._afg_get_child(root, "fbItems")
+        if fb_items_el is None:
+            return (300.0, 100.0)
+        max_x = None
+        y = 100.0
+        for fb in list(fb_items_el):
+            if not (isinstance(fb.tag, str) and _local_name(fb.tag) == "fbItem"):
+                continue
+            px, py = self._parse_pos(fb.attrib.get("pos") or "")
+            try:
+                fx = float(px) if px.strip() else 0.0
+            except Exception:
+                fx = 0.0
+            try:
+                fy = float(py) if py.strip() else 0.0
+            except Exception:
+                fy = 0.0
+            if max_x is None or fx > max_x:
+                max_x = fx
+                y = fy
+        if max_x is None:
+            return (300.0, 100.0)
+        return (max_x + 400.0, y)
+
+    def _read_application_funblock_io(self, path: Path) -> tuple[str, list[str], list[str]]:
+        path = Path(path)
+        tree = ET.parse(path)
+        root = tree.getroot()
+
+        funblock = None
+        for el in root.iter():
+            if not isinstance(el.tag, str):
+                continue
+            if self._local_name(el.tag) == "funBlock":
+                funblock = el
+                break
+        if funblock is None:
+            raise ValueError("No <funBlock> found")
+
+        fb_name = (funblock.attrib.get("name") or "").strip() or path.stem
+        inputs: list[str] = []
+        outputs: list[str] = []
+        for ch in list(funblock):
+            if not isinstance(ch.tag, str):
+                continue
+            local = self._local_name(ch.tag)
+            if local == "input":
+                n = (ch.attrib.get("name") or "").strip()
+                if n:
+                    inputs.append(n)
+            elif local == "output":
+                n = (ch.attrib.get("name") or "").strip()
+                if n:
+                    outputs.append(n)
+        return (fb_name, inputs, outputs)
+
+    def _afg_fb_add(self) -> None:
+        self._afg_fb_add_from_application(insert_mode="append")
+
+    def _afg_fb_insert(self) -> None:
+        self._afg_fb_add_from_application(insert_mode="before")
+
+    def _afg_fb_add_from_application(self, *, insert_mode: str) -> None:
+        root = self._afg_root
+        if root is None:
+            messagebox.showerror("Missing", "No AFG loaded", parent=self)
+            return
+
+        app_dir = self._application_dir()
+        items = self._scan_xml_relpaths(app_dir)
+        if not items:
+            messagebox.showerror("Missing", f"No application (*.xml) found under:\n\n{os.fspath(app_dir)}", parent=self)
+            return
+
+        dlg = _PickFromListDialog(
+            self,
+            title="Pick application",
+            label="Application file",
+            items=items,
+            initial="",
+        )
+        rel = dlg.show()
+        if not rel:
+            return
+        rel = rel.strip()
+        app_path = app_dir / rel
+        if not app_path.exists():
+            messagebox.showerror("Missing", f"File not found:\n\n{os.fspath(app_path)}", parent=self)
+            return
+
+        try:
+            fb_name, input_names, output_names = self._read_application_funblock_io(app_path)
+        except Exception as e:
+            messagebox.showerror("Open failed", str(e), parent=self)
+            return
+
+        fb_items_el = self._afg_get_or_create_child(root, "fbItems")
+
+        # Create a new fbItem with IO pins based on Application funBlock.
+        x, y = self._afg_suggest_new_fb_pos()
+        new_fb = ET.Element(
+            "fbItem",
+            attrib={
+                "pos": f"{x:.6f},{y:.6f}",
+                "name": fb_name,
+                "lineColor": "#000000",
+                "itemColor": "#ffffff",
+            },
+        )
+
+        inputs_el = ET.SubElement(new_fb, "Inputs")
+        outputs_el = ET.SubElement(new_fb, "Outputs")
+
+        next_pin = self._afg_max_pin_id() + 1
+        for n in input_names:
+            ET.SubElement(
+                inputs_el,
+                "Input",
+                attrib={
+                    "name": n,
+                    "lineColor": "#000000",
+                    "itemColor": "#000000",
+                    "pinLineColor": "#000000",
+                    "pinID": str(next_pin),
+                },
+            )
+            next_pin += 1
+        for n in output_names:
+            ET.SubElement(
+                outputs_el,
+                "Output",
+                attrib={
+                    "name": n,
+                    "lineColor": "#000000",
+                    "itemColor": "#000000",
+                    "pinLineColor": "#000000",
+                    "pinID": str(next_pin),
+                },
+            )
+            next_pin += 1
+        try:
+            root.attrib["maxPinID"] = str(max(self._afg_max_pin_id(), next_pin - 1))
+        except Exception:
+            pass
+
+        selected = self._afg_selected_fb()
+        if insert_mode == "before" and selected is not None:
+            idx = list(fb_items_el).index(selected)
+            fb_items_el.insert(idx, new_fb)
+        else:
+            fb_items_el.append(new_fb)
+
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_views(select_first_fb=False)
+        self._select_fb_element(new_fb)
+
+    def _select_fb_element(self, fb: ET.Element) -> None:
+        if self._afg_tv_fb is None:
+            return
+        for iid, el in self._afg_fb_iid_to_item.items():
+            if el is fb:
+                try:
+                    self._afg_tv_fb.selection_set(iid)
+                    self._afg_tv_fb.focus(iid)
+                    self._afg_tv_fb.see(iid)
+                except Exception:
+                    pass
+                return
+
+    def _afg_fb_edit(self) -> None:
+        fb = self._afg_selected_fb()
+        if fb is None:
+            return
+        name = (fb.attrib.get("name") or "")
+        pos_x, pos_y = self._parse_pos(fb.attrib.get("pos") or "")
+        dlg = _AfgFbEditDialog(self, name=name, pos_x=pos_x, pos_y=pos_y)
+        res = dlg.show()
+        if not res:
+            return
+        x = (res.get("posX") or "").strip()
+        y = (res.get("posY") or "").strip()
+        if x or y or "pos" in fb.attrib:
+            fb.attrib["pos"] = f"{x},{y}" if y != "" else x
+        self._refresh_afg_views(select_first_fb=False)
+        self._select_fb_element(fb)
+
+    def _on_afg_fb_double_click(self, event: tk.Event) -> str:
+        tv = self._afg_tv_fb
+        if tv is None:
+            return "break"
+        region = tv.identify("region", event.x, event.y)
+        if region != "cell":
+            return "break"
+        col = tv.identify_column(event.x)
+        iid = tv.identify_row(event.y)
+        if not iid:
+            return "break"
+        try:
+            tv.selection_set(iid)
+        except Exception:
+            pass
+
+        # Only posX/posY are editable by double-click. (name is not editable)
+        if col in {"#2", "#3"}:
+            try:
+                tv.after_idle(lambda: self._begin_afg_fb_inline_edit(iid, col))
+            except Exception:
+                self._begin_afg_fb_inline_edit(iid, col)
+        return "break"
+
+    def _begin_afg_fb_inline_edit(self, iid: str, col: str) -> None:
+        tv = self._afg_tv_fb
+        if tv is None:
+            return
+        el = self._afg_fb_iid_to_item.get(iid)
+        if el is None:
+            return
+
+        # Commit any existing inline editors
+        self._end_afg_in_inline_editor(commit=True)
+        self._end_afg_out_inline_editor(commit=True)
+        self._end_afg_fb_inline_editor(commit=True)
+
+        if col not in {"#2", "#3"}:
+            return
+
+        bbox = tv.bbox(iid, col)
+        if not bbox:
+            return
+        x, y, w, h = bbox
+
+        pos_x, pos_y = self._parse_pos(el.attrib.get("pos") or "")
+        value = pos_x if col == "#2" else pos_y
+
+        ent = ttk.Entry(tv)
+        ent.insert(0, value)
+
+        def commit_and_close(_e=None) -> None:
+            self._end_afg_fb_inline_editor(commit=True)
+
+        ent.bind("<Return>", commit_and_close)
+        ent.bind("<Escape>", lambda _e: self._end_afg_fb_inline_editor(commit=False))
+        ent.bind("<FocusOut>", lambda _e: self._end_afg_fb_inline_editor(commit=True))
+        ent.place(x=x, y=y, width=w, height=h)
+        ent.focus_set()
+        try:
+            ent.select_range(0, tk.END)
+        except Exception:
+            pass
+
+        self._afg_fb_inline = ent
+        self._afg_fb_inline_iid = iid
+        self._afg_fb_inline_col = col
+
+    def _end_afg_fb_inline_editor(self, *, commit: bool) -> None:
+        ent = self._afg_fb_inline
+        if ent is None:
+            return
+        iid = self._afg_fb_inline_iid
+        col = self._afg_fb_inline_col
+        self._afg_fb_inline = None
+        self._afg_fb_inline_iid = None
+        self._afg_fb_inline_col = None
+
+        tv = self._afg_tv_fb
+        el = self._afg_fb_iid_to_item.get(iid or "") if iid is not None else None
+        try:
+            value = ent.get()
+        except Exception:
+            value = ""
+        try:
+            ent.destroy()
+        except Exception:
+            pass
+
+        if commit and el is not None and col in {"#2", "#3"}:
+            x0, y0 = self._parse_pos(el.attrib.get("pos") or "")
+            x1, y1 = x0, y0
+            if col == "#2":
+                x1 = (value or "").strip()
+            else:
+                y1 = (value or "").strip()
+            if x1 or y1 or "pos" in el.attrib:
+                el.attrib["pos"] = f"{x1},{y1}" if y1 != "" else x1
+
+        self._refresh_afg_views(select_first_fb=False)
+        if el is not None:
+            self._select_fb_element(el)
+        try:
+            if tv is not None:
+                tv.focus_set()
+        except Exception:
+            pass
+
+    def _afg_fb_copy(self) -> None:
+        fb = self._afg_selected_fb()
+        if fb is None:
+            return
+        self._afg_fb_clipboard = _deepcopy_et_element(fb)
+
+    def _afg_fb_cut(self) -> None:
+        fb = self._afg_selected_fb()
+        if fb is None:
+            return
+        self._afg_fb_clipboard = _deepcopy_et_element(fb)
+        self._afg_fb_delete()
+
+    def _afg_fb_paste(self) -> None:
+        if self._afg_fb_clipboard is None:
+            return
+        root = self._afg_root
+        if root is None:
+            return
+        fb_items_el = self._afg_get_or_create_child(root, "fbItems")
+
+        new_fb = _deepcopy_et_element(self._afg_fb_clipboard)
+
+        selected = self._afg_selected_fb()
+        if selected is not None:
+            idx = list(fb_items_el).index(selected)
+            fb_items_el.insert(idx + 1, new_fb)
+        else:
+            fb_items_el.append(new_fb)
+
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_views(select_first_fb=False)
+        self._select_fb_element(new_fb)
+
+    def _afg_fb_delete(self) -> None:
+        root = self._afg_root
+        fb = self._afg_selected_fb()
+        if root is None or fb is None:
+            return
+        fb_items_el = self._afg_get_child(root, "fbItems")
+        if fb_items_el is None:
+            return
+        try:
+            fb_items_el.remove(fb)
+        except Exception:
+            return
+
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_views(select_first_fb=True)
+
+    def _afg_fb_up(self) -> None:
+        self._afg_fb_move(delta=-1)
+
+    def _afg_fb_down(self) -> None:
+        self._afg_fb_move(delta=1)
+
+    def _afg_fb_move(self, *, delta: int) -> None:
+        root = self._afg_root
+        fb = self._afg_selected_fb()
+        if root is None or fb is None:
+            return
+        fb_items_el = self._afg_get_child(root, "fbItems")
+        if fb_items_el is None:
+            return
+        items = [x for x in list(fb_items_el) if isinstance(x.tag, str) and _local_name(x.tag) == "fbItem"]
+        try:
+            idx = items.index(fb)
+        except Exception:
+            return
+        new_idx = idx + delta
+        if new_idx < 0 or new_idx >= len(items):
+            return
+
+        fb_items_el.remove(fb)
+        # Recompute list after removal.
+        items2 = [x for x in list(fb_items_el) if isinstance(x.tag, str) and _local_name(x.tag) == "fbItem"]
+        if new_idx >= len(items2):
+            fb_items_el.append(fb)
+        else:
+            fb_items_el.insert(new_idx, fb)
+
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_views(select_first_fb=False)
+        self._select_fb_element(fb)
+
+    def _on_afg_fb_right_click(self, e: tk.Event) -> None:
+        if self._afg_tv_fb is None:
+            return
+        iid = None
+        try:
+            iid = self._afg_tv_fb.identify_row(e.y)
+        except Exception:
+            iid = None
+        if iid:
+            try:
+                self._afg_tv_fb.selection_set(iid)
+                self._afg_tv_fb.focus(iid)
+            except Exception:
+                pass
+
+        if self._afg_fb_ctx_menu is None:
+            m = tk.Menu(self, tearoff=0)
+            m.add_command(label="Add", command=self._afg_fb_add)
+            m.add_command(label="Insert", command=self._afg_fb_insert)
+            m.add_command(label="Edit", command=self._afg_fb_edit)
+            m.add_separator()
+            m.add_command(label="Copy", command=self._afg_fb_copy)
+            m.add_command(label="Cut", command=self._afg_fb_cut)
+            m.add_command(label="Paste", command=self._afg_fb_paste)
+            m.add_separator()
+            m.add_command(label="Delete", command=self._afg_fb_delete)
+            m.add_separator()
+            m.add_command(label="Up", command=self._afg_fb_up)
+            m.add_command(label="Down", command=self._afg_fb_down)
+            self._afg_fb_ctx_menu = m
+
+        try:
+            self._afg_fb_ctx_menu.tk_popup(e.x_root, e.y_root)
+        finally:
+            try:
+                self._afg_fb_ctx_menu.grab_release()
+            except Exception:
+                pass
+
+    def _normalize_afg_pin_ids_and_arrows(self) -> None:
+        root = self._afg_root
+        if root is None:
+            return
+
+        def parse_int(s: str | None) -> int | None:
+            try:
+                if s is None:
+                    return None
+                s2 = str(s).strip()
+                if not s2:
+                    return None
+                return int(s2)
+            except Exception:
+                return None
+
+        pin_elems: list[ET.Element] = []
+
+        fb_items_el = self._afg_get_child(root, "fbItems")
+        if fb_items_el is not None:
+            for fb in [x for x in list(fb_items_el) if isinstance(x.tag, str) and _local_name(x.tag) == "fbItem"]:
+                inputs_el = None
+                outputs_el = None
+                for ch in list(fb):
+                    if not isinstance(ch.tag, str):
+                        continue
+                    ln = _local_name(ch.tag)
+                    if ln == "Inputs":
+                        inputs_el = ch
+                    elif ln == "Outputs":
+                        outputs_el = ch
+
+                if inputs_el is not None:
+                    for it in list(inputs_el):
+                        if isinstance(it.tag, str) and _local_name(it.tag) == "Input":
+                            pin_elems.append(it)
+                if outputs_el is not None:
+                    for it in list(outputs_el):
+                        if isinstance(it.tag, str) and _local_name(it.tag) == "Output":
+                            pin_elems.append(it)
+
+        in_items_el = self._afg_get_child(root, "afgInItems")
+        if in_items_el is not None:
+            for it in list(in_items_el):
+                if isinstance(it.tag, str) and _local_name(it.tag) == "afgInItem":
+                    pin_elems.append(it)
+
+        out_items_el = self._afg_get_child(root, "afgOutItems")
+        if out_items_el is not None:
+            for it in list(out_items_el):
+                if isinstance(it.tag, str) and _local_name(it.tag) == "afgOutItem":
+                    pin_elems.append(it)
+
+        mapping: dict[int, int] = {}
+        new_id = 1
+        for el in pin_elems:
+            old_id = parse_int(el.attrib.get("pinID"))
+            el.attrib["pinID"] = str(new_id)
+            if old_id is not None and old_id not in mapping:
+                mapping[old_id] = new_id
+            new_id += 1
+
+        root.attrib["maxPinID"] = str(max(0, new_id - 1))
+
+        arrows_el = self._afg_get_child(root, "arrows")
+        if arrows_el is None:
+            return
+
+        to_remove: list[ET.Element] = []
+        for ar in list(arrows_el):
+            if not (isinstance(ar.tag, str) and _local_name(ar.tag) == "arrowItem"):
+                continue
+            sp_old = parse_int(ar.attrib.get("startPinID"))
+            ep_old = parse_int(ar.attrib.get("endPinID"))
+            if sp_old is None or ep_old is None:
+                to_remove.append(ar)
+                continue
+            if sp_old not in mapping or ep_old not in mapping:
+                to_remove.append(ar)
+                continue
+            ar.attrib["startPinID"] = str(mapping[sp_old])
+            ar.attrib["endPinID"] = str(mapping[ep_old])
+
+        for ar in to_remove:
+            try:
+                arrows_el.remove(ar)
+            except Exception:
+                pass
+
+    def _open_afg(self) -> None:
+        base_dir = self._applicationgroup_dir()
+        initialdir = base_dir if base_dir.exists() else self.workspace_root
+        target = filedialog.askopenfilename(
+            parent=self,
+            title="Open AFG file",
+            initialdir=os.fspath(initialdir),
+            filetypes=[("XML", "*.xml"), ("All", "*")],
+        )
+        if not target:
+            return
+        self._open_afg_from_path(Path(target))
+
+    def _open_afg_from_search(self) -> None:
+        if self.var_afg_selected is None:
+            return
+        rel = (self.var_afg_selected.get() or "").strip()
+        if not rel:
+            return
+        base_dir = self._applicationgroup_dir()
+        target = base_dir / rel
+        if not target.exists():
+            messagebox.showerror("Missing", f"File not found:\n\n{os.fspath(target)}", parent=self)
+            return
+        self._open_afg_from_path(target)
+
+    def _open_afg_from_path(self, path: Path) -> None:
+        path = Path(path)
+        if self._afg_tv_fb is None:
+            return
+
+        try:
+            tree = ET.parse(path)
+            root = tree.getroot()
+        except Exception as e:
+            messagebox.showerror("Open failed", str(e), parent=self)
+            return
+
+        # Basic validation
+        if not (isinstance(root.tag, str) and _local_name(root.tag) == "AfgDiagramXml"):
+            messagebox.showerror("Invalid", "Root element is not <AfgDiagramXml>", parent=self)
+            return
+
+        self._afg_file_path = path
+        self._afg_root = root
+        # Prep doRef dropdown suggestions from corresponding LN instance.
+        self._afg_ln_cached_name = ""
+        self._afg_ensure_ln_suggestions_loaded()
+        self._refresh_afg_views(select_first_fb=True)
+
+        # Update search combobox selection if file is under base dir.
+        try:
+            base_dir = self._applicationgroup_dir()
+            rel = os.fspath(path.relative_to(base_dir))
+        except Exception:
+            rel = os.fspath(path.name)
+        self._refresh_afg_search_list(select_rel=rel)
+        if self._afg_ln_instance_path is not None:
+            self._set_status(
+                f"Opened AFG: {os.fspath(path)}  (LN instance: {os.fspath(self._afg_ln_instance_path.name)})"
+            )
+        else:
+            self._set_status(f"Opened AFG: {os.fspath(path)}")
 
     def _open_enum_type_from_path(self, path: Path) -> None:
         path = Path(path)
