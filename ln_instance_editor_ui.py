@@ -9,6 +9,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 from tkinter import ttk
 
+import xml.etree.ElementTree as ET
+
 from iec61850_scanner import LNodeTypeInfo, scan_type_catalog
 
 from ln_instance_scanner import (
@@ -410,7 +412,17 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._lang_rows_filtered: list[_LangRow] = []
         self._priv_rows: list[_PrivRow] = []
         self._saved_sig: str | None = None
+        # Per-table snapshots for row-level highlighting (changed vs last saved).
+        self._saved_value_sig_by_path: dict[str, str] | None = None
+        self._saved_lang_sig_by_path: dict[str, str] | None = None
+        self._saved_priv_sigs: list[str] | None = None
         self._current_ln_index: int = 0
+
+        # Undo (Ctrl+Z): snapshot XML bytes before each committed mutation.
+        self._undo_stack: list[bytes] = []
+        self._undo_max = 50
+        self._undoing: bool = False
+        self._undo_suspended: bool = False
 
         self._edit_entry: ttk.Entry | None = None
         self._edit_iid: str | None = None
@@ -458,6 +470,9 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._tpl_value_order_index: dict[str, int] = {}
         self._tpl_lang_order_index: dict[str, int] = {}
 
+        # Template-defined DOI order (for showing empty DOI headers)
+        self._tpl_doi_names: list[str] = []
+
         self._col_resize_after: str | None = None
         self._priv_col_resize_after: str | None = None
 
@@ -473,10 +488,6 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._app_last_auto_lnref: str = ""
         self._app_last_auto_desc: str = ""
 
-        # Keep Application tab defaults in sync with LN header edits.
-        self.var_lnClass.trace_add("write", lambda *_a: self._sync_application_autofill())
-        self.var_prefix.trace_add("write", lambda *_a: self._sync_application_autofill())
-
         self._build_ui()
 
         # No document loaded at startup.
@@ -488,20 +499,43 @@ class LNInstanceEditorFrame(ttk.Frame):
             self.load_file(initial_path)
 
     def _build_ui(self) -> None:
+        def _bind_undo(w: tk.Misc) -> None:
+            try:
+                w.bind("<Control-z>", lambda _e: (self.undo(), "break")[1])
+                w.bind("<Control-Z>", lambda _e: (self.undo(), "break")[1])
+            except Exception:
+                pass
+
         row1 = ttk.Frame(self, padding=(10, 10, 10, 0))
         row1.pack(fill="x")
 
-        ttk.Button(row1, text="New", command=self.new_instance).pack(side="left")
-        ttk.Button(row1, text="Open", command=self.open_dialog).pack(side="left", padx=(8, 0))
+        btn_new = ttk.Button(row1, text="New", command=self.new_instance)
+        btn_new.pack(side="left")
+        _bind_undo(btn_new)
+
+        btn_open = ttk.Button(row1, text="Open", command=self.open_dialog)
+        btn_open.pack(side="left", padx=(8, 0))
+        _bind_undo(btn_open)
+
         self.btn_save = ttk.Button(row1, text="Save", command=self.save)
         self.btn_save.pack(side="left", padx=(8, 0))
-        ttk.Button(row1, text="Save As", command=self.save_as).pack(side="left", padx=(8, 0))
+        _bind_undo(self.btn_save)
+
+        btn_save_as = ttk.Button(row1, text="Save As", command=self.save_as)
+        btn_save_as.pack(side="left", padx=(8, 0))
+        _bind_undo(btn_save_as)
+
+        self.btn_refresh = ttk.Button(row1, text="Refresh", command=self.refresh_from_template)
+        self.btn_refresh.pack(side="left", padx=(8, 0))
+        _bind_undo(self.btn_refresh)
+
         self.btn_create_app = ttk.Button(
             row1,
             text="Create application file with this template",
             command=self.create_application_file_with_template,
         )
         self.btn_create_app.pack(side="left", padx=(8, 0))
+        _bind_undo(self.btn_create_app)
 
         row2 = ttk.Frame(self, padding=(10, 8, 10, 0))
         row2.pack(fill="x")
@@ -509,6 +543,7 @@ class LNInstanceEditorFrame(ttk.Frame):
         ttk.Label(row2, text="Search").pack(side="left")
         ent_filter = ttk.Entry(row2, textvariable=self.var_instance_filter, width=28)
         ent_filter.pack(side="left", padx=(8, 0))
+        _bind_undo(ent_filter)
 
         self.cb_instance = ttk.Combobox(
             row2,
@@ -518,6 +553,7 @@ class LNInstanceEditorFrame(ttk.Frame):
         )
         self.cb_instance.pack(side="left", padx=(10, 0))
         self.cb_instance.bind("<Return>", lambda _e: self.load_selected_instance())
+        _bind_undo(self.cb_instance)
         ttk.Button(row2, text="Load", command=self.load_selected_instance).pack(side="left", padx=(8, 0))
 
         self.lbl_instance_match = ttk.Label(row2, text="")
@@ -536,21 +572,30 @@ class LNInstanceEditorFrame(ttk.Frame):
         frm.columnconfigure(3, weight=1)
 
         ttk.Label(frm, text="lnClass").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=self.var_lnClass).grid(row=0, column=1, sticky="we", padx=(8, 16))
+        ent_lnClass = ttk.Entry(frm, textvariable=self.var_lnClass)
+        ent_lnClass.grid(row=0, column=1, sticky="we", padx=(8, 16))
+        _bind_undo(ent_lnClass)
 
         ttk.Label(frm, text="inst").grid(row=0, column=2, sticky="w")
-        ttk.Entry(frm, textvariable=self.var_inst).grid(row=0, column=3, sticky="we", padx=(8, 0))
+        ent_inst = ttk.Entry(frm, textvariable=self.var_inst)
+        ent_inst.grid(row=0, column=3, sticky="we", padx=(8, 0))
+        _bind_undo(ent_inst)
 
         ttk.Label(frm, text="prefix").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Entry(frm, textvariable=self.var_prefix).grid(row=1, column=1, sticky="we", padx=(8, 16), pady=(6, 0))
+        ent_prefix = ttk.Entry(frm, textvariable=self.var_prefix)
+        ent_prefix.grid(row=1, column=1, sticky="we", padx=(8, 16), pady=(6, 0))
+        _bind_undo(ent_prefix)
 
         ttk.Label(frm, text="lnType").grid(row=1, column=2, sticky="w", pady=(6, 0))
-        ttk.Entry(frm, textvariable=self.var_lnType).grid(row=1, column=3, sticky="we", padx=(8, 0), pady=(6, 0))
+        ent_lnType = ttk.Entry(frm, textvariable=self.var_lnType)
+        ent_lnType.grid(row=1, column=3, sticky="we", padx=(8, 0), pady=(6, 0))
+        _bind_undo(ent_lnType)
 
         # Details notebook
         self.details_nb = ttk.Notebook(body)
         self.details_nb.pack(fill="both", expand=True, pady=(10, 0))
         self.details_nb.bind("<<NotebookTabChanged>>", lambda _e: self._commit_any_edit())
+        _bind_undo(self.details_nb)
 
         tab_values = ttk.Frame(self.details_nb)
         tab_lang = ttk.Frame(self.details_nb)
@@ -571,6 +616,7 @@ class LNInstanceEditorFrame(ttk.Frame):
         ttk.Label(frow, text="Filter").grid(row=0, column=0, sticky="w")
         ent_vfilter = ttk.Entry(frow, textvariable=self.var_value_filter)
         ent_vfilter.grid(row=0, column=1, sticky="we", padx=(8, 0))
+        _bind_undo(ent_vfilter)
         ttk.Button(frow, text="Clear", command=self._clear_filter).grid(row=0, column=2, padx=(8, 0))
 
         self.lbl_value_match = ttk.Label(frow, text="")
@@ -591,12 +637,23 @@ class LNInstanceEditorFrame(ttk.Frame):
         self.tree.heading("vk", text="valKind")
         self.tree.heading("vi", text="valImport")
         # Widths are set dynamically by proportion to keep the 5-column layout readable.
-        self.tree.column("path", width=420, minwidth=260, anchor="w", stretch=False)
-        self.tree.column("val", width=420, minwidth=220, anchor="w", stretch=False)
-        self.tree.column("def", width=320, minwidth=180, anchor="w", stretch=False)
+        # Keep the first 3 columns narrower so metadata columns stay visible.
+        self.tree.column("path", width=320, minwidth=180, anchor="w", stretch=False)
+        self.tree.column("val", width=280, minwidth=160, anchor="w", stretch=False)
+        self.tree.column("def", width=240, minwidth=160, anchor="w", stretch=False)
         self.tree.column("vk", width=90, minwidth=80, anchor="w", stretch=False)
         self.tree.column("vi", width=100, minwidth=90, anchor="w", stretch=False)
         self.tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+
+        try:
+            self.tree.tag_configure("changed", background="lemon chiffon")
+        except Exception:
+            pass
+
+        try:
+            self.tree.tag_configure("added", background="honeydew2")
+        except Exception:
+            pass
 
         vsb = ttk.Scrollbar(valbox, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(valbox, orient="horizontal", command=self.tree.xview)
@@ -608,6 +665,8 @@ class LNInstanceEditorFrame(ttk.Frame):
         self.tree.bind("<Button-1>", self._on_tree_left_click)
         self.tree.bind("<Button-3>", self._on_tree_right_click)
         self.tree.bind("<Configure>", lambda _e: self._schedule_value_column_resize())
+        self.tree.bind("<Control-z>", lambda _e: (self.undo(), "break")[1])
+        self.tree.bind("<Control-Z>", lambda _e: (self.undo(), "break")[1])
 
         # First layout pass after widgets are realized.
         self.after_idle(self._resize_value_columns)
@@ -629,6 +688,7 @@ class LNInstanceEditorFrame(ttk.Frame):
         ttk.Label(lrow, text="Filter").grid(row=0, column=0, sticky="w")
         ent_lfilter = ttk.Entry(lrow, textvariable=self.var_lang_filter)
         ent_lfilter.grid(row=0, column=1, sticky="we", padx=(8, 0))
+        _bind_undo(ent_lfilter)
         ttk.Button(lrow, text="Clear", command=self._clear_lang_filter).grid(row=0, column=2, padx=(8, 0))
 
         self.lbl_lang_match = ttk.Label(lrow, text="")
@@ -654,6 +714,11 @@ class LNInstanceEditorFrame(ttk.Frame):
         self.tree_lang.column("text", width=360, anchor="w")
         self.tree_lang.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
 
+        try:
+            self.tree_lang.tag_configure("changed", background="lemon chiffon")
+        except Exception:
+            pass
+
         lvsb = ttk.Scrollbar(langbox, orient="vertical", command=self.tree_lang.yview)
         lhsb = ttk.Scrollbar(langbox, orient="horizontal", command=self.tree_lang.xview)
         self.tree_lang.configure(yscrollcommand=lvsb.set, xscrollcommand=lhsb.set)
@@ -663,6 +728,8 @@ class LNInstanceEditorFrame(ttk.Frame):
         self.tree_lang.bind("<Double-1>", self._on_lang_tree_double_click)
         self.tree_lang.bind("<Button-1>", self._on_lang_tree_left_click)
         self.tree_lang.bind("<Button-3>", self._on_lang_tree_right_click)
+        self.tree_lang.bind("<Control-z>", lambda _e: (self.undo(), "break")[1])
+        self.tree_lang.bind("<Control-Z>", lambda _e: (self.undo(), "break")[1])
 
         self._lang_tree_menu = tk.Menu(self, tearoff=0)
         self._lang_tree_menu.add_command(label="Apply template ID", command=self.apply_template_langref_to_selected)
@@ -695,6 +762,17 @@ class LNInstanceEditorFrame(ttk.Frame):
         self.tree_priv.column("enabled", width=70, minwidth=70, anchor="center", stretch=False)
         self.tree_priv.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
 
+        try:
+            self.tree_priv.tag_configure("changed", background="lemon chiffon")
+        except Exception:
+            pass
+
+        try:
+            self.tree_priv.tag_configure("added", background="honeydew2")
+            self.tree_priv.tag_configure("removed", background="misty rose")
+        except Exception:
+            pass
+
         pvsb = ttk.Scrollbar(privbox, orient="vertical", command=self.tree_priv.yview)
         phsb = ttk.Scrollbar(privbox, orient="horizontal", command=self.tree_priv.xview)
         self.tree_priv.configure(yscrollcommand=pvsb.set, xscrollcommand=phsb.set)
@@ -707,6 +785,8 @@ class LNInstanceEditorFrame(ttk.Frame):
         self.tree_priv.bind("<space>", lambda _e: self.priv_toggle_selected())
         self.tree_priv.bind("<<TreeviewSelect>>", lambda _e: self._update_priv_delete_button_state())
         self.tree_priv.bind("<Configure>", lambda _e: self._schedule_priv_column_resize())
+        self.tree_priv.bind("<Control-z>", lambda _e: (self.undo(), "break")[1])
+        self.tree_priv.bind("<Control-Z>", lambda _e: (self.undo(), "break")[1])
 
         self._priv_tree_menu = tk.Menu(self, tearoff=0)
         self._priv_tree_menu.add_command(label="Add", command=self.priv_add)
@@ -820,9 +900,9 @@ class LNInstanceEditorFrame(ttk.Frame):
         avail = max(0, w - 6)
 
         mins = {
-            "path": 260,
-            "val": 220,
-            "def": 180,
+            "path": 180,
+            "val": 160,
+            "def": 160,
             "vk": 80,
             "vi": 90,
         }
@@ -853,6 +933,13 @@ class LNInstanceEditorFrame(ttk.Frame):
         drift = avail - sum(widths.values())
         if drift != 0:
             widths["path"] = max(mins["path"], widths["path"] + drift)
+
+        # Apply.
+        for k, ww in widths.items():
+            try:
+                self.tree.column(k, width=int(ww))
+            except Exception:
+                pass
 
     def _schedule_priv_column_resize(self) -> None:
         try:
@@ -918,7 +1005,8 @@ class LNInstanceEditorFrame(ttk.Frame):
         try:
             sel = self.tree_priv.selection()
             if sel and (sel[0] in self._priv_iid_to_row):
-                can_delete = bool(self._priv_iid_to_row[sel[0]].is_custom)
+                row = self._priv_iid_to_row[sel[0]]
+                can_delete = bool(row.is_custom) and (not bool(getattr(row, "__ui_deleted", False)))
         except Exception:
             can_delete = False
         try:
@@ -933,6 +1021,8 @@ class LNInstanceEditorFrame(ttk.Frame):
         widget.bind("<Control-S>", lambda _e: self.save())
         widget.bind("<Control-Shift-s>", lambda _e: self.save_as())
         widget.bind("<Control-Shift-S>", lambda _e: self.save_as())
+        widget.bind("<Control-z>", lambda _e: (self.undo(), "break")[1])
+        widget.bind("<Control-Z>", lambda _e: (self.undo(), "break")[1])
         widget.bind("<F2>", lambda _e: self.start_edit_selected())
 
     def new_instance(self) -> None:
@@ -1149,13 +1239,14 @@ class LNInstanceEditorFrame(ttk.Frame):
             messagebox.showerror("Open failed", str(e), parent=self)
             return
 
-        # Requirement: UI shows all DAI (template skeleton), but saved files should only contain valued DAI.
-        # We therefore re-hydrate missing DOI/SDI/DAI placeholders from the template on load.
-        # Additionally, we compute template defaults to show in the UI and support right-click Apply.
+        # On open/load: show only what is in the file.
+        # Template-defined defaults are still computed for the "Value in template" column + right-click Apply.
+        # Missing DOI/DAI placeholders are ONLY hydrated when the user clicks Refresh.
         self._tpl_default_values = {}
         self._tpl_default_langref_ids = {}
         self._tpl_value_order_index = {}
         self._tpl_lang_order_index = {}
+        self._tpl_doi_names = []
         try:
             ln0 = doc.ln_elements[0]
             ln_type_id = (ln0.attrib.get("lnType") or "").strip()
@@ -1168,7 +1259,6 @@ class LNInstanceEditorFrame(ttk.Frame):
 
                     model = load_lnode_type(info)
                     iec61850_dir = self.workspace_root / "ep7_datamodel" / "datamodel" / "iec61850"
-                    ensure_all_dai_present_from_template(doc, 0, iec61850_dir=iec61850_dir, template=model)
 
                     # Build template order index (uses skeleton placeholder doc, preserves DO order)
                     try:
@@ -1180,6 +1270,25 @@ class LNInstanceEditorFrame(ttk.Frame):
                             inst="0",
                             ln_desc="",
                         )
+
+                        # Keep template DOI order so we can display empty DOI headers like Str/Op.
+                        try:
+                            ln_tpl = odoc.ln_elements[0]
+                            tpl_dois: list[str] = []
+                            for ch in list(ln_tpl):
+                                if not isinstance(ch.tag, str):
+                                    continue
+                                tag = ch.tag
+                                if tag.startswith("{"):
+                                    tag = tag.split("}", 1)[1]
+                                if tag != "DOI":
+                                    continue
+                                nm = (ch.attrib.get("name") or "").strip()
+                                if nm:
+                                    tpl_dois.append(nm)
+                            self._tpl_doi_names = tpl_dois
+                        except Exception:
+                            self._tpl_doi_names = []
 
                         def _base(p: str) -> str:
                             return (p or "").split("/Val:", 1)[0]
@@ -1227,6 +1336,8 @@ class LNInstanceEditorFrame(ttk.Frame):
             pass
 
         self.doc = doc
+        self._undo_stack = []
+        self._undoing = False
         self.var_path.set(os.fspath(path))
 
         # During initial UI population, header variable traces may call _update_dirty_ui(),
@@ -1244,7 +1355,11 @@ class LNInstanceEditorFrame(ttk.Frame):
             )
 
         self._load_current_ln_into_ui()
+
+        # Normalize header writeback once after load so we don't become dirty on open.
+        self._apply_header_to_doc()
         self._saved_sig = compute_signature(doc)
+        self.mark_saved()
         self._update_doc_dependent_ui()
         self._update_dirty_ui()
         if self.status.get().strip() == "":
@@ -1265,6 +1380,158 @@ class LNInstanceEditorFrame(ttk.Frame):
                 return
         self.load_file(self.doc.file_path)
 
+    def _try_load_template_model_for_current_ln(self):
+        if not self.doc:
+            return None
+
+        idx = getattr(self, "_current_ln_index", 0) or 0
+        if idx < 0 or idx >= len(self.doc.ln_elements):
+            idx = 0
+
+        try:
+            ln = self.doc.ln_elements[idx]
+        except Exception:
+            return None
+
+        ln_type_id = (ln.attrib.get("lnType") or "").strip()
+        if not ln_type_id:
+            return None
+
+        try:
+            self._ensure_type_catalog()
+            templates = list(getattr(self._type_catalog, "lnode_types", []) or [])
+            info = next((x for x in templates if x.id == ln_type_id), None)
+            if info is None:
+                return None
+
+            from iec61850_scanner import load_lnode_type
+
+            model = load_lnode_type(info)
+            iec61850_dir = self.workspace_root / "ep7_datamodel" / "datamodel" / "iec61850"
+            return (iec61850_dir, model)
+        except Exception:
+            return None
+
+    def refresh_from_template(self) -> None:
+        if not self.doc:
+            return
+
+        got = self._try_load_template_model_for_current_ln()
+        if not got:
+            self._set_status("Refresh: template not found (lnType missing or not in catalog)")
+            return
+
+        iec61850_dir, model = got
+        try:
+            # Commit any in-progress edits, but keep Refresh as a single undo step.
+            try:
+                self._undo_suspended = True
+                self._commit_any_edit()
+            finally:
+                self._undo_suspended = False
+
+            idx = getattr(self, "_current_ln_index", 0) or 0
+
+            snap0 = self._doc_xml_bytes()
+            n0 = len(self._undo_stack)
+            self._push_undo()
+            pushed = len(self._undo_stack) != n0
+
+            ensure_all_dai_present_from_template(
+                self.doc,
+                idx,
+                iec61850_dir=iec61850_dir,
+                template=model,
+                copy_dai_metadata=False,
+                reorder_doi=True,
+            )
+
+            # If refresh produced no XML change, drop the undo snapshot.
+            try:
+                if pushed and snap0 and self._doc_xml_bytes() == snap0:
+                    self._undo_stack.pop()
+            except Exception:
+                pass
+
+            self._load_current_ln_into_ui()
+            self._update_dirty_ui()
+            self._set_status("Refreshed from LN template")
+        except Exception as e:
+            try:
+                # Avoid leaving a useless undo entry if refresh failed.
+                if 'pushed' in locals() and pushed:
+                    self._undo_stack.pop()
+            except Exception:
+                pass
+            messagebox.showerror("Refresh failed", str(e), parent=self)
+
+    def refresh_from_template_model(self, model) -> None:
+        """Refresh the loaded instance using a known template model.
+
+        Used by the LN template editor when the template structure changes.
+        """
+        if not self.doc or model is None:
+            return
+
+        try:
+            # Commit any in-progress edits, but keep Refresh as a single undo step.
+            try:
+                self._undo_suspended = True
+                self._commit_any_edit()
+            finally:
+                self._undo_suspended = False
+
+            idx = getattr(self, "_current_ln_index", 0) or 0
+            if idx < 0 or idx >= len(self.doc.ln_elements):
+                idx = 0
+
+            # Safety: only apply if lnType matches.
+            ln_type_id = (self.doc.ln_elements[idx].attrib.get("lnType") or "").strip()
+            try:
+                model_id = (getattr(getattr(model, "info", None), "id", "") or "").strip()
+            except Exception:
+                model_id = ""
+            if ln_type_id and model_id and ln_type_id != model_id:
+                return
+
+            iec61850_dir = self.workspace_root / "ep7_datamodel" / "datamodel" / "iec61850"
+
+            snap0 = self._doc_xml_bytes()
+            n0 = len(self._undo_stack)
+            self._push_undo()
+            pushed = len(self._undo_stack) != n0
+
+            ensure_all_dai_present_from_template(
+                self.doc,
+                idx,
+                iec61850_dir=iec61850_dir,
+                template=model,
+                copy_dai_metadata=False,
+                reorder_doi=True,
+            )
+
+            # If refresh produced no XML change, drop the undo snapshot.
+            try:
+                if pushed and snap0 and self._doc_xml_bytes() == snap0:
+                    self._undo_stack.pop()
+            except Exception:
+                pass
+
+            self._load_current_ln_into_ui()
+            self._update_dirty_ui()
+            self._set_status("Refreshed from LN template")
+        except Exception as e:
+            try:
+                try:
+                    # Avoid leaving a useless undo entry if refresh failed.
+                    if 'pushed' in locals() and pushed:
+                        self._undo_stack.pop()
+                except Exception:
+                    pass
+                self._set_status(f"Refresh from template failed: {e}")
+            except Exception:
+                pass
+
     def _load_current_ln_into_ui(self) -> None:
         if not self.doc:
             return
@@ -1278,9 +1545,6 @@ class LNInstanceEditorFrame(ttk.Frame):
         self.var_inst.set((ln.attrib.get("inst") or "").strip())
         self.var_prefix.set((ln.attrib.get("prefix") or "").strip())
         self.var_lnType.set((ln.attrib.get("lnType") or "").strip())
-
-        # Refresh Application auto-fill from current LN element.
-        self._sync_application_autofill(force=True)
 
         self._rows_all = []
         self._lang_rows_all = []
@@ -1334,6 +1598,208 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._apply_lang_filter()
 
         self._load_priv_rows_from_doc()
+        self._render_priv_tree()
+
+    def _set_item_tag(self, tree: ttk.Treeview, iid: str, tag: str, on: bool) -> None:
+        try:
+            tags = list(tree.item(iid, "tags") or ())
+            tags = [t for t in tags if t != tag]
+            if on:
+                tags.append(tag)
+            tree.item(iid, tags=tuple(tags))
+        except Exception:
+            return
+
+    def _value_row_sig(self, ref: ValueRef) -> str:
+        v = ref.get_value_text()
+        vk = (ref.dai_element.attrib.get("valKind") or "").strip()
+        vi = (ref.dai_element.attrib.get("valImport") or "").strip().lower()
+        raw = "\x1f".join((ref.path or "", v or "", vk, vi))
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    def _lang_row_sig(self, ref: LangRefRef) -> str:
+        raw = "\x1f".join(
+            (
+                ref.path or "",
+                ref.private_type or "",
+                ref.get_private_text() or "",
+                ref.get_label_text() or "",
+            )
+        )
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    def _priv_row_sig(self, row: _PrivRow) -> str:
+        raw = "\x1f".join(
+            (
+                row.private_type or "",
+                row.value_text or "",
+                "1" if row.enabled else "0",
+                "1" if row.is_custom else "0",
+                "1" if row.has_nested_xml else "0",
+            )
+        )
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    def _value_row_is_changed(self, ref: ValueRef) -> bool:
+        if self._saved_value_sig_by_path is None:
+            return False
+        saved = self._saved_value_sig_by_path.get(ref.path)
+        if saved is None:
+            return True
+        return self._value_row_sig(ref) != saved
+
+    def _value_row_change_kind(self, ref: ValueRef) -> str:
+        """Return 'same' | 'changed' | 'added' relative to the last saved baseline."""
+        if self._saved_value_sig_by_path is None:
+            return "same"
+        saved = self._saved_value_sig_by_path.get(ref.path)
+        if saved is None:
+            return "added"
+        return "changed" if (self._value_row_sig(ref) != saved) else "same"
+
+    def _lang_row_is_changed(self, ref: LangRefRef) -> bool:
+        if self._saved_lang_sig_by_path is None:
+            return False
+        saved = self._saved_lang_sig_by_path.get(ref.path)
+        if saved is None:
+            return True
+        return self._lang_row_sig(ref) != saved
+
+    def _priv_row_is_changed(self, iid: str, row: _PrivRow) -> bool:
+        if self._saved_priv_sigs is None:
+            return False
+        try:
+            idx = int((iid or "").split("_", 1)[1])
+        except Exception:
+            return False
+        if idx < 0:
+            return False
+        if idx >= len(self._saved_priv_sigs):
+            return True
+        return self._priv_row_sig(row) != self._saved_priv_sigs[idx]
+
+    def _priv_row_tags(self, iid: str, row: _PrivRow) -> tuple[str, ...]:
+        # Precedence: removed > added > changed
+        if bool(getattr(row, "__ui_deleted", False)):
+            return ("removed",)
+
+        if self._saved_priv_sigs is not None:
+            try:
+                idx = int((iid or "").split("_", 1)[1])
+            except Exception:
+                idx = -1
+            if idx >= len(self._saved_priv_sigs):
+                return ("added",)
+
+        if self._priv_row_is_changed(iid, row):
+            return ("changed",)
+
+        return ()
+
+    def _reapply_changed_tags_values(self) -> None:
+        if not hasattr(self, "tree"):
+            return
+
+        def _segments(p: str) -> list[str]:
+            return [s for s in (p or "").split("/") if s]
+
+        def _is_hdr(seg: str) -> bool:
+            return seg.startswith("DOI:") or seg.startswith("SDI:")
+
+        def _header_keys_for_path(path: str) -> list[str]:
+            keys: list[str] = []
+            acc: list[str] = []
+            for seg in _segments(path):
+                if _is_hdr(seg):
+                    acc.append(seg)
+                    keys.append("/".join(acc))
+            return keys
+
+        header_added: dict[str, bool] = {k: False for k in (self._header_iid_by_key or {})}
+        header_changed: dict[str, bool] = {k: False for k in (self._header_iid_by_key or {})}
+
+        # Compute header highlights from the *data*, not only visible leaf rows.
+        # When a DOI/SDI group is folded, its DAI rows are not rendered, but the
+        # parent header should still reflect that something inside changed/added.
+        try:
+            for row in list(getattr(self, "_rows_filtered", []) or []):
+                ref = row.ref
+                kind = self._value_row_change_kind(ref)
+                if kind == "same":
+                    continue
+                for hk in _header_keys_for_path(ref.path):
+                    if hk not in header_changed:
+                        continue
+                    if kind == "added":
+                        header_added[hk] = True
+                    else:
+                        header_changed[hk] = True
+        except Exception:
+            pass
+
+        # Leaf rows: highlight only rows that are currently visible.
+        for iid, ref in list(self._iid_to_ref.items()):
+            kind = self._value_row_change_kind(ref)
+            is_added = kind == "added"
+            is_changed = kind == "changed"
+            self._set_item_tag(self.tree, iid, "added", is_added)
+            self._set_item_tag(self.tree, iid, "changed", (is_changed and (not is_added)))
+
+        for hk in header_changed.keys():
+            iid = self._header_iid_by_key.get(hk)
+            if not iid:
+                continue
+            is_added = bool(header_added.get(hk, False))
+            is_changed = bool(header_changed.get(hk, False)) and (not is_added)
+            self._set_item_tag(self.tree, iid, "added", is_added)
+            self._set_item_tag(self.tree, iid, "changed", is_changed)
+
+    def _reapply_changed_tags_lang(self) -> None:
+        if not hasattr(self, "tree_lang"):
+            return
+        for iid, ref in list(self._lang_iid_to_ref.items()):
+            self._set_item_tag(self.tree_lang, iid, "changed", self._lang_row_is_changed(ref))
+
+    def _reapply_changed_tags_priv(self) -> None:
+        if not hasattr(self, "tree_priv"):
+            return
+        for iid, row in list(self._priv_iid_to_row.items()):
+            try:
+                self.tree_priv.item(iid, tags=self._priv_row_tags(iid, row))
+            except Exception:
+                pass
+
+    def mark_saved(self) -> None:
+        # Snapshot the current UI/doc state as the new baseline (clear all "changed" highlights).
+        try:
+            self._saved_value_sig_by_path = {r.ref.path: self._value_row_sig(r.ref) for r in self._rows_all}
+        except Exception:
+            self._saved_value_sig_by_path = None
+
+        try:
+            self._saved_lang_sig_by_path = {r.ref.path: self._lang_row_sig(r.ref) for r in self._lang_rows_all}
+        except Exception:
+            self._saved_lang_sig_by_path = None
+
+        try:
+            kept: list[_PrivRow] = []
+            for r in (self._priv_rows or []):
+                if bool(getattr(r, "__ui_deleted", False)):
+                    continue
+                # Clear UI-only flags at save boundary.
+                try:
+                    if hasattr(r, "__ui_deleted"):
+                        delattr(r, "__ui_deleted")
+                except Exception:
+                    pass
+                kept.append(r)
+            self._priv_rows = kept
+            self._saved_priv_sigs = [self._priv_row_sig(r) for r in self._priv_rows]
+        except Exception:
+            self._saved_priv_sigs = None
+
+        self._reapply_changed_tags_values()
+        self._reapply_changed_tags_lang()
         self._render_priv_tree()
 
     def _apply_filter(self) -> None:
@@ -1396,6 +1862,81 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._end_meta_edit(commit=True)
         self._end_lang_cell_edit(commit=True)
         self._end_priv_cell_edit(commit=True)
+
+    def _doc_xml_bytes(self) -> bytes:
+        if not self.doc:
+            return b""
+        try:
+            root = self.doc.tree.getroot()
+            return ET.tostring(root, encoding="utf-8", short_empty_elements=True)
+        except Exception:
+            try:
+                root = self.doc.tree.getroot()
+                return (ET.tostring(root, encoding="unicode") or "").encode("utf-8", errors="ignore")
+            except Exception:
+                return b""
+
+    def _doc_from_xml_bytes(self, xml_bytes: bytes, *, file_path: Path) -> LNInstanceDocument:
+        root = ET.fromstring(xml_bytes)
+        tree = ET.ElementTree(root)
+        ns = root.tag.split("}", 1)[0][1:] if isinstance(root.tag, str) and root.tag.startswith("{") else ""
+
+        def q(name: str) -> str:
+            return f"{{{ns}}}{name}" if ns else name
+
+        ln_elements: list[ET.Element] = []
+        root_ln = root.tag.split("}", 1)[1] if isinstance(root.tag, str) and root.tag.startswith("{") else root.tag
+        if root_ln in {"LN", "LN0", "LNode"}:
+            ln_elements.append(root)
+        else:
+            ln_elements.extend(list(root.iter(q("LN"))))
+            if not ln_elements:
+                ln_elements.extend(list(root.iter(q("LN0"))))
+            if not ln_elements:
+                ln_elements.extend(list(root.iter(q("LNode"))))
+        if not ln_elements:
+            raise ValueError("No LN/LN0/LNode element found")
+
+        return LNInstanceDocument(file_path=file_path, tree=tree, ns=ns, ln_elements=ln_elements)
+
+    def _push_undo(self) -> None:
+        if self._undoing or self._undo_suspended:
+            return
+        if not self.doc:
+            return
+        snap = self._doc_xml_bytes()
+        if not snap:
+            return
+        self._undo_stack.append(snap)
+        if len(self._undo_stack) > self._undo_max:
+            self._undo_stack = self._undo_stack[-self._undo_max :]
+
+    def undo(self) -> None:
+        if not self._undo_stack or not self.doc:
+            return
+
+        # Cancel inline edits to avoid committing stale values after undo.
+        try:
+            self._end_cell_edit(commit=False)
+            self._end_meta_edit(commit=False)
+            self._end_lang_cell_edit(commit=False)
+            self._end_priv_cell_edit(commit=False)
+        except Exception:
+            pass
+
+        snap = self._undo_stack.pop()
+        self._undoing = True
+        try:
+            restored = self._doc_from_xml_bytes(snap, file_path=self.doc.file_path)
+            self.doc = restored
+            self._current_ln_index = 0
+            self._load_current_ln_into_ui()
+            self._update_dirty_ui()
+        except Exception:
+            # If restore fails, do not lose the snapshot.
+            self._undo_stack.append(snap)
+        finally:
+            self._undoing = False
 
     def _default_lnname_text(self) -> str:
         prefix = (self.var_prefix.get() or "").strip()
@@ -1483,12 +2024,15 @@ class LNInstanceEditorFrame(ttk.Frame):
                         row.value_text,
                         self._priv_checkbox_text(row.enabled),
                     ),
+                    tags=self._priv_row_tags(iid, row),
                 )
                 self._priv_iid_to_row[iid] = row
             except Exception:
                 pass
 
             self._update_priv_delete_button_state()
+
+        self._reapply_changed_tags_priv()
 
     def _apply_priv_row_to_doc(self, row: _PrivRow, *, old_type: str | None = None) -> None:
         if not self.doc:
@@ -1527,6 +2071,9 @@ class LNInstanceEditorFrame(ttk.Frame):
             row = self._priv_iid_to_row.get(iid)
             if row is None:
                 return
+            if bool(getattr(row, "__ui_deleted", False)):
+                return
+            self._push_undo()
             row.enabled = not row.enabled
             self._apply_priv_row_to_doc(row)
             try:
@@ -1534,6 +2081,10 @@ class LNInstanceEditorFrame(ttk.Frame):
             except Exception:
                 pass
             self._update_dirty_ui()
+            try:
+                self.tree_priv.item(iid, tags=self._priv_row_tags(iid, row))
+            except Exception:
+                pass
         except Exception:
             return
 
@@ -1547,6 +2098,9 @@ class LNInstanceEditorFrame(ttk.Frame):
         row = self._priv_iid_to_row.get(iid)
         if row is None:
             return
+        if bool(getattr(row, "__ui_deleted", False)):
+            return
+        self._push_undo()
         row.enabled = not row.enabled
         self._apply_priv_row_to_doc(row)
         try:
@@ -1554,10 +2108,15 @@ class LNInstanceEditorFrame(ttk.Frame):
         except Exception:
             pass
         self._update_dirty_ui()
+        try:
+            self.tree_priv.item(iid, tags=self._priv_row_tags(iid, row))
+        except Exception:
+            pass
 
     def priv_add(self) -> None:
         # Adds a new custom private row; user will edit the type/value.
         self._end_priv_cell_edit(commit=True)
+        self._push_undo()
         self._priv_rows.append(_PrivRow(private_type="", value_text="", enabled=True, is_custom=True))
         self._render_priv_tree()
         try:
@@ -1582,6 +2141,21 @@ class LNInstanceEditorFrame(ttk.Frame):
         if not row.is_custom:
             self._set_status("Managed Private rows cannot be deleted (uncheck to remove from file).")
             return
+
+        # Determine whether this row is newly added (not yet saved).
+        is_added = False
+        try:
+            idx = int((iid or "").split("_", 1)[1])
+        except Exception:
+            idx = -1
+        try:
+            if self._saved_priv_sigs is not None and idx >= len(self._saved_priv_sigs):
+                is_added = True
+        except Exception:
+            is_added = False
+
+        # Deleting a custom private row is always undoable (even if it doesn't map to file XML).
+        self._push_undo()
         try:
             t = (row.private_type or "").strip()
             if t and self.doc:
@@ -1589,12 +2163,20 @@ class LNInstanceEditorFrame(ttk.Frame):
         except Exception:
             pass
 
+        # Added-then-deleted before save: cancel the addition (no red removed state).
+        if is_added:
+            try:
+                if 0 <= idx < len(self._priv_rows):
+                    self._priv_rows.pop(idx)
+            except Exception:
+                pass
+            self._render_priv_tree()
+            self._update_dirty_ui()
+            return
+
+        # Soft-delete: keep visible until save.
         try:
-            # Remove by identity
-            for i, r in enumerate(self._priv_rows):
-                if r is row:
-                    self._priv_rows.pop(i)
-                    break
+            setattr(row, "__ui_deleted", True)
         except Exception:
             pass
 
@@ -1614,7 +2196,8 @@ class LNInstanceEditorFrame(ttk.Frame):
             try:
                 sel = self.tree_priv.selection()
                 if sel and (sel[0] in self._priv_iid_to_row):
-                    can_delete = bool(self._priv_iid_to_row[sel[0]].is_custom)
+                    row = self._priv_iid_to_row[sel[0]]
+                    can_delete = bool(row.is_custom) and (not bool(getattr(row, "__ui_deleted", False)))
             except Exception:
                 can_delete = False
             try:
@@ -1638,6 +2221,8 @@ class LNInstanceEditorFrame(ttk.Frame):
             if not iid or iid not in self._priv_iid_to_row:
                 return
             self.tree_priv.selection_set(iid)
+            if bool(getattr(self._priv_iid_to_row.get(iid), "__ui_deleted", False)):
+                return
             column_id = "type" if col == "#1" else ("value" if col == "#2" else "enabled")
             if column_id == "enabled":
                 self.priv_toggle_selected()
@@ -1649,6 +2234,8 @@ class LNInstanceEditorFrame(ttk.Frame):
     def _begin_priv_cell_edit(self, iid: str, column_id: str) -> None:
         row = self._priv_iid_to_row.get(iid)
         if row is None:
+            return
+        if bool(getattr(row, "__ui_deleted", False)):
             return
 
         self._end_priv_cell_edit(commit=False)
@@ -1678,6 +2265,8 @@ class LNInstanceEditorFrame(ttk.Frame):
         ent.bind("<Return>", lambda _e: self._end_priv_cell_edit(commit=True))
         ent.bind("<Escape>", lambda _e: self._end_priv_cell_edit(commit=False))
         ent.bind("<FocusOut>", lambda _e: self._end_priv_cell_edit(commit=True))
+        ent.bind("<Control-z>", lambda _e: (self.undo(), "break")[1])
+        ent.bind("<Control-Z>", lambda _e: (self.undo(), "break")[1])
 
         self._priv_edit_entry = ent
         self._priv_edit_iid = iid
@@ -1717,7 +2306,11 @@ class LNInstanceEditorFrame(ttk.Frame):
             if not self._is_priv_type_editable(row):
                 return
             old_type = (row.private_type or "").strip()
-            row.private_type = (new_text or "").strip()
+            new_type = (new_text or "").strip()
+            if old_type == new_type:
+                return
+            self._push_undo()
+            row.private_type = new_type
             # Prevent custom rows from shadowing managed ones.
             if row.private_type in set(_MANAGED_PRIV_TYPES):
                 self._set_status("This private type is managed; edit the managed row instead.")
@@ -1726,7 +2319,11 @@ class LNInstanceEditorFrame(ttk.Frame):
         elif col == "value":
             if not self._is_priv_value_editable(row):
                 return
-            row.value_text = (new_text or "")
+            new_value = (new_text or "")
+            if (row.value_text or "") == new_value:
+                return
+            self._push_undo()
+            row.value_text = new_value
 
         if row.enabled:
             self._apply_priv_row_to_doc(row, old_type=old_type)
@@ -1740,6 +2337,7 @@ class LNInstanceEditorFrame(ttk.Frame):
             pass
 
         self._update_dirty_ui()
+        self._set_item_tag(self.tree_priv, iid, "changed", self._priv_row_is_changed(iid, row))
 
     def _render_lang_tree(
         self,
@@ -1808,6 +2406,75 @@ class LNInstanceEditorFrame(ttk.Frame):
                 return n
 
         root = _Node(seg="", key="", depth=-1)
+
+        def _ln(tag: str) -> str:
+            if tag.startswith("{"):
+                return tag.split("}", 1)[1]
+            return tag
+
+        # Ensure DOI/SDI headers exist even when there are no DAI rows under them.
+        # (Otherwise empty DOI containers disappear from the table.)
+        try:
+            # If a filter is active, keep behavior focused on matching value rows.
+            if not (self.var_value_filter.get().strip()):
+                # Prefer template order so template-only DOIs still appear.
+                for nm in list(getattr(self, "_tpl_doi_names", []) or []):
+                    nm2 = (nm or "").strip()
+                    if not nm2:
+                        continue
+                    seg0 = f"DOI:{nm2}"
+                    root.get_child(seg0, seg0)
+
+                # Pre-create nested SDI groups from template path structure.
+                try:
+                    for p in (getattr(self, "_tpl_lang_order_index", {}) or {}).keys():
+                        node0 = root
+                        key_parts0: list[str] = []
+                        for seg0 in _segments(p):
+                            if not _is_hdr(seg0):
+                                continue
+                            key_parts0.append(seg0)
+                            key0 = "/".join(key_parts0)
+                            node0 = node0.get_child(seg0, key0)
+                except Exception:
+                    pass
+
+                if self.doc is not None:
+                    idx0 = getattr(self, "_current_ln_index", 0) or 0
+                    if idx0 < 0 or idx0 >= len(self.doc.ln_elements):
+                        idx0 = 0
+                    ln_el = self.doc.ln_elements[idx0]
+
+                    def _walk_sdi(parent_el, parent_key_parts: list[str], parent_node: _Node) -> None:
+                        for ch in list(parent_el):
+                            if not isinstance(ch.tag, str):
+                                continue
+                            if _ln(ch.tag) != "SDI":
+                                continue
+                            nm = (ch.attrib.get("name") or "").strip()
+                            if not nm:
+                                continue
+                            seg = f"SDI:{nm}"
+                            key_parts2 = parent_key_parts + [seg]
+                            key2 = "/".join(key_parts2)
+                            n2 = parent_node.get_child(seg, key2)
+                            _walk_sdi(ch, key_parts2, n2)
+
+                    for ch in list(ln_el):
+                        if not isinstance(ch.tag, str):
+                            continue
+                        if _ln(ch.tag) != "DOI":
+                            continue
+                        nm = (ch.attrib.get("name") or "").strip()
+                        if not nm:
+                            continue
+                        seg = f"DOI:{nm}"
+                        key_parts = [seg]
+                        key = seg
+                        n = root.get_child(seg, key)
+                        _walk_sdi(ch, key_parts, n)
+        except Exception:
+            pass
 
         for row in self._lang_rows_filtered:
             parts = _segments(row.ref.path)
@@ -1883,6 +2550,7 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         self._end_lang_cell_edit(commit=False)
         self._update_lang_fold_all_button()
+        self._reapply_changed_tags_lang()
 
     def _lang_group_keys_in_filtered(self) -> set[str]:
         keys: set[str] = set()
@@ -2038,6 +2706,8 @@ class LNInstanceEditorFrame(ttk.Frame):
         ent.bind("<Return>", lambda _e: self._end_lang_cell_edit(commit=True))
         ent.bind("<Escape>", lambda _e: self._end_lang_cell_edit(commit=False))
         ent.bind("<FocusOut>", lambda _e: self._end_lang_cell_edit(commit=True))
+        ent.bind("<Control-z>", lambda _e: (self.undo(), "break")[1])
+        ent.bind("<Control-Z>", lambda _e: (self.undo(), "break")[1])
 
         self._lang_edit_entry = ent
         self._lang_edit_iid = iid
@@ -2072,6 +2742,8 @@ class LNInstanceEditorFrame(ttk.Frame):
             return
 
         raw = (new_text or "").strip()
+        if (ref.get_private_text() or "").strip() == raw:
+            return
 
         # Allow empty, or digits, or digits.digits
         if not raw:
@@ -2089,6 +2761,7 @@ class LNInstanceEditorFrame(ttk.Frame):
             messagebox.showerror("Invalid value", "LangRef ID must be digits or digits.digits (or blank).", parent=self)
             return
 
+        self._push_undo()
         ref.set_group_label(g2, l2)
         cur_id = ref.get_private_text()
         try:
@@ -2101,6 +2774,7 @@ class LNInstanceEditorFrame(ttk.Frame):
             pass
 
         self._update_dirty_ui()
+        self._set_item_tag(self.tree_lang, iid, "changed", self._lang_row_is_changed(ref))
 
     def _on_lang_tree_right_click(self, event: tk.Event) -> None:
         if getattr(self, "_lang_tree_menu", None) is None:
@@ -2143,10 +2817,14 @@ class LNInstanceEditorFrame(ttk.Frame):
             self._set_status("No template LangRef ID for selected DAI")
             return
 
+        if (ref.get_private_text() or "").strip() == raw:
+            return
+
         if "." in raw:
             g, l = (x.strip() for x in raw.split(".", 1))
         else:
             g, l = raw, ""
+        self._push_undo()
         ref.set_group_label(g, l)
         self._render_lang_tree()
         self._update_dirty_ui()
@@ -2231,6 +2909,74 @@ class LNInstanceEditorFrame(ttk.Frame):
                 return n
 
         root = _Node(seg="", key="", depth=-1)
+
+        # Ensure DOI/SDI headers exist even when there are no DAI rows under them.
+        # (Otherwise empty DOI containers disappear from the table.)
+        try:
+            # If a filter is active, keep behavior focused on matching value rows.
+            if not (self.var_value_filter.get().strip()):
+                # Prefer template order so template-only DOIs (e.g. Str/Op) still appear.
+                for nm in list(getattr(self, "_tpl_doi_names", []) or []):
+                    nm2 = (nm or "").strip()
+                    if not nm2:
+                        continue
+                    seg0 = f"DOI:{nm2}"
+                    root.get_child(seg0, seg0)
+
+                # Pre-create nested SDI groups from template path structure.
+                try:
+                    for p in (getattr(self, "_tpl_value_order_index", {}) or {}).keys():
+                        node0 = root
+                        key_parts0: list[str] = []
+                        for seg0 in _segments(p):
+                            if not _is_hdr(seg0):
+                                continue
+                            key_parts0.append(seg0)
+                            key0 = "/".join(key_parts0)
+                            node0 = node0.get_child(seg0, key0)
+                except Exception:
+                    pass
+
+                # Also include DOI/SDI containers that exist in the instance file.
+                if self.doc is not None:
+                    idx0 = getattr(self, "_current_ln_index", 0) or 0
+                    if idx0 < 0 or idx0 >= len(self.doc.ln_elements):
+                        idx0 = 0
+                    ln_el = self.doc.ln_elements[idx0]
+
+                    def _ln(tag: str) -> str:
+                        if tag.startswith("{"):
+                            return tag.split("}", 1)[1]
+                        return tag
+
+                    def _walk_sdi(parent_el, parent_key_parts: list[str], parent_node: _Node) -> None:
+                        for ch in list(parent_el):
+                            if not isinstance(ch.tag, str):
+                                continue
+                            if _ln(ch.tag) != "SDI":
+                                continue
+                            nm = (ch.attrib.get("name") or "").strip()
+                            if not nm:
+                                continue
+                            seg = f"SDI:{nm}"
+                            key_parts2 = parent_key_parts + [seg]
+                            key2 = "/".join(key_parts2)
+                            n2 = parent_node.get_child(seg, key2)
+                            _walk_sdi(ch, key_parts2, n2)
+
+                    for ch in list(ln_el):
+                        if not isinstance(ch.tag, str):
+                            continue
+                        if _ln(ch.tag) != "DOI":
+                            continue
+                        nm = (ch.attrib.get("name") or "").strip()
+                        if not nm:
+                            continue
+                        seg = f"DOI:{nm}"
+                        n = root.get_child(seg, seg)
+                        _walk_sdi(ch, [seg], n)
+        except Exception:
+            pass
 
         for row in self._rows_filtered:
             parts = _segments(row.ref.path)
@@ -2328,6 +3074,8 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         self._update_fold_all_button()
 
+        self._reapply_changed_tags_values()
+
     def _group_keys_in_filtered(self) -> set[str]:
         keys: set[str] = set()
 
@@ -2383,7 +3131,9 @@ class LNInstanceEditorFrame(ttk.Frame):
         return self._iid_to_ref.get(sel[0])
 
     def _on_tree_double_click(self, event: tk.Event) -> None:
-        # Start editing only when double-clicking specific columns.
+        # Double-click behavior:
+        # - DOI/SDI header row: fold/unfold
+        # - Value rows: start editing when double-clicking specific columns.
         try:
             region = self.tree.identify("region", event.x, event.y)
             if region != "cell":
@@ -2392,6 +3142,67 @@ class LNInstanceEditorFrame(ttk.Frame):
             iid = self.tree.identify_row(event.y)
             if not iid:
                 return
+
+            # DOI/SDI header rows: fold/unfold on double click (Path column).
+            if col == "#1" and iid in self._header_key_by_iid:
+                # Commit any in-progress edit first.
+                self._end_cell_edit(commit=True)
+                self._end_meta_edit(commit=True)
+                self.tree.selection_set(iid)
+
+                # Capture current pixel position of the clicked row so we can restore it.
+                old_y = 0
+                row_h = 1
+                try:
+                    bb0 = self.tree.bbox(iid, column="path")
+                    if bb0:
+                        _x, y0, _w, h0 = bb0
+                        old_y = int(y0)
+                        row_h = max(1, int(h0))
+                except Exception:
+                    old_y = 0
+                    row_h = 1
+
+                key = self._header_key_by_iid.get(iid)
+                if not key:
+                    return
+
+                # Preserve row offset of clicked header within the viewport.
+                anchor_offset = 0
+                try:
+                    items0 = list(self.tree.get_children())
+                    top0 = self.tree.identify_row(0)
+                    if top0 and top0 in items0 and iid in items0:
+                        anchor_offset = items0.index(iid) - items0.index(top0)
+                except Exception:
+                    anchor_offset = 0
+
+                if key in self._collapsed_groups:
+                    self._collapsed_groups.remove(key)
+                else:
+                    self._collapsed_groups.add(key)
+
+                # Anchor on the clicked header to avoid scroll jumping.
+                self._render_tree(anchor_kind="h", anchor_key=key, anchor_offset=anchor_offset)
+
+                # After rebuild, adjust scroll so the clicked row stays at the same pixel Y.
+                try:
+                    iid2 = self._header_iid_by_key.get(key)
+                    if iid2 and self.tree.exists(iid2):
+                        bb1 = self.tree.bbox(iid2, column="path")
+                        if not bb1:
+                            self.tree.see(iid2)
+                            bb1 = self.tree.bbox(iid2, column="path")
+                        if bb1:
+                            _x, y1, _w, _h = bb1
+                            delta_units = int(round((int(y1) - old_y) / float(row_h)))
+                            if delta_units:
+                                self.tree.yview_scroll(delta_units, "units")
+                except Exception:
+                    pass
+
+                return
+
             if iid not in self._iid_to_ref:
                 return
             self.tree.selection_set(iid)
@@ -2409,78 +3220,8 @@ class LNInstanceEditorFrame(ttk.Frame):
             return
 
     def _on_tree_left_click(self, event: tk.Event) -> str | None:
-        # Toggle fold on DOI/SDI header rows by clicking Path column.
-        try:
-            region = self.tree.identify("region", event.x, event.y)
-            if region != "cell":
-                return None
-            col = self.tree.identify_column(event.x)
-            if col != "#1":
-                return None
-            iid = self.tree.identify_row(event.y)
-            if not iid:
-                return None
-            if iid not in self._header_key_by_iid:
-                return None
-
-            # Commit any in-progress edit first.
-            self._end_cell_edit(commit=True)
-            self._end_meta_edit(commit=True)
-            self.tree.selection_set(iid)
-
-            # Capture current pixel position of the clicked row so we can restore it.
-            old_y = 0
-            row_h = 1
-            try:
-                bb0 = self.tree.bbox(iid, column="path")
-                if bb0:
-                    _x, y0, _w, h0 = bb0
-                    old_y = int(y0)
-                    row_h = max(1, int(h0))
-            except Exception:
-                old_y = 0
-                row_h = 1
-
-            key = self._header_key_by_iid.get(iid)
-            if not key:
-                return "break"
-
-            # Preserve row offset of clicked header within the viewport.
-            anchor_offset = 0
-            try:
-                items0 = list(self.tree.get_children())
-                top0 = self.tree.identify_row(0)
-                if top0 and top0 in items0 and iid in items0:
-                    anchor_offset = items0.index(iid) - items0.index(top0)
-            except Exception:
-                anchor_offset = 0
-
-            if key in self._collapsed_groups:
-                self._collapsed_groups.remove(key)
-            else:
-                self._collapsed_groups.add(key)
-            # Anchor on the clicked header to avoid scroll jumping.
-            self._render_tree(anchor_kind="h", anchor_key=key, anchor_offset=anchor_offset)
-
-            # After rebuild, adjust scroll so the clicked row stays at the same pixel Y.
-            try:
-                iid2 = self._header_iid_by_key.get(key)
-                if iid2 and self.tree.exists(iid2):
-                    bb1 = self.tree.bbox(iid2, column="path")
-                    if not bb1:
-                        self.tree.see(iid2)
-                        bb1 = self.tree.bbox(iid2, column="path")
-                    if bb1:
-                        _x, y1, _w, _h = bb1
-                        delta_units = int(round((int(y1) - old_y) / float(row_h)))
-                        if delta_units:
-                            self.tree.yview_scroll(delta_units, "units")
-            except Exception:
-                pass
-
-            return "break"
-        except Exception:
-            return None
+        # Single click should not fold/unfold; keep default behavior.
+        return None
 
     def start_edit_selected(self) -> None:
         # F2 edits the current tab's selected row.
@@ -2580,6 +3321,12 @@ class LNInstanceEditorFrame(ttk.Frame):
         new_value = ref0.get_value_text()
 
         # Apply to all ValueRefs under the same DAI base.
+        targets = [r.ref for r in self._rows_all if r.ref.path.startswith(base + marker)]
+        if not any(((t.get_value_text() or "") != (new_value or "")) for t in targets):
+            return
+
+        self._push_undo()
+
         changed_paths: set[str] = set()
         for r in self._rows_all:
             if r.ref.path.startswith(base + marker):
@@ -2604,7 +3351,12 @@ class LNInstanceEditorFrame(ttk.Frame):
             self._set_status("No template default for selected DAI")
             return
 
-        ref.set_value_text(self._tpl_default_values.get(ref.path, ""))
+        new_val = self._tpl_default_values.get(ref.path, "")
+        if (ref.get_value_text() or "") == (new_val or ""):
+            return
+
+        self._push_undo()
+        ref.set_value_text(new_val)
         self._render_tree(preserve_yview_fraction=True)
         self._update_dirty_ui()
 
@@ -2631,6 +3383,8 @@ class LNInstanceEditorFrame(ttk.Frame):
         ent.bind("<Return>", lambda _e: self._end_cell_edit(commit=True))
         ent.bind("<Escape>", lambda _e: self._end_cell_edit(commit=False))
         ent.bind("<FocusOut>", lambda _e: self._end_cell_edit(commit=True))
+        ent.bind("<Control-z>", lambda _e: (self.undo(), "break")[1])
+        ent.bind("<Control-Z>", lambda _e: (self.undo(), "break")[1])
 
         self._edit_entry = ent
         self._edit_iid = iid
@@ -2688,6 +3442,8 @@ class LNInstanceEditorFrame(ttk.Frame):
         cb.bind("<Return>", lambda _e: self._end_meta_edit(commit=True))
         cb.bind("<Escape>", lambda _e: self._end_meta_edit(commit=False))
         cb.bind("<FocusOut>", lambda _e: self._end_meta_edit(commit=True))
+        cb.bind("<Control-z>", lambda _e: (self.undo(), "break")[1])
+        cb.bind("<Control-Z>", lambda _e: (self.undo(), "break")[1])
 
         self._meta_edit_cb = cb
         self._meta_edit_iid = iid
@@ -2724,10 +3480,16 @@ class LNInstanceEditorFrame(ttk.Frame):
         if col == "vk":
             if new_text not in {"Set", "Conf", "RO"}:
                 return
+            if (ref.dai_element.attrib.get("valKind") or "").strip() == new_text:
+                return
+            self._push_undo()
             ref.dai_element.attrib["valKind"] = new_text
         else:
             if new_text not in {"true", "false"}:
                 return
+            if (ref.dai_element.attrib.get("valImport") or "").strip().lower() == new_text:
+                return
+            self._push_undo()
             ref.dai_element.attrib["valImport"] = new_text
 
         # Update display for the row.
@@ -2747,6 +3509,7 @@ class LNInstanceEditorFrame(ttk.Frame):
             pass
 
         self._update_dirty_ui()
+        self._reapply_changed_tags_values()
 
     def _end_cell_edit(self, *, commit: bool) -> None:
         if self._edit_entry is None or self._edit_iid is None:
@@ -2774,6 +3537,10 @@ class LNInstanceEditorFrame(ttk.Frame):
         if ref is None:
             return
 
+        if (ref.get_value_text() or "") == (new_text or ""):
+            return
+
+        self._push_undo()
         ref.set_value_text(new_text)
 
         # Update display (truncated to 200 chars).
@@ -2793,6 +3560,7 @@ class LNInstanceEditorFrame(ttk.Frame):
         except Exception:
             pass
         self._update_dirty_ui()
+        self._reapply_changed_tags_values()
 
     def _apply_header_to_doc(self) -> None:
         if not self.doc:
@@ -2829,6 +3597,12 @@ class LNInstanceEditorFrame(ttk.Frame):
         try:
             if hasattr(self, "btn_create_app") and self.btn_create_app is not None:
                 self.btn_create_app.configure(state=("normal" if has_doc else "disabled"))
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "btn_refresh") and self.btn_refresh is not None:
+                self.btn_refresh.configure(state=("normal" if has_doc else "disabled"))
         except Exception:
             pass
 
@@ -2918,6 +3692,7 @@ class LNInstanceEditorFrame(ttk.Frame):
             messagebox.showerror("Save failed", str(e), parent=self)
             return
         self._saved_sig = compute_signature(self.doc)
+        self.mark_saved()
         self._update_dirty_ui()
         self._set_status(f"Saved: {os.fspath(self.doc.file_path)}")
 
@@ -2953,6 +3728,7 @@ class LNInstanceEditorFrame(ttk.Frame):
         self.doc.file_path = target_path
         self.var_path.set(os.fspath(target_path))
         self._saved_sig = compute_signature(self.doc)
+        self.mark_saved()
         self._update_dirty_ui()
         self._set_status(f"Saved As: {os.fspath(target_path)}")
 
@@ -2962,6 +3738,10 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         # Ensure header edits are applied before deriving LnRef/desc.
         self._apply_header_to_doc()
+
+        # Only auto-fill Application-related defaults when the user explicitly
+        # creates an application file (no linkage with other actions).
+        self._sync_application_autofill(force=True)
 
         app_dir = self.workspace_root / "ep7_datamodel" / "datamodel" / "application"
         if not app_dir.exists():

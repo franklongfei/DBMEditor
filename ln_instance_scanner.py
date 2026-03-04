@@ -16,6 +16,7 @@ ALWAYS_PERSIST_EMPTY_DAI_NAMES = {
     "multiplier",
     "SIUnit",
     "SIUnits",  # compatibility alias (some templates/spellings use plural)
+    "swRev",
     "setSrcRef",
     "purpose",
 }
@@ -1546,16 +1547,25 @@ def ensure_all_dai_present_from_template(
     *,
     iec61850_dir: Path,
     template: LNodeTypeModel,
+    copy_dai_metadata: bool = True,
+    reorder_doi: bool = False,
 ) -> None:
     """Augment an existing LN instance document with missing DOI/SDI/DAI placeholders.
 
     This is intended for UI display only: we want the UI to show the full template-defined
     DAI set even if the on-disk file only stores DAI that have values.
 
-    The merge is additive and non-destructive:
+        The merge is additive and non-destructive:
     - existing elements are kept as-is
     - missing DOI/SDI/DAI from the template skeleton are deep-copied in
     - if an existing DAI has no <Val>, a placeholder <Val/> is added (so it can be edited)
+
+        Options:
+        - copy_dai_metadata: when True, if an existing DAI is missing valKind/valImport,
+            they may be filled from the template skeleton. When False, existing DAIs are
+            not modified for these attributes.
+        - reorder_doi: when True, reorder direct <DOI> children under the LN element to
+            match the template skeleton order.
     """
 
     if ln_index < 0 or ln_index >= len(doc.ln_elements):
@@ -1699,13 +1709,52 @@ def ensure_all_dai_present_from_template(
 
                 # Preserve template DAI metadata attributes.
                 # Some instances omit these; UI generation should keep them consistent.
-                for k in ("valKind", "valImport"):
-                    sv = (src.attrib.get(k) or "").strip()
-                    if not sv:
-                        continue
-                    dv = (dst.attrib.get(k) or "").strip()
-                    if not dv:
-                        dst.attrib[k] = sv
+                if copy_dai_metadata:
+                    for k in ("valKind", "valImport"):
+                        sv = (src.attrib.get(k) or "").strip()
+                        if not sv:
+                            continue
+                        dv = (dst.attrib.get(k) or "").strip()
+                        if not dv:
+                            dst.attrib[k] = sv
 
     # Merge DOI tree from skeleton into loaded LN.
     _merge(ln, sk_ln)
+
+    if reorder_doi:
+        # Reorder DOI elements to match the template order, without moving other
+        # LN children (e.g., LN-level <Private>) relative to each other.
+        try:
+            tpl_order: list[str] = []
+            for ch in list(sk_ln):
+                if not isinstance(ch.tag, str) or _local_name(ch.tag) != "DOI":
+                    continue
+                nm = (ch.attrib.get("name") or "").strip()
+                if nm:
+                    tpl_order.append(nm)
+
+            order_index = {name: i for i, name in enumerate(tpl_order)}
+
+            children = list(ln)
+            doi_positions: list[int] = []
+            dst_dois: list[ET.Element] = []
+            for i, ch in enumerate(children):
+                if isinstance(ch.tag, str) and _local_name(ch.tag) == "DOI":
+                    doi_positions.append(i)
+                    dst_dois.append(ch)
+
+            if doi_positions and dst_dois:
+                def _doi_key(pair: tuple[int, ET.Element]) -> tuple[int, int]:
+                    orig_idx, el = pair
+                    nm = (el.attrib.get("name") or "").strip()
+                    return (order_index.get(nm, 10**9), orig_idx)
+
+                sorted_dois = [el for _orig, el in sorted(list(enumerate(dst_dois)), key=_doi_key)]
+                for pos, el in zip(doi_positions, sorted_dois):
+                    children[pos] = el
+
+                ln[:] = []
+                for ch in children:
+                    ln.append(ch)
+        except Exception:
+            pass
