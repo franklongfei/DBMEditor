@@ -37,6 +37,7 @@ APP_TITLE = "DBMEditor"
 
 
 _INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
+_BLANK_SOURCE_OPTION = "(Blank)"
 
 
 _PRIV_TYPE_LNNAME = "SchneiderElectric-PowerLogic-LNName"
@@ -241,9 +242,12 @@ class _CreateFromTemplateDialog(tk.Toplevel):
 
             ids = [x.id for x in filtered]
             cur = (self.var_template.get() or "").strip()
-            if cur and cur not in ids:
-                ids = [cur] + ids
             self.cb_template["values"] = ids[:1500]
+            if raw and ids:
+                if cur != ids[0]:
+                    self.var_template.set(ids[0])
+            elif (not raw) and ids and (cur not in ids):
+                self.var_template.set(ids[0])
 
         def sync_filename(*_args) -> None:
             tid = (self.var_template.get() or "").strip()
@@ -319,27 +323,62 @@ class _CopyInstanceDialog(tk.Toplevel):
         self.grab_set()
 
         self._relpaths = list(instance_relpaths)
+        self._source_values = [_BLANK_SOURCE_OPTION] + self._relpaths
         self._result: dict[str, str] | None = None
 
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
         frm.columnconfigure(1, weight=1)
 
-        ttk.Label(frm, text="Source").grid(row=0, column=0, sticky="w", pady=4)
-        self.var_src = tk.StringVar(value=(self._relpaths[0] if self._relpaths else ""))
-        cb = ttk.Combobox(frm, textvariable=self.var_src, values=self._relpaths, width=72)
-        cb.grid(row=0, column=1, sticky="we", pady=4)
+        ttk.Label(frm, text="Create from").grid(row=0, column=0, sticky="w", pady=4)
+        self.var_filter = tk.StringVar(value="")
+        filter_row = ttk.Frame(frm)
+        filter_row.grid(row=0, column=1, sticky="we", pady=4)
+        filter_row.columnconfigure(1, weight=1)
+        ttk.Label(filter_row, text="Filter").grid(row=0, column=0, sticky="w")
+        ent_filter = ttk.Entry(filter_row, textvariable=self.var_filter)
+        ent_filter.grid(row=0, column=1, sticky="we", padx=(8, 0))
 
-        ttk.Label(frm, text="New file name").grid(row=1, column=0, sticky="w", pady=4)
+        self.var_src = tk.StringVar(value=_BLANK_SOURCE_OPTION)
+        cb = ttk.Combobox(frm, textvariable=self.var_src, values=self._source_values, width=72)
+        cb.grid(row=1, column=1, sticky="we", pady=(0, 4))
+        ttk.Label(frm, text="").grid(row=1, column=0)
+
+        ttk.Label(frm, text="File name").grid(row=2, column=0, sticky="w", pady=4)
         self.var_filename = tk.StringVar(value=(suggested_filename or ""))
-        ttk.Entry(frm, textvariable=self.var_filename, width=36).grid(row=1, column=1, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_filename, width=36).grid(row=2, column=1, sticky="w", pady=4)
 
         btns = ttk.Frame(frm)
-        btns.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="Copy", command=self._ok).pack(side="right", padx=(0, 8))
 
+        def apply_filter(*_args) -> None:
+            raw = (self.var_filter.get() or "").strip().lower()
+            if not raw:
+                filtered = list(self._source_values)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    lv = (v or "").lower()
+                    return all(t in lv for t in tokens)
+
+                filtered = [x for x in self._source_values if ok(x)]
+
+            cur = (self.var_src.get() or "").strip()
+            cb["values"] = filtered[:2000]
+            if raw and filtered:
+                if cur != filtered[0]:
+                    self.var_src.set(filtered[0])
+            elif (not raw) and filtered and (cur not in filtered):
+                self.var_src.set(filtered[0])
+
+        self.var_filter.trace_add("write", apply_filter)
+        apply_filter()
+
         self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
         cb.bind("<Return>", lambda _e: self._ok())
 
     def _ok(self) -> None:
@@ -347,9 +386,12 @@ class _CopyInstanceDialog(tk.Toplevel):
         if not src:
             messagebox.showerror("Missing", "Source instance is required", parent=self)
             return
+        if (src != _BLANK_SOURCE_OPTION) and (src not in self._relpaths):
+            messagebox.showerror("Invalid", "Source instance not found", parent=self)
+            return
         filename = (self.var_filename.get() or "").strip()
         if not filename:
-            messagebox.showerror("Missing", "New file name is required", parent=self)
+            messagebox.showerror("Missing", "File name is required", parent=self)
             return
         if "." not in filename:
             filename = filename + ".xml"
@@ -426,6 +468,7 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         self._edit_entry: ttk.Entry | None = None
         self._edit_iid: str | None = None
+        self._edit_col: str | None = None
         self._meta_edit_cb: ttk.Combobox | None = None
         self._meta_edit_iid: str | None = None
         self._meta_edit_col: str | None = None
@@ -627,20 +670,22 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         self.tree = ttk.Treeview(
             valbox,
-            columns=("path", "val", "def", "vk", "vi"),
+            columns=("path", "val", "def", "lr", "vk", "vi"),
             show="headings",
             selectmode="browse",
         )
         self.tree.heading("path", text="Path")
         self.tree.heading("val", text="Value")
         self.tree.heading("def", text="Value in template")
+        self.tree.heading("lr", text="langRef")
         self.tree.heading("vk", text="valKind")
         self.tree.heading("vi", text="valImport")
-        # Widths are set dynamically by proportion to keep the 5-column layout readable.
+        # Widths are set dynamically by proportion to keep the layout readable.
         # Keep the first 3 columns narrower so metadata columns stay visible.
         self.tree.column("path", width=320, minwidth=180, anchor="w", stretch=False)
         self.tree.column("val", width=280, minwidth=160, anchor="w", stretch=False)
         self.tree.column("def", width=240, minwidth=160, anchor="w", stretch=False)
+        self.tree.column("lr", width=90, minwidth=80, anchor="w", stretch=False)
         self.tree.column("vk", width=90, minwidth=80, anchor="w", stretch=False)
         self.tree.column("vi", width=100, minwidth=90, anchor="w", stretch=False)
         self.tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
@@ -817,12 +862,15 @@ class LNInstanceEditorFrame(ttk.Frame):
                 filtered = [p for p in self._all_instance_relpaths if ok(p)]
 
             cur = (self.var_instance_selected.get() or "").strip()
-            if cur and cur not in filtered:
-                filtered = [cur] + filtered
 
             max_show = 1200
             shown = filtered[:max_show]
             self.cb_instance["values"] = shown
+            if raw and filtered:
+                if cur != filtered[0]:
+                    self.var_instance_selected.set(filtered[0])
+            elif (not raw) and filtered and (cur not in filtered):
+                self.var_instance_selected.set(filtered[0])
             suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
             self.lbl_instance_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
 
@@ -886,9 +934,10 @@ class LNInstanceEditorFrame(ttk.Frame):
         # - Path: 1 unit
         # - Value: 1 unit
         # - Value in template: 1 unit
+        # - langRef: 0.5 unit
         # - valKind: 0.5 unit
         # - valImport: 0.5 unit
-        # Total: 4 units
+        # Total: 4.5 units
         try:
             w = int(self.tree.winfo_width())
         except Exception:
@@ -903,6 +952,7 @@ class LNInstanceEditorFrame(ttk.Frame):
             "path": 180,
             "val": 160,
             "def": 160,
+            "lr": 80,
             "vk": 80,
             "vi": 90,
         }
@@ -917,11 +967,12 @@ class LNInstanceEditorFrame(ttk.Frame):
                     pass
             return
 
-        unit = avail / 4.0
+        unit = avail / 4.5
         widths = {
             "path": int(round(unit * 1.0)),
             "val": int(round(unit * 1.0)),
             "def": int(round(unit * 1.0)),
+            "lr": int(round(unit * 0.5)),
             "vk": int(round(unit * 0.5)),
             "vi": int(round(unit * 0.5)),
         }
@@ -1146,10 +1197,6 @@ class LNInstanceEditorFrame(ttk.Frame):
 
     def copy_existing_instance_dialog(self) -> None:
         self.refresh_instance_list()
-        if not self._all_instance_relpaths:
-            messagebox.showerror("Missing", "No existing instance files found under lndm.", parent=self)
-            return
-
         suggested = "copy.xml"
         if self.doc is not None:
             suggested = _sanitize_filename_stem(self.doc.file_path.stem + "_copy") + self.doc.file_path.suffix
@@ -1159,13 +1206,27 @@ class LNInstanceEditorFrame(ttk.Frame):
         if not res:
             return
 
-        src_path = self.lndm_dir / res["src"]
         target_path = self.lndm_dir / res["filename"]
         target_path = _pick_unique_path(target_path)
 
         try:
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            target_path.write_bytes(src_path.read_bytes())
+            if res["src"] == _BLANK_SOURCE_OPTION:
+                ns = "http://www.iec.ch/61850/2003/SCL"
+
+                def q(name: str) -> str:
+                    return f"{{{ns}}}{name}"
+
+                ln = ET.Element(q("LN"))
+                ln.attrib["prefix"] = ""
+                ln.attrib["lnClass"] = "LLN0"
+                ln.attrib["inst"] = "0"
+                tree = ET.ElementTree(ln)
+                doc = LNInstanceDocument(file_path=target_path, tree=tree, ns=ns, ln_elements=[ln])
+                save_ln_instance_document(doc, target_path=target_path, make_backup=False)
+            else:
+                src_path = self.lndm_dir / res["src"]
+                target_path.write_bytes(src_path.read_bytes())
         except Exception as e:
             messagebox.showerror("Copy failed", str(e), parent=self)
             return
@@ -1599,6 +1660,16 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         self._load_priv_rows_from_doc()
         self._render_priv_tree()
+
+    def _langref_id_for_value_path(self, value_path: str) -> str:
+        base = (value_path or "").split("/Val:", 1)[0]
+        try:
+            for row in (self._lang_rows_all or []):
+                if (row.ref.path or "") == base:
+                    return (row.ref.get_private_text() or "").strip()
+        except Exception:
+            return ""
+        return ""
 
     def _set_item_tag(self, tree: ttk.Treeview, iid: str, tag: str, on: bool) -> None:
         try:
@@ -2776,6 +2847,23 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._update_dirty_ui()
         self._set_item_tag(self.tree_lang, iid, "changed", self._lang_row_is_changed(ref))
 
+        # Keep Values tab's langRef column in sync (best-effort; only updates currently rendered rows).
+        try:
+            if hasattr(self, "tree") and getattr(self, "tree", None) is not None:
+                for vid, vref in list((self._iid_to_ref or {}).items()):
+                    try:
+                        base = (vref.path or "").split("/Val:", 1)[0]
+                    except Exception:
+                        base = ""
+                    if base != (ref.path or ""):
+                        continue
+                    oldv = self.tree.item(vid, "values")
+                    if not oldv or len(oldv) < 6:
+                        continue
+                    self.tree.item(vid, values=(oldv[0], oldv[1], oldv[2], cur_id, oldv[4], oldv[5]))
+        except Exception:
+            pass
+
     def _on_lang_tree_right_click(self, event: tk.Event) -> None:
         if getattr(self, "_lang_tree_menu", None) is None:
             return
@@ -3001,7 +3089,7 @@ class LNInstanceEditorFrame(ttk.Frame):
                 iid = _iid_for_header(node.key)
                 self._header_key_by_iid[iid] = node.key
                 self._header_iid_by_key[node.key] = iid
-                self.tree.insert("", "end", iid=iid, values=(f"{indent}{symbol} {node.seg}", "", "", "", ""))
+                self.tree.insert("", "end", iid=iid, values=(f"{indent}{symbol} {node.seg}", "", "", "", "", ""))
                 if collapsed:
                     return
 
@@ -3019,9 +3107,10 @@ class LNInstanceEditorFrame(ttk.Frame):
                     d = d[:200] + "..."
                 iid = _iid_for_value(ref.path)
                 self._iid_to_ref[iid] = ref
+                lr = self._langref_id_for_value_path(ref.path)
                 vk = (ref.dai_element.attrib.get("valKind") or "").strip()
                 vi = (ref.dai_element.attrib.get("valImport") or "").strip().lower()
-                self.tree.insert("", "end", iid=iid, values=(disp_path, val, d, vk, vi))
+                self.tree.insert("", "end", iid=iid, values=(disp_path, val, d, lr, vk, vi))
 
             for ch in node.children:
                 _render_node(ch)
@@ -3208,12 +3297,22 @@ class LNInstanceEditorFrame(ttk.Frame):
             self.tree.selection_set(iid)
 
             if col == "#2":
-                self._begin_cell_edit(iid)
+                self._begin_cell_edit(iid, col="val")
                 return
             if col == "#4":
-                self._begin_meta_edit(iid, "vk")
+                try:
+                    ref2 = self._iid_to_ref.get(iid)
+                    dai_name = (ref2.dai_element.attrib.get("name") or "").strip() if ref2 else ""
+                except Exception:
+                    dai_name = ""
+                if dai_name != "d":
+                    return
+                self._begin_cell_edit(iid, col="lr")
                 return
             if col == "#5":
+                self._begin_meta_edit(iid, "vk")
+                return
+            if col == "#6":
                 self._begin_meta_edit(iid, "vi")
                 return
         except Exception:
@@ -3221,7 +3320,45 @@ class LNInstanceEditorFrame(ttk.Frame):
 
     def _on_tree_left_click(self, event: tk.Event) -> str | None:
         # Single click should not fold/unfold; keep default behavior.
-        return None
+        # But for valKind/valImport, single click should open dropdown (consistent with DO template UI).
+        try:
+            region = self.tree.identify("region", event.x, event.y)
+            if region != "cell":
+                return None
+
+            col = self.tree.identify_column(event.x)
+            iid = self.tree.identify_row(event.y)
+            if not iid:
+                return None
+
+            try:
+                self.tree.selection_set(iid)
+            except Exception:
+                pass
+
+            if iid not in self._iid_to_ref:
+                return None
+
+            if col == "#5":
+                col_key = "vk"
+            elif col == "#6":
+                col_key = "vi"
+            else:
+                return None
+
+            # If already editing this cell with a combobox, toggle dropdown.
+            if (
+                isinstance(self._meta_edit_cb, ttk.Combobox)
+                and self._meta_edit_iid == iid
+                and self._meta_edit_col == col_key
+            ):
+                self._combobox_toggle_posted(self._meta_edit_cb)
+                return "break"
+
+            self._begin_meta_edit(iid, col_key)
+            return "break"
+        except Exception:
+            return None
 
     def start_edit_selected(self) -> None:
         # F2 edits the current tab's selected row.
@@ -3360,7 +3497,7 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._render_tree(preserve_yview_fraction=True)
         self._update_dirty_ui()
 
-    def _begin_cell_edit(self, iid: str) -> None:
+    def _begin_cell_edit(self, iid: str, *, col: str = "val") -> None:
         ref = self._iid_to_ref.get(iid)
         if ref is None:
             return
@@ -3368,12 +3505,27 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._end_cell_edit(commit=False)
         self._end_meta_edit(commit=False)
 
-        bbox = self.tree.bbox(iid, column="val")
+        if col not in {"val", "lr"}:
+            return
+
+        if col == "lr":
+            try:
+                dai_name = (ref.dai_element.attrib.get("name") or "").strip()
+            except Exception:
+                dai_name = ""
+            if dai_name != "d":
+                return
+
+        column_id = "val" if col == "val" else "lr"
+        bbox = self.tree.bbox(iid, column=column_id)
         if not bbox:
             return
         x, y, w, h = bbox
 
-        value_text = ref.get_value_text().replace("\n", " ")
+        if col == "val":
+            value_text = ref.get_value_text().replace("\n", " ")
+        else:
+            value_text = (self._langref_id_for_value_path(ref.path) or "").strip()
         ent = ttk.Entry(self.tree)
         ent.place(x=x, y=y, width=w, height=h)
         ent.insert(0, value_text)
@@ -3388,6 +3540,54 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         self._edit_entry = ent
         self._edit_iid = iid
+        self._edit_col = col
+
+    def _combobox_is_posted(self, cb: ttk.Combobox) -> bool:
+        try:
+            popdown = cb.tk.call("ttk::combobox::PopdownWindow", str(cb))
+            return bool(int(cb.tk.call("winfo", "ismapped", popdown)))
+        except Exception:
+            return False
+
+    def _combobox_post(self, cb: ttk.Combobox) -> None:
+        try:
+            cb.tk.call("ttk::combobox::Post", str(cb))
+        except Exception:
+            try:
+                cb.event_generate("<Alt-Down>")
+            except Exception:
+                pass
+
+    def _combobox_unpost(self, cb: ttk.Combobox) -> None:
+        try:
+            cb.tk.call("ttk::combobox::Unpost", str(cb))
+        except Exception:
+            try:
+                cb.event_generate("<Escape>")
+            except Exception:
+                pass
+
+    def _combobox_toggle_posted(self, cb: ttk.Combobox) -> None:
+        if self._combobox_is_posted(cb):
+            self._combobox_unpost(cb)
+        else:
+            self._combobox_post(cb)
+
+    def _on_meta_combobox_focus_out(self, event: tk.Event) -> None:
+        """Commit meta edit on focus-out, but avoid committing while the dropdown is open.
+
+        On Windows, clicking the combobox dropdown list can trigger <FocusOut> on the combobox
+        before <<ComboboxSelected>> fires; committing/destroying at that time breaks selection.
+        """
+        try:
+            widget = event.widget
+        except Exception:
+            widget = None
+
+        if isinstance(widget, ttk.Combobox) and self._combobox_is_posted(widget):
+            return
+
+        self._end_meta_edit(commit=True)
 
     def _begin_meta_edit(self, iid: str, col: str) -> None:
         ref = self._iid_to_ref.get(iid)
@@ -3407,6 +3607,8 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         def norm_vk(v: str) -> str:
             v0 = (v or "").strip()
+            if not v0:
+                return ""
             u = v0.upper()
             if u == "SET":
                 return "Set"
@@ -3418,20 +3620,21 @@ class LNInstanceEditorFrame(ttk.Frame):
 
         def norm_vi(v: str) -> str:
             v0 = (v or "").strip().lower()
+            if not v0:
+                return ""
             if v0 in {"true", "false"}:
                 return v0
-            return "false"
+            return ""
 
         if col == "vk":
-            values = ("Set", "Conf", "RO")
+            base_values = ("", "Set", "Conf", "RO")
             cur = norm_vk((ref.dai_element.attrib.get("valKind") or ""))
-            if cur not in values:
-                cur = "RO"
+            # Preserve unknown values if present by injecting them.
+            values = (cur,) + base_values if (cur and cur not in base_values) else base_values
         else:
-            values = ("true", "false")
+            base_values = ("", "true", "false")
             cur = norm_vi((ref.dai_element.attrib.get("valImport") or ""))
-            if cur not in values:
-                cur = "false"
+            values = (cur,) + base_values if (cur and cur not in base_values) else base_values
 
         cb = ttk.Combobox(self.tree, state="readonly", values=values)
         cb.place(x=x, y=y, width=w, height=h)
@@ -3441,9 +3644,16 @@ class LNInstanceEditorFrame(ttk.Frame):
         cb.bind("<<ComboboxSelected>>", lambda _e: self._end_meta_edit(commit=True))
         cb.bind("<Return>", lambda _e: self._end_meta_edit(commit=True))
         cb.bind("<Escape>", lambda _e: self._end_meta_edit(commit=False))
-        cb.bind("<FocusOut>", lambda _e: self._end_meta_edit(commit=True))
+        cb.bind("<FocusOut>", self._on_meta_combobox_focus_out)
         cb.bind("<Control-z>", lambda _e: (self.undo(), "break")[1])
         cb.bind("<Control-Z>", lambda _e: (self.undo(), "break")[1])
+
+        # Single-click toggles dropdown while editing, and we auto-post on start.
+        cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+        try:
+            self.tree.after_idle(lambda: self._combobox_post(cb))
+        except Exception:
+            self._combobox_post(cb)
 
         self._meta_edit_cb = cb
         self._meta_edit_iid = iid
@@ -3478,19 +3688,33 @@ class LNInstanceEditorFrame(ttk.Frame):
             return
 
         if col == "vk":
-            if new_text not in {"Set", "Conf", "RO"}:
+            if new_text not in {"", "Set", "Conf", "RO"}:
                 return
-            if (ref.dai_element.attrib.get("valKind") or "").strip() == new_text:
+            cur = (ref.dai_element.attrib.get("valKind") or "").strip()
+            if cur == new_text:
                 return
             self._push_undo()
-            ref.dai_element.attrib["valKind"] = new_text
+            if not new_text:
+                try:
+                    ref.dai_element.attrib.pop("valKind", None)
+                except Exception:
+                    pass
+            else:
+                ref.dai_element.attrib["valKind"] = new_text
         else:
-            if new_text not in {"true", "false"}:
+            if new_text not in {"", "true", "false"}:
                 return
-            if (ref.dai_element.attrib.get("valImport") or "").strip().lower() == new_text:
+            cur = (ref.dai_element.attrib.get("valImport") or "").strip().lower()
+            if cur == new_text:
                 return
             self._push_undo()
-            ref.dai_element.attrib["valImport"] = new_text
+            if not new_text:
+                try:
+                    ref.dai_element.attrib.pop("valImport", None)
+                except Exception:
+                    pass
+            else:
+                ref.dai_element.attrib["valImport"] = new_text
 
         # Update display for the row.
         try:
@@ -3498,13 +3722,14 @@ class LNInstanceEditorFrame(ttk.Frame):
             disp = old[0] if old else ref.path
             val_shown = old[1] if old and len(old) > 1 else ref.get_value_text().replace("\n", " ")
             def_shown = old[2] if old and len(old) > 2 else (self._tpl_default_values.get(ref.path, "") or "").replace("\n", " ")
+            lr_shown = old[3] if old and len(old) > 3 else self._langref_id_for_value_path(ref.path)
             if len(val_shown) > 200:
                 val_shown = val_shown[:200] + "..."
             if len(def_shown) > 200:
                 def_shown = def_shown[:200] + "..."
             vk_shown = (ref.dai_element.attrib.get("valKind") or "").strip()
             vi_shown = (ref.dai_element.attrib.get("valImport") or "").strip().lower()
-            self.tree.item(iid, values=(disp, val_shown, def_shown, vk_shown, vi_shown))
+            self.tree.item(iid, values=(disp, val_shown, def_shown, lr_shown, vk_shown, vi_shown))
         except Exception:
             pass
 
@@ -3512,13 +3737,15 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._reapply_changed_tags_values()
 
     def _end_cell_edit(self, *, commit: bool) -> None:
-        if self._edit_entry is None or self._edit_iid is None:
+        if self._edit_entry is None or self._edit_iid is None or self._edit_col is None:
             return
 
         ent = self._edit_entry
         iid = self._edit_iid
+        col = self._edit_col
         self._edit_entry = None
         self._edit_iid = None
+        self._edit_col = None
 
         new_text = ent.get()
         try:
@@ -3537,30 +3764,114 @@ class LNInstanceEditorFrame(ttk.Frame):
         if ref is None:
             return
 
-        if (ref.get_value_text() or "") == (new_text or ""):
+        if col == "val":
+            if (ref.get_value_text() or "") == (new_text or ""):
+                return
+
+            self._push_undo()
+            ref.set_value_text(new_text)
+
+            # Update display (truncated to 200 chars).
+            shown = ref.get_value_text().replace("\n", " ")
+            if len(shown) > 200:
+                shown = shown[:200] + "..."
+            try:
+                old = self.tree.item(iid, "values")
+                disp = old[0] if old else ref.path
+                d0 = self._tpl_default_values.get(ref.path, "")
+                d = (d0 or "").replace("\n", " ")
+                if len(d) > 200:
+                    d = d[:200] + "..."
+                lr = old[3] if old and len(old) > 3 else self._langref_id_for_value_path(ref.path)
+                vk = (ref.dai_element.attrib.get("valKind") or "").strip()
+                vi = (ref.dai_element.attrib.get("valImport") or "").strip().lower()
+                self.tree.item(iid, values=(disp, shown, d, lr, vk, vi))
+            except Exception:
+                pass
+            self._update_dirty_ui()
+            self._reapply_changed_tags_values()
             return
 
-        self._push_undo()
-        ref.set_value_text(new_text)
+        if col == "lr":
+            raw = (new_text or "").strip()
+            cur = (self._langref_id_for_value_path(ref.path) or "").strip()
+            if cur == raw:
+                return
 
-        # Update display (truncated to 200 chars).
-        shown = ref.get_value_text().replace("\n", " ")
-        if len(shown) > 200:
-            shown = shown[:200] + "..."
-        try:
-            old = self.tree.item(iid, "values")
-            disp = old[0] if old else ref.path
-            d0 = self._tpl_default_values.get(ref.path, "")
-            d = (d0 or "").replace("\n", " ")
-            if len(d) > 200:
-                d = d[:200] + "..."
-            vk = (ref.dai_element.attrib.get("valKind") or "").strip()
-            vi = (ref.dai_element.attrib.get("valImport") or "").strip().lower()
-            self.tree.item(iid, values=(disp, shown, d, vk, vi))
-        except Exception:
-            pass
-        self._update_dirty_ui()
-        self._reapply_changed_tags_values()
+            # Allow empty, or digits, or digits.digits
+            if not raw:
+                g2, l2 = "", ""
+            elif "." in raw:
+                g2, l2 = (x.strip() for x in raw.split(".", 1))
+            else:
+                g2, l2 = raw, ""
+
+            def _ok(v: str) -> bool:
+                v = (v or "").strip()
+                return (not v) or v.isdigit()
+
+            if not (_ok(g2) and _ok(l2)):
+                messagebox.showerror("Invalid value", "LangRef ID must be digits or digits.digits (or blank).", parent=self)
+                return
+
+            # Apply to the corresponding DAI-level <Private type=...LangRef>.
+            base = (ref.path or "").split("/Val:", 1)[0]
+            lrref: LangRefRef | None = None
+            try:
+                for row in (self._lang_rows_all or []):
+                    if (row.ref.path or "") == base:
+                        lrref = row.ref
+                        break
+            except Exception:
+                lrref = None
+
+            if lrref is None:
+                # Create a new ref; set_group_label() will ensure the <Private> element exists.
+                val_el: ET.Element | None = None
+                try:
+                    for ch in list(ref.dai_element):
+                        if not isinstance(ch.tag, str):
+                            continue
+                        if ch.tag.split("}", 1)[-1] == "Val":
+                            val_el = ch
+                            break
+                except Exception:
+                    val_el = None
+
+                lrref = LangRefRef(path=base, dai_element=ref.dai_element, val_element=val_el)
+                try:
+                    self._lang_rows_all.append(_LangRow(ref=lrref))
+                except Exception:
+                    pass
+
+            self._push_undo()
+            lrref.set_group_label(g2, l2)
+            new_id = lrref.get_private_text()
+
+            # Update Values display for this row.
+            try:
+                old = self.tree.item(iid, "values")
+                disp = old[0] if old else ref.path
+                val_shown = old[1] if old and len(old) > 1 else (ref.get_value_text() or "").replace("\n", " ")
+                def_shown = old[2] if old and len(old) > 2 else (self._tpl_default_values.get(ref.path, "") or "").replace("\n", " ")
+                if len(val_shown) > 200:
+                    val_shown = val_shown[:200] + "..."
+                if len(def_shown) > 200:
+                    def_shown = def_shown[:200] + "..."
+                vk = (ref.dai_element.attrib.get("valKind") or "").strip()
+                vi = (ref.dai_element.attrib.get("valImport") or "").strip().lower()
+                self.tree.item(iid, values=(disp, val_shown, def_shown, new_id, vk, vi))
+            except Exception:
+                pass
+
+            # Refresh lang tree (keeps existing tab; best-effort to make the change visible there too).
+            try:
+                self._apply_lang_filter()
+            except Exception:
+                pass
+
+            self._update_dirty_ui()
+            return
 
     def _apply_header_to_doc(self) -> None:
         if not self.doc:

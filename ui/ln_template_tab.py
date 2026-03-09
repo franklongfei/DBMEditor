@@ -110,15 +110,15 @@ class DOEditDialog(tk.Toplevel):
 
                 filtered = [v for v in self._all_do_types if ok(v)]
 
-            # Keep current value available even if it doesn't match filter
             cur = self.var_type.get().strip()
-            if cur and cur not in filtered:
-                filtered = [cur] + filtered
-
-            # Avoid huge UI lag if matches are extremely large
             max_show = 1500
             shown = filtered[:max_show]
             self.cb["values"] = shown
+            if raw and filtered:
+                if cur != filtered[0]:
+                    self.var_type.set(filtered[0])
+            elif (not raw) and filtered and (cur not in filtered):
+                self.var_type.set(filtered[0])
             suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
             self.lbl_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
 
@@ -1592,13 +1592,22 @@ class NewTemplateDialog(tk.Toplevel):
         ttk.Label(frm, text="Create from").grid(row=0, column=0, sticky="w", pady=4)
         self.var_base = tk.StringVar(value="(Blank)")
         base_values = ["(Blank)"] + [x.id for x in self._lnode_infos]
-        cb_base = ttk.Combobox(frm, textvariable=self.var_base, values=base_values, width=62)
-        cb_base.grid(row=0, column=1, sticky="we", padx=(10, 0), pady=4)
+        self.var_filter = tk.StringVar(value="")
+        filter_row = ttk.Frame(frm)
+        filter_row.grid(row=0, column=1, sticky="we", padx=(10, 0), pady=4)
+        filter_row.columnconfigure(1, weight=1)
+        ttk.Label(filter_row, text="Filter").grid(row=0, column=0, sticky="w")
+        ent_filter = ttk.Entry(filter_row, textvariable=self.var_filter)
+        ent_filter.grid(row=0, column=1, sticky="we", padx=(8, 0))
 
-        ttk.Label(frm, text="File name").grid(row=1, column=0, sticky="w", pady=4)
+        cb_base = ttk.Combobox(frm, textvariable=self.var_base, values=base_values, width=62)
+        cb_base.grid(row=1, column=1, sticky="we", padx=(10, 0), pady=(0, 4))
+        ttk.Label(frm, text="").grid(row=1, column=0)
+
+        ttk.Label(frm, text="File name").grid(row=2, column=0, sticky="w", pady=4)
         self.var_id = tk.StringVar(value="")
         ent_id = ttk.Entry(frm, textvariable=self.var_id, width=64)
-        ent_id.grid(row=1, column=1, sticky="we", padx=(10, 0), pady=4)
+        ent_id.grid(row=2, column=1, sticky="we", padx=(10, 0), pady=4)
 
         def _mark_user_modified(*_args) -> None:
             if self._id_internal_update:
@@ -1607,15 +1616,15 @@ class NewTemplateDialog(tk.Toplevel):
 
         self.var_id.trace_add("write", _mark_user_modified)
 
-        ttk.Label(frm, text="lnClass").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Label(frm, text="lnClass").grid(row=3, column=0, sticky="w", pady=4)
         self.var_lnclass = tk.StringVar(value="")
         ent_ln = ttk.Entry(frm, textvariable=self.var_lnclass, width=64)
-        ent_ln.grid(row=2, column=1, sticky="we", padx=(10, 0), pady=4)
+        ent_ln.grid(row=3, column=1, sticky="we", padx=(10, 0), pady=4)
 
-        ttk.Label(frm, text="desc (optional)").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Label(frm, text="desc (optional)").grid(row=4, column=0, sticky="w", pady=4)
         self.var_desc = tk.StringVar(value="")
         ent_desc = ttk.Entry(frm, textvariable=self.var_desc, width=64)
-        ent_desc.grid(row=3, column=1, sticky="we", padx=(10, 0), pady=4)
+        ent_desc.grid(row=4, column=1, sticky="we", padx=(10, 0), pady=4)
 
         hint = ttk.Label(
             frm,
@@ -1623,14 +1632,15 @@ class NewTemplateDialog(tk.Toplevel):
                 "Tip: If you pick an existing template, DO/Private blocks will be copied, then name/lnClass/desc updated."
             ),
         )
-        hint.grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        hint.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         btns = ttk.Frame(frm)
-        btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="Create", command=self._ok).pack(side="right", padx=(0, 8))
 
         self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
 
         def unique_copy_name(base: str) -> str:
             # User requested suffix '_cpoy' (typo kept as-is).
@@ -1669,7 +1679,30 @@ class NewTemplateDialog(tk.Toplevel):
             if not self.var_desc.get().strip() and info.desc:
                 self.var_desc.set(info.desc)
 
+        def apply_filter(*_args) -> None:
+            raw = (self.var_filter.get() or "").strip().lower()
+            if not raw:
+                filtered = list(base_values)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    lv = (v or "").lower()
+                    return all(t in lv for t in tokens)
+
+                filtered = [x for x in base_values if ok(x)]
+
+            cur = (self.var_base.get() or "").strip()
+            cb_base["values"] = filtered[:1500]
+            if raw and filtered:
+                if cur != filtered[0]:
+                    self.var_base.set(filtered[0])
+            elif (not raw) and filtered and (cur not in filtered):
+                self.var_base.set(filtered[0])
+
         self.var_base.trace_add("write", prefill)
+        self.var_filter.trace_add("write", apply_filter)
+        apply_filter()
         prefill()
 
         ent_id.focus_set()
@@ -2711,12 +2744,14 @@ class LNodeTypeEditor(ttk.Frame):
             filtered_ids = [i.id for i in filtered_infos]
 
             cur = self.var_selected.get().strip()
-            if cur and cur not in filtered_ids:
-                filtered_ids = [cur] + filtered_ids
-
             max_show = 1200
             shown = filtered_ids[:max_show]
             self.cb["values"] = shown
+            if raw and filtered_ids:
+                if cur != filtered_ids[0]:
+                    self.var_selected.set(filtered_ids[0])
+            elif (not raw) and filtered_ids and (cur not in filtered_ids):
+                self.var_selected.set(filtered_ids[0])
             suffix = "" if len(filtered_ids) <= max_show else f" (showing first {max_show})"
             self.lbl_ln_match.configure(text=f"{len(filtered_ids)} match{'' if len(filtered_ids)==1 else 'es'}{suffix}")
 

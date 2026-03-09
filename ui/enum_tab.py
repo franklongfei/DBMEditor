@@ -89,6 +89,7 @@ class _EnumValEditDialog(tk.Toplevel):
         self.var_ord = tk.StringVar(value=(initial.get("ord") or ""))
         self.var_val = tk.StringVar(value=(initial.get("val") or ""))
         self.var_desc = tk.StringVar(value=(initial.get("desc") or ""))
+        self.var_langref = tk.StringVar(value=(initial.get("langRef") or ""))
 
         ttk.Label(frm, text="ord").grid(row=0, column=0, sticky="w", pady=4)
         ttk.Entry(frm, textvariable=self.var_ord, width=18).grid(row=0, column=1, sticky="we", padx=(10, 0), pady=4)
@@ -97,8 +98,11 @@ class _EnumValEditDialog(tk.Toplevel):
         ttk.Label(frm, text="desc").grid(row=2, column=0, sticky="w", pady=4)
         ttk.Entry(frm, textvariable=self.var_desc, width=52).grid(row=2, column=1, sticky="we", padx=(10, 0), pady=4)
 
+        ttk.Label(frm, text="langRef").grid(row=3, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_langref, width=24).grid(row=3, column=1, sticky="w", padx=(10, 0), pady=4)
+
         btns = ttk.Frame(frm)
-        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -110,10 +114,19 @@ class _EnumValEditDialog(tk.Toplevel):
         if ord0 and not ord0.isdigit():
             messagebox.showerror("Invalid", "ord must be an integer", parent=self)
             return
+        lr = (self.var_langref.get() or "").strip()
+        if lr and not re.fullmatch(r"\d+(?:\.\d+)?", lr):
+            messagebox.showerror(
+                "Invalid",
+                "langRef must be empty or like 12 or 12.34",
+                parent=self,
+            )
+            return
         self._result = {
             "ord": ord0,
             "val": (self.var_val.get() or ""),
             "desc": (self.var_desc.get() or ""),
+            "langRef": lr,
         }
         self.destroy()
 
@@ -164,14 +177,16 @@ class EnumValTable(ttk.Frame):
         content.columnconfigure(0, weight=1)
         content.rowconfigure(0, weight=1)
 
-        cols = ["ord", "desc", "val"]
+        cols = ["ord", "desc", "val", "langRef"]
         self.tree = ttk.Treeview(content, columns=cols, show="headings", selectmode="browse")
         self.tree.heading("ord", text="ord")
         self.tree.heading("desc", text="desc")
         self.tree.heading("val", text="val")
+        self.tree.heading("langRef", text="langRef")
         self.tree.column("ord", width=70, anchor="w", stretch=False)
         self.tree.column("desc", width=520, anchor="w")
         self.tree.column("val", width=240, anchor="w")
+        self.tree.column("langRef", width=120, anchor="w", stretch=False)
 
         y = ttk.Scrollbar(content, orient="vertical", command=self.tree.yview)
         x = ttk.Scrollbar(content, orient="horizontal", command=self.tree.xview)
@@ -300,7 +315,7 @@ class EnumValTable(ttk.Frame):
                 "",
                 "end",
                 iid=str(idx),
-                values=[row.get("ord", ""), row.get("desc", ""), row.get("val", "")],
+                values=[row.get("ord", ""), row.get("desc", ""), row.get("val", ""), row.get("langRef", "")],
                 tags=tags,
             )
 
@@ -546,7 +561,7 @@ class EnumValTable(ttk.Frame):
         if idx < 0 or idx >= len(self.rows):
             return
         col_idx = int(col.replace("#", "")) - 1
-        cols = ["ord", "desc", "val"]
+        cols = ["ord", "desc", "val", "langRef"]
         if col_idx < 0 or col_idx >= len(cols):
             return
         self._start_inline(iid, cols[col_idx])
@@ -627,6 +642,17 @@ class EnumValTable(ttk.Frame):
                 return
             value = v
 
+        if col == "langRef":
+            v = (value or "").strip()
+            if v and not re.fullmatch(r"\d+(?:\.\d+)?", v):
+                messagebox.showerror(
+                    "Invalid",
+                    "langRef must be empty or like 12 or 12.34",
+                    parent=self,
+                )
+                return
+            value = v
+
         self._push_undo()
         self.rows[idx][col] = value
         self.refresh()
@@ -659,13 +685,22 @@ class NewEnumTypeDialog(tk.Toplevel):
         ttk.Label(frm, text="Create from").grid(row=0, column=0, sticky="w", pady=4)
         self.var_base = tk.StringVar(value="(Blank)")
         base_values = ["(Blank)"] + list(self._enum_type_ids)
-        cb_base = ttk.Combobox(frm, textvariable=self.var_base, values=base_values, width=62)
-        cb_base.grid(row=0, column=1, sticky="we", padx=(10, 0), pady=4)
+        self.var_filter = tk.StringVar(value="")
+        filter_row = ttk.Frame(frm)
+        filter_row.grid(row=0, column=1, sticky="we", padx=(10, 0), pady=4)
+        filter_row.columnconfigure(1, weight=1)
+        ttk.Label(filter_row, text="Filter").grid(row=0, column=0, sticky="w")
+        ent_filter = ttk.Entry(filter_row, textvariable=self.var_filter)
+        ent_filter.grid(row=0, column=1, sticky="we", padx=(8, 0))
 
-        ttk.Label(frm, text="id (file name)").grid(row=1, column=0, sticky="w", pady=4)
+        cb_base = ttk.Combobox(frm, textvariable=self.var_base, values=base_values, width=62)
+        cb_base.grid(row=1, column=1, sticky="we", padx=(10, 0), pady=(0, 4))
+        ttk.Label(frm, text="").grid(row=1, column=0)
+
+        ttk.Label(frm, text="File name").grid(row=2, column=0, sticky="w", pady=4)
         self.var_id = tk.StringVar(value="")
         ent_id = ttk.Entry(frm, textvariable=self.var_id, width=64)
-        ent_id.grid(row=1, column=1, sticky="we", padx=(10, 0), pady=4)
+        ent_id.grid(row=2, column=1, sticky="we", padx=(10, 0), pady=4)
 
         def _mark_user_modified(*_args) -> None:
             if self._id_internal_update:
@@ -675,14 +710,15 @@ class NewEnumTypeDialog(tk.Toplevel):
         self.var_id.trace_add("write", _mark_user_modified)
 
         hint = ttk.Label(frm, text="Tip: If you pick an existing EnumType, EnumVal + LangRef will be copied, then id updated.")
-        hint.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        hint.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         btns = ttk.Frame(frm)
-        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="Create", command=self._ok).pack(side="right", padx=(0, 8))
 
         self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
 
         def unique_copy_name(base: str) -> str:
             existing = set(self._enum_type_ids)
@@ -711,7 +747,30 @@ class NewEnumTypeDialog(tk.Toplevel):
                 finally:
                     self._id_internal_update = False
 
+        def apply_filter(*_args) -> None:
+            raw = (self.var_filter.get() or "").strip().lower()
+            if not raw:
+                filtered = list(base_values)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    lv = (v or "").lower()
+                    return all(t in lv for t in tokens)
+
+                filtered = [x for x in base_values if ok(x)]
+
+            cur = (self.var_base.get() or "").strip()
+            cb_base["values"] = filtered[:1500]
+            if raw and filtered:
+                if cur != filtered[0]:
+                    self.var_base.set(filtered[0])
+            elif (not raw) and filtered and (cur not in filtered):
+                self.var_base.set(filtered[0])
+
         self.var_base.trace_add("write", prefill)
+        self.var_filter.trace_add("write", apply_filter)
+        apply_filter()
         prefill()
 
         ent_id.focus_set()
@@ -721,7 +780,7 @@ class NewEnumTypeDialog(tk.Toplevel):
         base_id = (self.var_base.get() or "").strip()
 
         if not new_id:
-            messagebox.showerror("Missing", "id is required", parent=self)
+            messagebox.showerror("Missing", "File name is required", parent=self)
             return
 
         self._result = {
@@ -861,68 +920,17 @@ class EnumTab(ttk.Frame):
         ttk.Label(meta, text="id").grid(row=0, column=0, sticky="w")
         ttk.Entry(meta, textvariable=self._enum_id, width=62).grid(row=0, column=1, sticky="we", padx=(6, 0))
 
-        self._enum_details_nb = ttk.Notebook(body)
-        self._enum_details_nb.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
-        try:
-            self._enum_details_nb.bind("<<NotebookTabChanged>>", lambda _e: self._on_enum_details_tab_changed())
-        except Exception:
-            pass
+        self._enum_details_nb = None
 
-        tab_vals = ttk.Frame(self._enum_details_nb)
-        tab_lang = ttk.Frame(self._enum_details_nb)
-        self._enum_details_nb.add(tab_vals, text="EnumVal")
-        self._enum_details_nb.add(tab_lang, text="Language reference")
-
-        self._enum_table = EnumValTable(tab_vals)
-        self._enum_table.pack(fill="both", expand=True)
+        self._enum_table = EnumValTable(body)
+        self._enum_table.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
         try:
             self._enum_table.on_change = lambda: self._on_enum_view_changed()
         except Exception:
             pass
 
-        langbox = ttk.LabelFrame(tab_lang, text="Language reference (<Private type=...LangRef>)", padding=8)
-        langbox.pack(fill="both", expand=True)
-        langbox.columnconfigure(0, weight=1)
-        langbox.rowconfigure(1, weight=1)
-
-        lrow = ttk.Frame(langbox)
-        lrow.grid(row=0, column=0, sticky="we")
-        lrow.columnconfigure(1, weight=1)
-        ttk.Label(lrow, text="Filter").grid(row=0, column=0, sticky="w")
-        ent_lfilter = ttk.Entry(lrow, textvariable=self.var_enum_lang_filter)
-        ent_lfilter.grid(row=0, column=1, sticky="we", padx=(8, 0))
-        ttk.Button(lrow, text="Clear", command=self._clear_enum_lang_filter).grid(row=0, column=2, padx=(8, 0))
-
-        self.lbl_enum_lang_match = ttk.Label(lrow, text="")
-        self.lbl_enum_lang_match.grid(row=0, column=3, sticky="w", padx=(10, 0))
-
-        self._enum_lang_tree = ttk.Treeview(langbox, columns=("name", "id", "desc"), show="headings", selectmode="browse")
-        self._enum_lang_tree.heading("name", text="EnumVal")
-        self._enum_lang_tree.heading("id", text="LangRef ID")
-        self._enum_lang_tree.heading("desc", text="desc")
-        self._enum_lang_tree.column("name", width=220, anchor="w")
-        self._enum_lang_tree.column("id", width=140, anchor="w")
-        self._enum_lang_tree.column("desc", width=700, anchor="w")
-        self._enum_lang_tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
-
-        lvsb = ttk.Scrollbar(langbox, orient="vertical", command=self._enum_lang_tree.yview)
-        lhsb = ttk.Scrollbar(langbox, orient="horizontal", command=self._enum_lang_tree.xview)
-        self._enum_lang_tree.configure(yscrollcommand=lvsb.set, xscrollcommand=lhsb.set)
-        lvsb.grid(row=1, column=1, sticky="ns", pady=(8, 0))
-        lhsb.grid(row=2, column=0, sticky="we")
-
-        try:
-            self._enum_lang_tree.bind("<Double-1>", self._on_enum_lang_double_click)
-            self._enum_lang_tree.bind("<Button-1>", self._on_enum_lang_left_click)
-            self._enum_lang_tree.bind("<Control-z>", lambda _e: (self._enum_lang_undo(), "break")[1])
-            self._enum_lang_tree.bind("<Control-Z>", lambda _e: (self._enum_lang_undo(), "break")[1])
-        except Exception:
-            pass
-
-        try:
-            self.var_enum_lang_filter.trace_add("write", lambda *_args: self._apply_enum_lang_filter())
-        except Exception:
-            pass
+        self.lbl_enum_lang_match = None
+        self._enum_lang_tree = None
 
         try:
             self.cb_enum.bind("<Return>", lambda _e: self.open_enum_type_from_search())
@@ -1005,12 +1013,15 @@ class EnumTab(ttk.Frame):
                 filtered = [v for v in self._all_enum_files if ok(v)]
 
             cur = (self.var_enum_selected.get() or "").strip()
-            if cur and cur not in filtered:
-                filtered = [cur] + filtered
 
             max_show = 1200
             shown = filtered[:max_show]
             self.cb_enum["values"] = shown
+            if raw and filtered:
+                if cur != filtered[0]:
+                    self.var_enum_selected.set(filtered[0])
+            elif (not raw) and filtered and (cur not in filtered):
+                self.var_enum_selected.set(filtered[0])
             suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
             self.lbl_enum_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
 

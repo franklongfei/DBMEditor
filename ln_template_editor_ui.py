@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import json
 import re
 import time
 import tkinter as tk
@@ -30,6 +31,7 @@ from ui.do_template_tab import DoTemplateTab
 from ui.ln_template_tab import LNodeTypeEditor
 from ui.application_tab import ApplicationTab
 from ui.afg_tab import AfgTab
+from ui.hmi_tab import HmiTab
 
 
 APP_TITLE = "DBMEditor"
@@ -39,6 +41,9 @@ SCL_NS = "http://www.iec.ch/61850/2003/SCL"
 
 # PowerLogic HMI customization namespace (HMI template files).
 HMI_CUST_NS = "http://www.schneider-electric.com/PowerLogic/HmiCustomization"
+
+# XML Schema Instance namespace (for xsi:schemaLocation on HMI/SCL roots).
+XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
 
 
 def _local_name(tag: str) -> str:
@@ -96,6 +101,48 @@ class _NewApplicationChoiceDialog(tk.Toplevel):
         btns.pack(fill="x", pady=(12, 0))
 
         ttk.Button(btns, text="Create from LN instance", command=lambda: self._set("from_instance")).pack(
+            side="top", fill="x"
+        )
+        ttk.Button(btns, text="Copy existing files", command=lambda: self._set("copy")).pack(
+            side="top", fill="x", pady=(8, 0)
+        )
+
+        ttk.Button(frm, text="Cancel", command=self._cancel).pack(anchor="e", pady=(12, 0))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+
+    def _set(self, value: str) -> None:
+        self._result = value
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> str | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _NewHmiChoiceDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Misc):
+        super().__init__(parent)
+        self.title("New HMI")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: str | None = None
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Create a new HMI file:").pack(anchor="w")
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(12, 0))
+
+        ttk.Button(btns, text="Create from application", command=lambda: self._set("from_application")).pack(
             side="top", fill="x"
         )
         ttk.Button(btns, text="Copy existing files", command=lambda: self._set("copy")).pack(
@@ -224,6 +271,8 @@ class _AfgNewDialog(tk.Toplevel):
         self,
         parent: tk.Misc,
         *,
+        source_relpaths: list[str] | None = None,
+        source_base_dir: Path | None = None,
         initial_name: str = "",
         initial_proxy: str = "",
         initial_chapter: str = "",
@@ -236,38 +285,105 @@ class _AfgNewDialog(tk.Toplevel):
         self.grab_set()
 
         self._result: dict[str, str] | None = None
+        self._source_relpaths = list(source_relpaths or [])
+        self._source_base_dir = Path(source_base_dir) if source_base_dir is not None else None
+        self._source_blank = "(Blank)"
+        self._source_values = [self._source_blank] + self._source_relpaths
 
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
         frm.columnconfigure(1, weight=1)
 
-        ttk.Label(frm, text="name (file name is <name>.xml):").grid(row=0, column=0, sticky="w")
+        ttk.Label(frm, text="Create from").grid(row=0, column=0, sticky="w")
+        self.var_source_filter = tk.StringVar(value="")
+        self.var_source = tk.StringVar(value=self._source_blank)
+
+        source_filter_row = ttk.Frame(frm)
+        source_filter_row.grid(row=0, column=1, sticky="we")
+        source_filter_row.columnconfigure(1, weight=1)
+        ttk.Label(source_filter_row, text="Filter").grid(row=0, column=0, sticky="w")
+        ent_filter = ttk.Entry(source_filter_row, textvariable=self.var_source_filter)
+        ent_filter.grid(row=0, column=1, sticky="we", padx=(8, 0))
+
+        self.cb_source = ttk.Combobox(frm, textvariable=self.var_source, values=self._source_values, width=48)
+        self.cb_source.grid(row=1, column=1, sticky="we", padx=(8, 0), pady=(6, 0))
+        ttk.Label(frm, text="").grid(row=1, column=0)
+
+        ttk.Label(frm, text="File name").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.var_name = tk.StringVar(value=initial_name)
         ent_name = ttk.Entry(frm, textvariable=self.var_name, width=48)
-        ent_name.grid(row=0, column=1, sticky="we", padx=(8, 0))
+        ent_name.grid(row=2, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(frm, text="proxyName:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frm, text="proxyName:").grid(row=3, column=0, sticky="w", pady=(8, 0))
         self.var_proxy = tk.StringVar(value=initial_proxy)
-        ttk.Entry(frm, textvariable=self.var_proxy, width=48).grid(row=1, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+        ttk.Entry(frm, textvariable=self.var_proxy, width=48).grid(row=3, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(frm, text="chapterName:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frm, text="chapterName:").grid(row=4, column=0, sticky="w", pady=(8, 0))
         self.var_chapter = tk.StringVar(value=initial_chapter)
-        ttk.Entry(frm, textvariable=self.var_chapter, width=48).grid(row=2, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+        ttk.Entry(frm, textvariable=self.var_chapter, width=48).grid(row=4, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(frm, text="topicName:").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frm, text="topicName:").grid(row=5, column=0, sticky="w", pady=(8, 0))
         self.var_topic = tk.StringVar(value=initial_topic)
-        ttk.Entry(frm, textvariable=self.var_topic, width=48).grid(row=3, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+        ttk.Entry(frm, textvariable=self.var_topic, width=48).grid(row=5, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
 
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
 
+        def apply_source_filter(*_args) -> None:
+            raw = (self.var_source_filter.get() or "").strip().lower()
+            if not raw:
+                filtered = list(self._source_values)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    lv = (v or "").lower()
+                    return all(t in lv for t in tokens)
+
+                filtered = [x for x in self._source_values if ok(x)]
+
+            cur = (self.var_source.get() or "").strip()
+            self.cb_source["values"] = filtered[:2000]
+            if raw:
+                if filtered:
+                    self.var_source.set(filtered[0])
+                return
+            if filtered and cur not in filtered:
+                self.var_source.set(filtered[0])
+
+        def on_source_change(*_args) -> None:
+            src_rel = (self.var_source.get() or "").strip()
+            if not src_rel or src_rel == self._source_blank:
+                return
+            if self._source_base_dir is None:
+                return
+            try:
+                src_path = self._source_base_dir / src_rel
+                tree = ET.parse(src_path)
+                root = tree.getroot()
+                if not (isinstance(root.tag, str) and _local_name(root.tag) == "AfgDiagramXml"):
+                    return
+                if not (self.var_proxy.get() or "").strip():
+                    self.var_proxy.set(root.attrib.get("proxyName") or "")
+                if not (self.var_chapter.get() or "").strip():
+                    self.var_chapter.set(root.attrib.get("chapterName") or "")
+                if not (self.var_topic.get() or "").strip():
+                    self.var_topic.set(root.attrib.get("topicName") or "")
+            except Exception:
+                pass
+
+        self.var_source_filter.trace_add("write", apply_source_filter)
+        self.var_source.trace_add("write", on_source_change)
+        apply_source_filter()
+
         self.bind("<Escape>", lambda _e: self._cancel())
         self.bind("<Return>", lambda _e: self._ok())
+        self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
 
         try:
-            ent_name.focus_set()
+            ent_filter.focus_set()
             ent_name.select_range(0, tk.END)
         except Exception:
             pass
@@ -278,6 +394,7 @@ class _AfgNewDialog(tk.Toplevel):
             messagebox.showerror("Missing", "AFG name is required", parent=self)
             return
         self._result = {
+            "source_rel": (self.var_source.get() or "").strip(),
             "name": name,
             "proxyName": (self.var_proxy.get() or ""),
             "chapterName": (self.var_chapter.get() or ""),
@@ -810,8 +927,12 @@ class _HmiMenuEditDialog(tk.Toplevel):
         title: str,
         name: str,
         desc: str,
+        lang_ref: str,
         data_type: str,
         view_type: str,
+        sub_tree_type: str,
+        data_type_values: list[str] | None = None,
+        view_type_values: list[str] | None = None,
     ):
         super().__init__(parent)
         self.title(title)
@@ -822,8 +943,10 @@ class _HmiMenuEditDialog(tk.Toplevel):
         self._result: dict[str, str] | None = None
         self.var_name = tk.StringVar(value=name or "")
         self.var_desc = tk.StringVar(value=desc or "")
+        self.var_lang = tk.StringVar(value=lang_ref or "")
         self.var_data = tk.StringVar(value=data_type or "")
         self.var_view = tk.StringVar(value=view_type or "")
+        self.var_subtree = tk.StringVar(value=sub_tree_type or "")
 
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
@@ -836,14 +959,32 @@ class _HmiMenuEditDialog(tk.Toplevel):
         ttk.Label(frm, text="desc").grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frm, textvariable=self.var_desc, width=54).grid(row=1, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(frm, text="hmiMenuDataType").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frm, textvariable=self.var_data, width=54).grid(row=2, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+        ttk.Label(frm, text="langRef").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(frm, textvariable=self.var_lang, width=54).grid(row=2, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(frm, text="hmiMenuViewType").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frm, textvariable=self.var_view, width=54).grid(row=3, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+        ttk.Label(frm, text="hmiMenuDataType").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        if data_type_values:
+            cb_data = ttk.Combobox(frm, textvariable=self.var_data, width=52, state="readonly", values=data_type_values)
+            cb_data.grid(row=3, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+        else:
+            ttk.Entry(frm, textvariable=self.var_data, width=54).grid(
+                row=3, column=1, sticky="we", padx=(8, 0), pady=(8, 0)
+            )
+
+        ttk.Label(frm, text="hmiMenuViewType").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        if view_type_values:
+            cb_view = ttk.Combobox(frm, textvariable=self.var_view, width=52, state="readonly", values=view_type_values)
+            cb_view.grid(row=4, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+        else:
+            ttk.Entry(frm, textvariable=self.var_view, width=54).grid(
+                row=4, column=1, sticky="we", padx=(8, 0), pady=(8, 0)
+            )
+
+        ttk.Label(frm, text="hmiSubTreeType").grid(row=5, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(frm, textvariable=self.var_subtree, width=54).grid(row=5, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
 
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -863,8 +1004,10 @@ class _HmiMenuEditDialog(tk.Toplevel):
         self._result = {
             "name": name,
             "desc": self.var_desc.get() or "",
+            "langRef": (self.var_lang.get() or "").strip(),
             "hmiMenuDataType": (self.var_data.get() or "").strip(),
             "hmiMenuViewType": (self.var_view.get() or "").strip(),
+            "hmiSubTreeType": (self.var_subtree.get() or "").strip(),
         }
         self.destroy()
 
@@ -905,21 +1048,55 @@ class _HmiMenuItemEditDialog(tk.Toplevel):
         frm.columnconfigure(1, weight=1)
 
         ttk.Label(frm, text="name").grid(row=0, column=0, sticky="w")
-        ent_name = ttk.Entry(frm, textvariable=self.var_name, width=60)
+        ent_name = ttk.Entry(frm, textvariable=self.var_name, width=60, state="disabled")
         ent_name.grid(row=0, column=1, sticky="we", padx=(8, 0))
 
         ttk.Label(frm, text="ref (optional)").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frm, textvariable=self.var_ref, width=60).grid(row=1, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+        ent_ref = ttk.Entry(frm, textvariable=self.var_ref, width=60)
+        ent_ref.grid(row=1, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
 
         ttk.Label(frm, text="doRef").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frm, textvariable=self.var_do, width=60).grid(row=2, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+        ent_do = ttk.Entry(frm, textvariable=self.var_do, width=60)
+        ent_do.grid(row=2, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
 
         ttk.Label(frm, text="daRef").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frm, textvariable=self.var_da, width=60).grid(row=3, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+        ent_da = ttk.Entry(frm, textvariable=self.var_da, width=60)
+        ent_da.grid(row=3, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(frm, text="If ref is set, name/doRef/daRef are ignored.").grid(
+        ttk.Label(frm, text="If ref is set, doRef/daRef are ignored.").grid(
             row=4, column=0, columnspan=2, sticky="w", pady=(8, 0)
         )
+
+        def _do_name_from_doref(do_ref: str) -> str:
+            txt = (do_ref or "").strip()
+            if not txt:
+                return ""
+            if "." in txt:
+                txt = (txt.rsplit(".", 1)[-1] or "").strip()
+            if txt.lower().startswith("inref%"):
+                txt = txt[len("InRef%") :].strip()
+            return txt
+
+        def _sync_name(*_args) -> None:
+            ref = (self.var_ref.get() or "").strip()
+            if ref:
+                try:
+                    self.var_name.set("")
+                except Exception:
+                    pass
+                return
+            do_ref = (self.var_do.get() or "").strip()
+            try:
+                self.var_name.set(_do_name_from_doref(do_ref))
+            except Exception:
+                pass
+
+        try:
+            self.var_ref.trace_add("write", _sync_name)
+            self.var_do.trace_add("write", _sync_name)
+        except Exception:
+            pass
+        _sync_name()
 
         btns = ttk.Frame(frm)
         btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
@@ -929,22 +1106,28 @@ class _HmiMenuItemEditDialog(tk.Toplevel):
         self.bind("<Escape>", lambda _e: self._cancel())
         self.bind("<Return>", lambda _e: self._ok())
         try:
-            ent_name.focus_set()
-            ent_name.select_range(0, tk.END)
+            ent_da.focus_set()
+            ent_da.select_range(0, tk.END)
         except Exception:
             pass
 
     def _ok(self) -> None:
         ref = (self.var_ref.get() or "").strip()
-        name = (self.var_name.get() or "").strip()
-        if not ref and not name:
-            messagebox.showerror("Missing", "Either ref or name is required", parent=self)
-            return
+        do_ref = (self.var_do.get() or "").strip()
+        da_ref = (self.var_da.get() or "").strip()
+        if not ref:
+            if not do_ref:
+                messagebox.showerror("Missing", "doRef is required (or set ref)", parent=self)
+                return
+        if ref:
+            name = ""
+        else:
+            name = do_ref.rsplit(".", 1)[-1].strip() if do_ref else ""
         self._result = {
             "ref": ref,
             "name": name,
-            "doRef": (self.var_do.get() or "").strip(),
-            "daRef": (self.var_da.get() or "").strip(),
+            "doRef": do_ref,
+            "daRef": da_ref,
         }
         self.destroy()
 
@@ -983,17 +1166,111 @@ class _HmiDataItemEditDialog(tk.Toplevel):
         frm.columnconfigure(1, weight=1)
 
         ttk.Label(frm, text="name").grid(row=0, column=0, sticky="w")
-        ent_name = ttk.Entry(frm, textvariable=self.var_name, width=54)
+        ent_name = ttk.Entry(frm, textvariable=self.var_name, width=54, state="disabled")
         ent_name.grid(row=0, column=1, sticky="we", padx=(8, 0))
 
         ttk.Label(frm, text="doRef").grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frm, textvariable=self.var_do, width=54).grid(row=1, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
 
         ttk.Label(frm, text="daRef").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frm, textvariable=self.var_da, width=54).grid(row=2, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+        ent_da = ttk.Entry(frm, textvariable=self.var_da, width=54)
+        ent_da.grid(row=2, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+
+        def _sync_name(*_args) -> None:
+            da_ref = (self.var_da.get() or "").strip()
+            if da_ref.startswith("."):
+                da_ref = da_ref[1:]
+            if "." in da_ref:
+                da_ref = (da_ref.rsplit(".", 1)[-1] or "").strip()
+            try:
+                self.var_name.set(da_ref)
+            except Exception:
+                pass
+
+        try:
+            self.var_da.trace_add("write", _sync_name)
+        except Exception:
+            pass
+        _sync_name()
 
         btns = ttk.Frame(frm)
         btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+        try:
+            ent_name.focus_set()
+            ent_name.select_range(0, tk.END)
+        except Exception:
+            pass
+
+    def _ok(self) -> None:
+        da_ref = (self.var_da.get() or "").strip()
+        if not da_ref:
+            messagebox.showerror("Missing", "daRef is required", parent=self)
+            return
+        name0 = da_ref
+        if name0.startswith("."):
+            name0 = name0[1:]
+        if "." in name0:
+            name0 = (name0.rsplit(".", 1)[-1] or "").strip()
+        name = name0
+        self._result = {
+            "name": name,
+            "doRef": (self.var_do.get() or "").strip(),
+            "daRef": da_ref,
+        }
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, str] | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _HmiAttrEditDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        title: str,
+        name: str,
+        value: str,
+        value_values: list[str] | None = None,
+    ):
+        super().__init__(parent)
+        self.title(title)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._result: dict[str, str] | None = None
+        self.var_name = tk.StringVar(value=name or "")
+        self.var_value = tk.StringVar(value=value or "")
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        ttk.Label(frm, text="name").grid(row=0, column=0, sticky="w")
+        ent_name = ttk.Entry(frm, textvariable=self.var_name, width=54)
+        ent_name.grid(row=0, column=1, sticky="we", padx=(8, 0))
+
+        ttk.Label(frm, text="value").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        if value_values is not None:
+            cb_val = ttk.Combobox(frm, textvariable=self.var_value, width=54, state="readonly", values=value_values)
+            cb_val.grid(row=1, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+        else:
+            ent_val = ttk.Entry(frm, textvariable=self.var_value, width=54)
+            ent_val.grid(row=1, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -1012,8 +1289,7 @@ class _HmiDataItemEditDialog(tk.Toplevel):
             return
         self._result = {
             "name": name,
-            "doRef": (self.var_do.get() or "").strip(),
-            "daRef": (self.var_da.get() or "").strip(),
+            "value": self.var_value.get() or "",
         }
         self.destroy()
 
@@ -1979,9 +2255,13 @@ class _PickFromListDialog(tk.Toplevel):
                 filtered = [x for x in self._items_all if ok(x)]
 
             cur = (self.var_value.get() or "").strip()
-            if cur and cur not in filtered:
-                filtered = [cur] + filtered
             self.cb["values"] = filtered[:2000]
+            if raw:
+                if filtered:
+                    self.var_value.set(filtered[0])
+                return
+            if filtered and cur not in filtered:
+                self.var_value.set(filtered[0])
 
         self.var_filter.trace_add("write", apply_filter)
         apply_filter()
@@ -2234,9 +2514,13 @@ class _CreateFromLnInstanceDialog(tk.Toplevel):
                 filtered = [x for x in self._items_all if ok(x)]
 
             cur = (self.var_ln.get() or "").strip()
-            if cur and cur not in filtered:
-                filtered = [cur] + filtered
             self.cb_ln["values"] = filtered[:2000]
+            if raw:
+                if filtered:
+                    self.var_ln.set(filtered[0])
+                return
+            if filtered and cur not in filtered:
+                self.var_ln.set(filtered[0])
 
         def on_select(*_args) -> None:
             self._apply_autofill_from_selected_ln()
@@ -2325,15 +2609,26 @@ class _CreateFromLnInstanceDialog(tk.Toplevel):
 
 
 class _CopyApplicationDialog(tk.Toplevel):
-    def __init__(self, parent: tk.Misc, *, app_dir: Path, items: list[str]):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        app_dir: Path,
+        items: list[str],
+        title: str = "Copy application",
+        source_label: str = "Source file",
+        blank_option: str = "",
+    ):
         super().__init__(parent)
-        self.title("Copy application")
+        self.title(title)
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
 
         self._app_dir = Path(app_dir)
-        self._items_all = list(items)
+        self._blank_option = (blank_option or "").strip()
+        self._source_items = list(items)
+        self._items_all = ([self._blank_option] if self._blank_option else []) + list(items)
         self._result: dict[str, str] | None = None
         self._last_auto_new_name = ""
 
@@ -2341,7 +2636,7 @@ class _CopyApplicationDialog(tk.Toplevel):
         frm.pack(fill="both", expand=True)
         frm.columnconfigure(1, weight=1)
 
-        ttk.Label(frm, text="Source file").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Label(frm, text=source_label).grid(row=0, column=0, sticky="w", pady=4)
         self.var_filter = tk.StringVar(value="")
         frow = ttk.Frame(frm)
         frow.grid(row=0, column=1, sticky="we", pady=4)
@@ -2355,7 +2650,7 @@ class _CopyApplicationDialog(tk.Toplevel):
         self.cb_src.grid(row=1, column=1, sticky="we", pady=(0, 8))
         ttk.Label(frm, text="").grid(row=1, column=0)
 
-        ttk.Label(frm, text="New file name").grid(row=2, column=0, sticky="w", pady=4)
+        ttk.Label(frm, text="File name").grid(row=2, column=0, sticky="w", pady=4)
         self.var_new = tk.StringVar(value="")
         ent_new = ttk.Entry(frm, textvariable=self.var_new, width=56)
         ent_new.grid(row=2, column=1, sticky="we", pady=4)
@@ -2382,9 +2677,13 @@ class _CopyApplicationDialog(tk.Toplevel):
                 filtered = [x for x in self._items_all if ok(x)]
 
             cur = (self.var_src.get() or "").strip()
-            if cur and cur not in filtered:
-                filtered = [cur] + filtered
             self.cb_src["values"] = filtered[:2000]
+            if raw:
+                if filtered:
+                    self.var_src.set(filtered[0])
+                return
+            if filtered and cur not in filtered:
+                self.var_src.set(filtered[0])
 
         def on_src_change(*_args) -> None:
             src = (self.var_src.get() or "").strip()
@@ -2419,11 +2718,14 @@ class _CopyApplicationDialog(tk.Toplevel):
         if not src:
             messagebox.showerror("Missing", "Source file is required", parent=self)
             return
+        if src != self._blank_option and src not in self._source_items:
+            messagebox.showerror("Invalid", "Source file not found", parent=self)
+            return
         if not new_name:
-            messagebox.showerror("Missing", "New file name is required", parent=self)
+            messagebox.showerror("Missing", "File name is required", parent=self)
             return
         if any(sep in new_name for sep in ("/", "\\")):
-            messagebox.showerror("Invalid", "New file name must not contain path separators", parent=self)
+            messagebox.showerror("Invalid", "File name must not contain path separators", parent=self)
             return
         if not new_name.lower().endswith(".xml"):
             new_name = new_name + ".xml"
@@ -2431,10 +2733,294 @@ class _CopyApplicationDialog(tk.Toplevel):
         # Very small Windows-invalid check (keep simple)
         invalid = set('<>:"/\\|?*')
         if any(ch in invalid for ch in new_name):
-            messagebox.showerror("Invalid", "New file name contains invalid characters", parent=self)
+            messagebox.showerror("Invalid", "File name contains invalid characters", parent=self)
             return
 
         self._result = {"src_rel": src, "new_name": new_name}
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, str] | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _CopyHmiDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        hmi_relpaths: list[str],
+        suggested_filename: str = "",
+    ):
+        super().__init__(parent)
+        self.title("Copy existing files")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._blank_option = "Blank"
+        self._relpaths = list(hmi_relpaths)
+        self._source_values = [self._blank_option] + self._relpaths
+        self._result: dict[str, str] | None = None
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        ttk.Label(frm, text="Create from").grid(row=0, column=0, sticky="w", pady=4)
+        self.var_filter = tk.StringVar(value="")
+        filter_row = ttk.Frame(frm)
+        filter_row.grid(row=0, column=1, sticky="we", pady=4)
+        filter_row.columnconfigure(1, weight=1)
+        ttk.Label(filter_row, text="Filter").grid(row=0, column=0, sticky="w")
+        ent_filter = ttk.Entry(filter_row, textvariable=self.var_filter)
+        ent_filter.grid(row=0, column=1, sticky="we", padx=(8, 0))
+
+        self.var_src = tk.StringVar(value=self._blank_option)
+        cb = ttk.Combobox(frm, textvariable=self.var_src, values=self._source_values, width=72)
+        cb.grid(row=1, column=1, sticky="we", pady=(0, 4))
+        ttk.Label(frm, text="").grid(row=1, column=0)
+
+        ttk.Label(frm, text="File name").grid(row=2, column=0, sticky="w", pady=4)
+        self.var_filename = tk.StringVar(value=(suggested_filename or ""))
+        ttk.Entry(frm, textvariable=self.var_filename, width=36).grid(row=2, column=1, sticky="w", pady=4)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="Copy", command=self._ok).pack(side="right", padx=(0, 8))
+
+        def apply_filter(*_args) -> None:
+            raw = (self.var_filter.get() or "").strip().lower()
+            if not raw:
+                filtered = list(self._source_values)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    lv = (v or "").lower()
+                    return all(t in lv for t in tokens)
+
+                filtered = [x for x in self._source_values if ok(x)]
+
+            cur = (self.var_src.get() or "").strip()
+            cb["values"] = filtered[:2000]
+            if raw:
+                if filtered:
+                    self.var_src.set(filtered[0])
+                return
+            if filtered and cur not in filtered:
+                self.var_src.set(filtered[0])
+
+        self.var_filter.trace_add("write", apply_filter)
+        apply_filter()
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
+        cb.bind("<Return>", lambda _e: self._ok())
+
+    def _ok(self) -> None:
+        src = (self.var_src.get() or "").strip()
+        if not src:
+            messagebox.showerror("Missing", "Source file is required", parent=self)
+            return
+        if src != self._blank_option and src not in self._relpaths:
+            messagebox.showerror("Invalid", "Source file not found", parent=self)
+            return
+
+        filename = (self.var_filename.get() or "").strip()
+        if not filename:
+            messagebox.showerror("Missing", "File name is required", parent=self)
+            return
+        if "." not in filename:
+            filename = filename + ".xml"
+        if any(ch in filename for ch in set('<>:"/\\|?*')):
+            messagebox.showerror("Invalid", "File name contains invalid characters", parent=self)
+            return
+
+        self._result = {"src_rel": src, "new_name": filename}
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, str] | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _CreateHmiFromApplicationDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Misc, *, app_relpaths: list[str]):
+        super().__init__(parent)
+        self.title("Create HMI from application")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._app_relpaths = list(app_relpaths)
+        self._result: dict[str, str] | None = None
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        ttk.Label(frm, text="Application file").grid(row=0, column=0, sticky="w", pady=4)
+        self.var_filter = tk.StringVar(value="")
+        filter_row = ttk.Frame(frm)
+        filter_row.grid(row=0, column=1, sticky="we", pady=4)
+        filter_row.columnconfigure(1, weight=1)
+        ttk.Label(filter_row, text="Filter").grid(row=0, column=0, sticky="w")
+        ent_filter = ttk.Entry(filter_row, textvariable=self.var_filter)
+        ent_filter.grid(row=0, column=1, sticky="we", padx=(8, 0))
+
+        self.var_app = tk.StringVar(value=(self._app_relpaths[0] if self._app_relpaths else ""))
+        self.cb_app = ttk.Combobox(frm, textvariable=self.var_app, values=self._app_relpaths, width=84)
+        self.cb_app.grid(row=1, column=1, sticky="we", pady=(0, 8))
+        ttk.Label(frm, text="").grid(row=1, column=0)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="Create", command=self._ok).pack(side="right", padx=(0, 8))
+
+        def apply_filter(*_args) -> None:
+            raw = (self.var_filter.get() or "").strip().lower()
+            if not raw:
+                filtered = list(self._app_relpaths)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    lv = (v or "").lower()
+                    return all(t in lv for t in tokens)
+
+                filtered = [x for x in self._app_relpaths if ok(x)]
+
+            cur = (self.var_app.get() or "").strip()
+            self.cb_app["values"] = filtered[:2000]
+
+            # When user types in Filter, auto-pick the first matching result.
+            if raw:
+                if filtered:
+                    self.var_app.set(filtered[0])
+                return
+
+            # No filter: keep current if valid, otherwise default to first item.
+            if filtered and cur not in filtered:
+                self.var_app.set(filtered[0])
+
+        self.var_filter.trace_add("write", apply_filter)
+        apply_filter()
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
+        self.cb_app.bind("<Return>", lambda _e: self._ok())
+        ent_filter.focus_set()
+
+    def _ok(self) -> None:
+        rel = (self.var_app.get() or "").strip()
+        if not rel:
+            messagebox.showerror("Missing", "Application file is required", parent=self)
+            return
+        if rel not in self._app_relpaths:
+            messagebox.showerror("Invalid", "Application file not found", parent=self)
+            return
+        self._result = {"app_rel": rel}
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> dict[str, str] | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _SelectParentMenuDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        menu_name: str,
+        parent_names: list[str],
+        current_parent: str,
+    ):
+        super().__init__(parent)
+        self.title("Select parent menu")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._parent_names = list(parent_names)
+        self._result: dict[str, str] | None = None
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        ttk.Label(frm, text="Menu").grid(row=0, column=0, sticky="w", pady=4)
+        ttk.Label(frm, text=menu_name).grid(row=0, column=1, sticky="w", pady=4)
+
+        self.var_filter = tk.StringVar(value="")
+        ttk.Label(frm, text="Filter").grid(row=1, column=0, sticky="w", pady=4)
+        ent_filter = ttk.Entry(frm, textvariable=self.var_filter, width=56)
+        ent_filter.grid(row=1, column=1, sticky="we", pady=4)
+
+        vals0 = ["(Top level)"] + self._parent_names
+        cur0 = (current_parent or "").strip()
+        self.var_parent = tk.StringVar(value=(cur0 if cur0 else "(Top level)"))
+        ttk.Label(frm, text="Parent").grid(row=2, column=0, sticky="w", pady=4)
+        self.cb_parent = ttk.Combobox(frm, textvariable=self.var_parent, values=vals0, width=54)
+        self.cb_parent.grid(row=2, column=1, sticky="we", pady=4)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="Apply", command=self._ok).pack(side="right", padx=(0, 8))
+
+        def apply_filter(*_args) -> None:
+            raw = (self.var_filter.get() or "").strip().lower()
+            base = ["(Top level)"]
+            if not raw:
+                filtered = list(self._parent_names)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    vv = (v or "").lower()
+                    return all(t in vv for t in tokens)
+
+                filtered = [v for v in self._parent_names if ok(v)]
+
+            cur = (self.var_parent.get() or "").strip()
+            values = base + filtered
+            if cur and cur not in values:
+                values = [cur] + values
+            self.cb_parent["values"] = values[:2000]
+
+        self.var_filter.trace_add("write", apply_filter)
+        apply_filter()
+
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
+        self.cb_parent.bind("<Return>", lambda _e: self._ok())
+        ent_filter.focus_set()
+
+    def _ok(self) -> None:
+        val = (self.var_parent.get() or "").strip()
+        if not val:
+            messagebox.showerror("Missing", "Parent menu is required", parent=self)
+            return
+        if val != "(Top level)" and val not in self._parent_names:
+            messagebox.showerror("Invalid", "Selected parent menu not found", parent=self)
+            return
+        self._result = {"parent": ("" if val == "(Top level)" else val)}
         self.destroy()
 
     def _cancel(self) -> None:
@@ -2792,8 +3378,6 @@ class DOEditDialog(tk.Toplevel):
 
             # Keep current value available even if it doesn't match filter
             cur = self.var_type.get().strip()
-            if cur and cur not in filtered:
-                filtered = [cur] + filtered
 
             # Avoid huge UI lag if matches are extremely large
             max_show = 1500
@@ -2801,6 +3385,12 @@ class DOEditDialog(tk.Toplevel):
             self.cb["values"] = shown
             suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
             self.lbl_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
+            if raw:
+                if shown:
+                    self.var_type.set(shown[0])
+                return
+            if shown and cur not in shown:
+                self.var_type.set(shown[0])
 
         self.var_filter.trace_add("write", apply_filter)
         apply_filter()
@@ -3103,8 +3693,6 @@ class DAEditDialog(tk.Toplevel):
                 filtered = [v for v in self._all_enum_ids if ok(v)]
 
             cur = (self.var_type.get() or "").strip()
-            if cur and cur not in filtered:
-                filtered = [cur] + filtered
 
             max_show = 1500
             shown = filtered[:max_show]
@@ -3117,6 +3705,12 @@ class DAEditDialog(tk.Toplevel):
                 self.lbl_enum_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
             except Exception:
                 pass
+            if raw:
+                if shown:
+                    self.var_type.set(shown[0])
+                return
+            if shown and cur not in shown:
+                self.var_type.set(shown[0])
 
         def update_val_widget() -> None:
             bt_enum = is_enum()
@@ -4382,6 +4976,31 @@ class MainWindow(tk.Tk):
         self.workspace_root = workspace_root
         self.open_builder_callback = open_builder_callback
 
+        # UI state persisted across runs (column widths etc.)
+        self._ui_state: dict[str, object] = self._load_ui_state()
+        self._ui_state_save_after_id: str | None = None
+        self._hmi_pref_col_widths: dict[str, int] = {}
+        try:
+            raw = self._ui_state.get("hmi_column_widths", {}) or {}
+            if isinstance(raw, dict):
+                for k, v in raw.items():
+                    kk = str(k)
+                    if not kk:
+                        continue
+                    try:
+                        iv = int(v)
+                    except Exception:
+                        continue
+                    if iv > 0:
+                        self._hmi_pref_col_widths[kk] = iv
+        except Exception:
+            self._hmi_pref_col_widths = {}
+
+        try:
+            self.protocol("WM_DELETE_WINDOW", self._on_exit)
+        except Exception:
+            pass
+
         self.status = tk.StringVar(value="")
 
         self._create_menu()
@@ -4413,6 +5032,7 @@ class MainWindow(tk.Tk):
         self._app_tv_control: ttk.Treeview | None = None
 
         self.btn_app_refresh: ttk.Button | None = None
+        self.btn_app_create_hmi: ttk.Button | None = None
 
         # Application refresh diff state (added/removed rows)
         self._app_sync_added_names: dict[str, set[str]] = {
@@ -4554,10 +5174,25 @@ class MainWindow(tk.Tk):
         self._hmi_file_path: Path | None = None
         self._hmi_root: ET.Element | None = None
         self._hmi_saved_sig: bytes | None = None
+        # Per-node baseline snapshot captured at last save/open (used to auto-clear 'changed' highlight
+        # when a single node is reverted back to saved values, regardless of other edits).
+        self._hmi_saved_el_sig_by_key: dict[tuple, list[tuple[tuple, int]]] | None = None
+        # Track moved elements so we can treat ordering as a meaningful diff (don't clear highlight
+        # immediately after move; clear only when moved back to saved position).
+        self._hmi_ui_moved_el_ids: set[int] = set()
         self.btn_hmi_save: ttk.Button | None = None
+        self.btn_hmi_refresh: ttk.Button | None = None
+
+        # HMI undo (Ctrl+Z): snapshot of HMI XML (+ selection/open UI state).
+        self._hmi_undo_stack: list[dict[str, object]] = []
+        self._hmi_undo_max = 50
+        self._hmi_undoing: bool = False
 
         # HMI "Search" UI state
         self._all_hmi_files: list[str] = []
+        # Dropdown options (collected across all HMI template XML files).
+        self._hmi_menu_data_type_values: list[str] = []
+        self._hmi_menu_view_type_values: list[str] = []
         self.var_hmi_filter: tk.StringVar | None = None
         self.var_hmi_selected: tk.StringVar | None = None
         self.cb_hmi: ttk.Combobox | None = None
@@ -4565,11 +5200,81 @@ class MainWindow(tk.Tk):
 
         # HMI treeviews + mappings
         self._hmi_tv_menus: ttk.Treeview | None = None
+        self._hmi_tv_menus_ied: ttk.Treeview | None = None
+        self._hmi_tv_menus_iet: ttk.Treeview | None = None
+        self._hmi_tv_menus_manual: ttk.Treeview | None = None
         self._hmi_tv_items: ttk.Treeview | None = None
         self._hmi_tv_data: ttk.Treeview | None = None
         self._hmi_menu_iid_to_el: dict[str, tuple[ET.Element, ET.Element]] = {}
         self._hmi_item_iid_to_el: dict[str, tuple[ET.Element, ET.Element]] = {}
         self._hmi_data_iid_to_el: dict[str, tuple[ET.Element, ET.Element]] = {}
+        self._hmi_tree_iid_to_kind: dict[str, str] = {}
+        # HMI UI scope: IED (classic Menu_*), IET (IET_Protection*), Manual (Manual_Protection*)
+        self._hmi_scope: str = "ied"
+        self._hmi_tree_iid_to_node: dict[str, tuple[str, ET.Element | None, ET.Element | None]] = {}
+        # For ref_menu nodes: map submenu iid -> (parent_menu_el, ref_link_item_el)
+        self._hmi_tree_iid_to_ref_link: dict[str, tuple[ET.Element, ET.Element]] = {}
+        # Keep per-scope menu-tree mappings so tab switching can preserve expand/collapse state.
+        self._hmi_menu_iid_to_el_by_scope: dict[str, dict[str, tuple[ET.Element, ET.Element]]] = {
+            "ied": {},
+            "iet": {},
+            "manual": {},
+        }
+        self._hmi_tree_iid_to_kind_by_scope: dict[str, dict[str, str]] = {
+            "ied": {},
+            "iet": {},
+            "manual": {},
+        }
+        self._hmi_tree_iid_to_node_by_scope: dict[
+            str, dict[str, tuple[str, ET.Element | None, ET.Element | None]]
+        ] = {
+            "ied": {},
+            "iet": {},
+            "manual": {},
+        }
+        self._hmi_tree_iid_to_ref_link_by_scope: dict[str, dict[str, tuple[ET.Element, ET.Element]]] = {
+            "ied": {},
+            "iet": {},
+            "manual": {},
+        }
+        self._hmi_edit_entry: ttk.Entry | None = None
+        self._hmi_edit_iid: str | None = None
+        self._hmi_edit_col: str | None = None
+        self._hmi_edit_cb: ttk.Combobox | None = None
+        self._hmi_edit_cb_iid: str | None = None
+        self._hmi_edit_cb_col: str | None = None
+
+        # HMI tree actions (toolbar + context menu)
+        self._hmi_btn_add: ttk.Button | None = None
+        self._hmi_btn_insert: ttk.Button | None = None
+        self._hmi_btn_edit: ttk.Button | None = None
+        self._hmi_btn_copy: ttk.Button | None = None
+        self._hmi_btn_cut: ttk.Button | None = None
+        self._hmi_btn_paste: ttk.Button | None = None
+        self._hmi_btn_delete: ttk.Button | None = None
+        # Single toggle button (like LN instance): text switches between 'Fold all' and 'Unfold all'.
+        self._hmi_btn_fold_all: ttk.Button | None = None
+        self._hmi_tree_ctx_menu: tk.Menu | None = None
+        # Clipboard payload: (kind, element_copy). kind in {'menu','ref_menu','item'}.
+        self._hmi_clipboard: tuple[str, ET.Element] | None = None
+
+        # HMI -> LN instance suggestion state (for doRef dropdowns)
+        self._hmi_ln_cached_path: Path | None = None
+        self._hmi_ln_cached_mtime: float | None = None
+        self._hmi_ln_do_names: list[str] = []
+        self._hmi_ln_do_names_source: str = ""  # '', 'instance', 'template'
+        self._hmi_ln_cached_lntype_id: str | None = None
+        self._hmi_ln_do_types_by_name: dict[str, str] = {}
+        self._hmi_ln_da_names_by_dotype: dict[str, list[str]] = {}
+        self._hmi_ln_ref: str = ""  # e.g. 'ZNPDIS#'
+
+        # Cache for resolving matching Application LnRef (HMI stem -> application/<stem>.xml)
+        self._hmi_app_cached_path: Path | None = None
+        self._hmi_app_cached_mtime: float | None = None
+        self._hmi_app_cached_lnref: str = ""
+
+        # HMI column resize state
+        self._hmi_resize_after_id: str | None = None
 
         self._set_status("Scanning IEC 61850 types...")
         self.update_idletasks()
@@ -4658,156 +5363,14 @@ class MainWindow(tk.Tk):
         )
         self.instance_editor.pack(fill="both", expand=True)
 
-        # Application + AFG tabs moved to ui/application_tab.py and ui/afg_tab.py
+        # Application + AFG + HMI tabs moved to ui/application_tab.py, ui/afg_tab.py and ui/hmi_tab.py
         self.tab_application = ApplicationTab(self.notebook, owner=self)
         self.notebook.add(self.tab_application, text="Application")
         self.tab_afg = AfgTab(self.notebook, owner=self)
         self.notebook.add(self.tab_afg, text="AFG")
 
-        self.tab_hmi = ttk.Frame(self.notebook)
+        self.tab_hmi = HmiTab(self.notebook, owner=self)
         self.notebook.add(self.tab_hmi, text="HMI")
-
-        # HMI tab UI (files under datamodel/hmi_template/application)
-        if self.tab_hmi is not None:
-            toolbar = ttk.Frame(self.tab_hmi, padding=(10, 10, 10, 0))
-            toolbar.pack(fill="x")
-            ttk.Button(toolbar, text="New", command=self._new_hmi).pack(side="left")
-            ttk.Button(toolbar, text="Open", command=self._open_hmi).pack(side="left", padx=(8, 0))
-            self.btn_hmi_save = ttk.Button(toolbar, text="Save", command=self._save_hmi)
-            self.btn_hmi_save.pack(side="left", padx=(8, 0))
-            ttk.Button(toolbar, text="Save As", command=self._save_hmi_as).pack(side="left", padx=(8, 0))
-            ttk.Button(toolbar, text="Generate", command=self._hmi_generate_from_application).pack(
-                side="left", padx=(18, 0)
-            )
-
-            row2 = ttk.Frame(self.tab_hmi, padding=(10, 8, 10, 0))
-            row2.pack(fill="x")
-            ttk.Label(row2, text="Search").pack(side="left")
-            self.var_hmi_filter = tk.StringVar(value="")
-            ent_filter = ttk.Entry(row2, textvariable=self.var_hmi_filter, width=28)
-            ent_filter.pack(side="left", padx=(8, 0))
-
-            self.var_hmi_selected = tk.StringVar(value="")
-            self.cb_hmi = ttk.Combobox(row2, textvariable=self.var_hmi_selected, values=[], width=66)
-            self.cb_hmi.pack(side="left", padx=(10, 0))
-            ttk.Button(row2, text="Load", command=self._open_hmi_from_search).pack(side="left", padx=(8, 0))
-
-            self.lbl_hmi_match = ttk.Label(row2, text="")
-            self.lbl_hmi_match.pack(side="left", padx=(10, 0))
-
-            try:
-                if self.cb_hmi is not None:
-                    self.cb_hmi.bind("<Return>", lambda _e: self._open_hmi_from_search())
-            except Exception:
-                pass
-
-            body = ttk.Frame(self.tab_hmi, padding=10)
-            body.pack(fill="both", expand=True)
-            body.columnconfigure(0, weight=1)
-            body.columnconfigure(1, weight=2)
-            body.columnconfigure(2, weight=2)
-            body.rowconfigure(1, weight=1)
-
-            btns = ttk.Frame(body)
-            btns.grid(row=0, column=0, columnspan=3, sticky="we", pady=(0, 8))
-            ttk.Button(btns, text="Add Menu", command=self._hmi_menu_add).pack(side="left")
-            ttk.Button(btns, text="Edit Menu", command=self._hmi_menu_edit).pack(side="left", padx=(6, 0))
-            ttk.Button(btns, text="Delete Menu", command=self._hmi_menu_delete).pack(side="left", padx=(6, 0))
-            ttk.Separator(btns, orient="vertical").pack(side="left", fill="y", padx=12)
-            ttk.Button(btns, text="Add Item", command=self._hmi_item_add).pack(side="left")
-            ttk.Button(btns, text="Edit Item", command=self._hmi_item_edit).pack(side="left", padx=(6, 0))
-            ttk.Button(btns, text="Delete Item", command=self._hmi_item_delete).pack(side="left", padx=(6, 0))
-            ttk.Separator(btns, orient="vertical").pack(side="left", fill="y", padx=12)
-            ttk.Button(btns, text="Add Data", command=self._hmi_data_add).pack(side="left")
-            ttk.Button(btns, text="Edit Data", command=self._hmi_data_edit).pack(side="left", padx=(6, 0))
-            ttk.Button(btns, text="Delete Data", command=self._hmi_data_delete).pack(side="left", padx=(6, 0))
-
-            menus_box = ttk.LabelFrame(body, text="Menus (Menu_*)", padding=6)
-            menus_box.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
-            menus_box.columnconfigure(0, weight=1)
-            menus_box.rowconfigure(0, weight=1)
-            self._hmi_tv_menus = ttk.Treeview(
-                menus_box,
-                columns=("name", "desc", "dataType", "viewType"),
-                show="headings",
-                selectmode="browse",
-            )
-            for c, h, w, a in (
-                ("name", "name", 300, "w"),
-                ("desc", "desc", 180, "w"),
-                ("dataType", "hmiMenuDataType", 120, "w"),
-                ("viewType", "hmiMenuViewType", 120, "w"),
-            ):
-                self._hmi_tv_menus.heading(c, text=h)
-                self._hmi_tv_menus.column(c, width=w, anchor=a)
-            self._hmi_tv_menus.grid(row=0, column=0, sticky="nsew")
-            sb_m = ttk.Scrollbar(menus_box, orient="vertical", command=self._hmi_tv_menus.yview)
-            self._hmi_tv_menus.configure(yscrollcommand=sb_m.set)
-            sb_m.grid(row=0, column=1, sticky="ns")
-
-            items_box = ttk.LabelFrame(body, text="Menu Items", padding=6)
-            items_box.grid(row=1, column=1, sticky="nsew", padx=(0, 8))
-            items_box.columnconfigure(0, weight=1)
-            items_box.rowconfigure(0, weight=1)
-            self._hmi_tv_items = ttk.Treeview(
-                items_box,
-                columns=("kind", "name", "ref", "doRef", "daRef"),
-                show="headings",
-                selectmode="browse",
-            )
-            for c, h, w, a in (
-                ("kind", "kind", 60, "center"),
-                ("name", "name", 180, "w"),
-                ("ref", "ref", 220, "w"),
-                ("doRef", "doRef", 220, "w"),
-                ("daRef", "daRef", 120, "w"),
-            ):
-                self._hmi_tv_items.heading(c, text=h)
-                self._hmi_tv_items.column(c, width=w, anchor=a)
-            self._hmi_tv_items.grid(row=0, column=0, sticky="nsew")
-            sb_i = ttk.Scrollbar(items_box, orient="vertical", command=self._hmi_tv_items.yview)
-            self._hmi_tv_items.configure(yscrollcommand=sb_i.set)
-            sb_i.grid(row=0, column=1, sticky="ns")
-
-            data_box = ttk.LabelFrame(body, text="HMIDataItem (for selected item)", padding=6)
-            data_box.grid(row=1, column=2, sticky="nsew")
-            data_box.columnconfigure(0, weight=1)
-            data_box.rowconfigure(0, weight=1)
-            self._hmi_tv_data = ttk.Treeview(
-                data_box,
-                columns=("name", "doRef", "daRef"),
-                show="headings",
-                selectmode="browse",
-            )
-            for c, h, w, a in (
-                ("name", "name", 160, "w"),
-                ("doRef", "doRef", 260, "w"),
-                ("daRef", "daRef", 140, "w"),
-            ):
-                self._hmi_tv_data.heading(c, text=h)
-                self._hmi_tv_data.column(c, width=w, anchor=a)
-            self._hmi_tv_data.grid(row=0, column=0, sticky="nsew")
-            sb_d = ttk.Scrollbar(data_box, orient="vertical", command=self._hmi_tv_data.yview)
-            self._hmi_tv_data.configure(yscrollcommand=sb_d.set)
-            sb_d.grid(row=0, column=1, sticky="ns")
-
-            try:
-                if self._hmi_tv_menus is not None:
-                    self._hmi_tv_menus.bind("<<TreeviewSelect>>", lambda _e: self._hmi_on_menu_selected())
-                    self._hmi_tv_menus.bind("<Double-1>", lambda _e: self._hmi_menu_edit())
-                if self._hmi_tv_items is not None:
-                    self._hmi_tv_items.bind("<<TreeviewSelect>>", lambda _e: self._hmi_on_item_selected())
-                    self._hmi_tv_items.bind("<Double-1>", lambda _e: self._hmi_item_edit())
-                if self._hmi_tv_data is not None:
-                    self._hmi_tv_data.bind("<Double-1>", lambda _e: self._hmi_data_edit())
-            except Exception:
-                pass
-
-            self._refresh_hmi_search_list(select_rel=None)
-            try:
-                self._mark_hmi_saved()
-            except Exception:
-                pass
 
         # Shortcuts
         self.bind_all("<Control-n>", lambda _e: self._new_shortcut())
@@ -4986,14 +5549,15 @@ class MainWindow(tk.Tk):
             pass
 
     def _on_global_ctrl_z(self, _event: tk.Event) -> str | None:
-        # Only apply as a fallback on Application/AFG tabs.
+        # Only apply as a fallback on Application/AFG/HMI tabs.
         try:
             if self.notebook is None:
                 return None
             active = self.notebook.select()
             is_app = self.tab_application is not None and active == str(self.tab_application)
             is_afg = self.tab_afg is not None and active == str(self.tab_afg)
-            if not (is_app or is_afg):
+            is_hmi = self.tab_hmi is not None and active == str(self.tab_hmi)
+            if not (is_app or is_afg or is_hmi):
                 return None
         except Exception:
             return None
@@ -5004,12 +5568,14 @@ class MainWindow(tk.Tk):
         except Exception:
             w = None
 
-        # If focus isn't within the Application tab, don't interfere.
+        # If focus isn't within the active tab, don't interfere.
         try:
             if w is not None:
                 if self.tab_application is not None and str(w).startswith(str(self.tab_application)):
                     pass
                 elif self.tab_afg is not None and str(w).startswith(str(self.tab_afg)):
+                    pass
+                elif self.tab_hmi is not None and str(w).startswith(str(self.tab_hmi)):
                     pass
                 else:
                     return None
@@ -5028,6 +5594,8 @@ class MainWindow(tk.Tk):
                 self._app_undo()
             elif self.notebook is not None and self.tab_afg is not None and self.notebook.select() == str(self.tab_afg):
                 self._afg_undo()
+            elif self.notebook is not None and self.tab_hmi is not None and self.notebook.select() == str(self.tab_hmi):
+                self._hmi_undo()
             else:
                 return None
         except Exception:
@@ -5635,28 +6203,715 @@ class MainWindow(tk.Tk):
             self._afg_undoing = False
 
     def _hmi_signature_from_model(self) -> bytes:
-        if self._hmi_root is None:
+        root = self._hmi_root_for_persist()
+        if root is None:
             return b""
         try:
-            return ET.tostring(self._hmi_root, encoding="utf-8", short_empty_elements=True)
+            return ET.tostring(root, encoding="utf-8", short_empty_elements=True)
         except Exception:
             try:
-                return (ET.tostring(self._hmi_root, encoding="unicode") or "").encode("utf-8", errors="ignore")
+                return (ET.tostring(root, encoding="unicode") or "").encode("utf-8", errors="ignore")
             except Exception:
                 return b""
+
+    _HMI_UI_TAG_ATTR = "__ui_tag"
+    _HMI_UI_PREFIX = "__ui_"
+
+    def _hmi_is_ui_attr(self, name: str) -> bool:
+        return (name or "").startswith(self._HMI_UI_PREFIX)
+
+    def _hmi_el_attr_sig(self, el: ET.Element) -> tuple[tuple[str, str], ...]:
+        """Shallow signature for a single node (attributes only, excluding UI-only attrs)."""
+        try:
+            items = [(k, v) for k, v in (el.attrib or {}).items() if isinstance(k, str) and not self._hmi_is_ui_attr(k)]
+        except Exception:
+            items = []
+        try:
+            items.sort(key=lambda kv: kv[0])
+        except Exception:
+            pass
+        out: list[tuple[str, str]] = []
+        for k, v in items:
+            try:
+                out.append((k, "" if v is None else str(v)))
+            except Exception:
+                out.append((k, ""))
+        return tuple(out)
+
+    def _hmi_iter_elements_with_keys(self, root: ET.Element) -> list[tuple[tuple, ET.Element, int]]:
+        """Yield (key, element, position) for persisted HMI nodes.
+
+        Keys are based on the element's own attributes + surrounding context (menu name / parent item),
+        so when a user edits a value and later edits it back, the key will match again and allow
+        clearing of the per-node 'changed' highlight.
+        """
+        out: list[tuple[tuple, ET.Element, int]] = []
+
+        def local(t: object) -> str:
+            try:
+                return _local_name(t)  # type: ignore[arg-type]
+            except Exception:
+                return ""
+
+        for menu in list(root):
+            if not (isinstance(menu.tag, str) and local(menu.tag) == "HMIMenu"):
+                continue
+            menu_name = (menu.attrib.get("name") or "").strip()
+            out.append((("menu", menu_name), menu, -1))
+
+            items = [
+                ch
+                for ch in list(menu)
+                if isinstance(ch.tag, str) and local(ch.tag) == "HMIMenuItem"
+            ]
+            for item_pos, item in enumerate(items):
+                ref = (item.attrib.get("ref") or "").strip()
+                if ref:
+                    out.append((("ref_link", menu_name, ref), item, item_pos))
+                    continue
+
+                item_name = (item.attrib.get("name") or "").strip()
+                item_do = (item.attrib.get("doRef") or "").strip()
+                item_da = (item.attrib.get("daRef") or "").strip()
+                out.append((("item", menu_name, item_name, item_do, item_da), item, item_pos))
+
+                data_items = [
+                    di
+                    for di in list(item)
+                    if isinstance(di.tag, str) and local(di.tag) == "HMIDataItem"
+                ]
+                for di_pos, di in enumerate(data_items):
+                    di_name = (di.attrib.get("name") or "").strip()
+                    di_do = (di.attrib.get("doRef") or "").strip()
+                    di_da = (di.attrib.get("daRef") or "").strip()
+                    out.append((("data", menu_name, item_name, item_do, item_da, di_name, di_do, di_da), di, di_pos))
+
+        return out
+
+    def _hmi_capture_saved_el_baseline(self) -> None:
+        """Capture a per-node baseline map for per-item revert detection."""
+        try:
+            root = self._hmi_root_for_persist()
+        except Exception:
+            root = None
+        if root is None:
+            self._hmi_saved_el_sig_by_key = None
+            return
+
+        baseline: dict[tuple, list[tuple[tuple, int]]] = {}
+        for key, el, pos in self._hmi_iter_elements_with_keys(root):
+            sig = self._hmi_el_attr_sig(el)
+            baseline.setdefault(key, []).append((sig, int(pos)))
+        self._hmi_saved_el_sig_by_key = baseline
+
+    def _hmi_clear_changed_tags_if_reverted(self) -> bool:
+        """Clear 'changed' tags for nodes that match last saved per-node baseline.
+
+        Unlike the old global clean check, this works per-node: if *one* item is edited and then
+        manually changed back to match the last saved state, its highlight disappears even if
+        other items are still dirty.
+
+        Returns True if any tag was cleared.
+        """
+        if self._hmi_root is None:
+            return False
+        baseline = getattr(self, "_hmi_saved_el_sig_by_key", None)
+        if not isinstance(baseline, dict) or not baseline:
+            return False
+
+        cleared = False
+        try:
+            cur_rows = self._hmi_iter_elements_with_keys(self._hmi_root)
+        except Exception:
+            return False
+
+        moved_ids = getattr(self, "_hmi_ui_moved_el_ids", None)
+        if not isinstance(moved_ids, set):
+            moved_ids = set()
+            self._hmi_ui_moved_el_ids = moved_ids
+
+        for key, el, pos in cur_rows:
+            if not (isinstance(el.tag, str) and (el.attrib.get(self._HMI_UI_TAG_ATTR) or "").strip() == "changed"):
+                continue
+
+            entries = baseline.get(key) or []
+            if not entries:
+                continue
+            cur_sig = self._hmi_el_attr_sig(el)
+
+            el_id = id(el)
+            if el_id in moved_ids:
+                # For move diffs, ordering is meaningful: only clear when it returned to saved position.
+                if not any((sig == cur_sig and int(saved_pos) == int(pos)) for sig, saved_pos in entries):
+                    continue
+
+            # For value diffs, ignore position: match by per-node attributes.
+            if not any((sig == cur_sig) for sig, _saved_pos in entries):
+                continue
+
+            try:
+                el.attrib.pop(self._HMI_UI_TAG_ATTR, None)
+                cleared = True
+            except Exception:
+                pass
+            try:
+                moved_ids.discard(el_id)
+            except Exception:
+                pass
+
+        return cleared
+
+    def _hmi_ui_tag_get(self, el: ET.Element | None) -> str:
+        if el is None:
+            return ""
+        try:
+            return (el.attrib.get(self._HMI_UI_TAG_ATTR) or "").strip()
+        except Exception:
+            return ""
+
+    def _hmi_ui_tag_set(self, el: ET.Element | None, tag: str) -> None:
+        if el is None:
+            return
+        tag0 = (tag or "").strip()
+        if not tag0:
+            return
+        cur = self._hmi_ui_tag_get(el)
+        # Precedence: removed > added > changed.
+        if cur == "removed":
+            return
+        if cur == "added" and tag0 in {"changed"}:
+            return
+        if tag0 == cur:
+            return
+        try:
+            el.attrib[self._HMI_UI_TAG_ATTR] = tag0
+        except Exception:
+            pass
+
+    def _hmi_ui_tag_clear(self, el: ET.Element | None) -> None:
+        if el is None:
+            return
+        try:
+            el.attrib.pop(self._HMI_UI_TAG_ATTR, None)
+        except Exception:
+            pass
+
+    def _hmi_ui_is_removed(self, el: ET.Element | None) -> bool:
+        return self._hmi_ui_tag_get(el) == "removed"
+
+    def _hmi_ui_is_added(self, el: ET.Element | None) -> bool:
+        return self._hmi_ui_tag_get(el) == "added"
+
+    def _hmi_ui_is_changed(self, el: ET.Element | None) -> bool:
+        return self._hmi_ui_tag_get(el) == "changed"
+
+    def _hmi_mark_added_recursive(self, el: ET.Element | None) -> None:
+        if el is None:
+            return
+        try:
+            for ch in el.iter():
+                if isinstance(ch.tag, str):
+                    self._hmi_ui_tag_set(ch, "added")
+        except Exception:
+            pass
+
+    def _hmi_root_for_persist(self) -> ET.Element | None:
+        """Return a normalized copy of the HMI model for dirty-checking and saving.
+
+        - Applies pending deletes (ui tag == 'removed')
+        - Removes internal UI tag attributes from the output
+        """
+        if self._hmi_root is None:
+            return None
+
+        try:
+            root = _deepcopy_et_element(self._hmi_root)
+        except Exception:
+            return self._hmi_root
+
+        # Collect deleted menu names first.
+        deleted_menu_names: set[str] = set()
+        menus: list[ET.Element] = []
+        for el in list(root):
+            if not (isinstance(el.tag, str) and _local_name(el.tag) == "HMIMenu"):
+                continue
+            menus.append(el)
+            if (el.attrib.get(self._HMI_UI_TAG_ATTR) or "").strip() == "removed":
+                nm = (el.attrib.get("name") or "").strip()
+                if nm:
+                    deleted_menu_names.add(nm)
+
+        # Remove deleted HMIMenu elements.
+        for m in list(menus):
+            if (m.attrib.get(self._HMI_UI_TAG_ATTR) or "").strip() == "removed":
+                try:
+                    root.remove(m)
+                except Exception:
+                    pass
+
+        # Remove deleted links/items/data and links to deleted menus.
+        for menu in list(root):
+            if not (isinstance(menu.tag, str) and _local_name(menu.tag) == "HMIMenu"):
+                continue
+            for item in list(menu):
+                if not (isinstance(item.tag, str) and _local_name(item.tag) == "HMIMenuItem"):
+                    continue
+
+                # Pending delete on the link/item itself.
+                if (item.attrib.get(self._HMI_UI_TAG_ATTR) or "").strip() == "removed":
+                    try:
+                        menu.remove(item)
+                    except Exception:
+                        pass
+                    continue
+
+                ref = (item.attrib.get("ref") or "").strip()
+                if ref and ref in deleted_menu_names:
+                    try:
+                        menu.remove(item)
+                    except Exception:
+                        pass
+                    continue
+
+                # DO item: prune deleted HMIDataItem children.
+                if not ref:
+                    for di in list(item):
+                        if not (isinstance(di.tag, str) and _local_name(di.tag) == "HMIDataItem"):
+                            continue
+                        if (di.attrib.get(self._HMI_UI_TAG_ATTR) or "").strip() == "removed":
+                            try:
+                                item.remove(di)
+                            except Exception:
+                                pass
+
+        # Strip UI tags everywhere.
+        try:
+            for el in root.iter():
+                if isinstance(el.tag, str):
+                    el.attrib.pop(self._HMI_UI_TAG_ATTR, None)
+        except Exception:
+            pass
+
+        # Normalize attribute order to match persisted output.
+        try:
+            self._hmi_normalize_attr_order_in_place(root)
+        except Exception:
+            pass
+
+        return root
+
+    def _hmi_apply_persist_in_place(self) -> None:
+        """Mutate the current HMI model into its persisted form.
+
+        Removes pending-deleted nodes (ui tag == 'removed') and clears UI tag attributes.
+        """
+        root = self._hmi_root
+        if root is None:
+            return
+
+        deleted_menu_names: set[str] = set()
+        menus: list[ET.Element] = []
+        for el in list(root):
+            if not (isinstance(el.tag, str) and _local_name(el.tag) == "HMIMenu"):
+                continue
+            menus.append(el)
+            if (el.attrib.get(self._HMI_UI_TAG_ATTR) or "").strip() == "removed":
+                nm = (el.attrib.get("name") or "").strip()
+                if nm:
+                    deleted_menu_names.add(nm)
+
+        for m in list(menus):
+            if (m.attrib.get(self._HMI_UI_TAG_ATTR) or "").strip() == "removed":
+                try:
+                    root.remove(m)
+                except Exception:
+                    pass
+
+        for menu in list(root):
+            if not (isinstance(menu.tag, str) and _local_name(menu.tag) == "HMIMenu"):
+                continue
+            for item in list(menu):
+                if not (isinstance(item.tag, str) and _local_name(item.tag) == "HMIMenuItem"):
+                    continue
+
+                if (item.attrib.get(self._HMI_UI_TAG_ATTR) or "").strip() == "removed":
+                    try:
+                        menu.remove(item)
+                    except Exception:
+                        pass
+                    continue
+
+                ref = (item.attrib.get("ref") or "").strip()
+                if ref and ref in deleted_menu_names:
+                    try:
+                        menu.remove(item)
+                    except Exception:
+                        pass
+                    continue
+
+                if not ref:
+                    for di in list(item):
+                        if not (isinstance(di.tag, str) and _local_name(di.tag) == "HMIDataItem"):
+                            continue
+                        if (di.attrib.get(self._HMI_UI_TAG_ATTR) or "").strip() == "removed":
+                            try:
+                                item.remove(di)
+                            except Exception:
+                                pass
+
+        try:
+            for el in root.iter():
+                if isinstance(el.tag, str):
+                    el.attrib.pop(self._HMI_UI_TAG_ATTR, None)
+        except Exception:
+            pass
+
+        # Enforce derived names at persist-time.
+        try:
+            self._hmi_sync_names_from_refs_in_place(root)
+        except Exception:
+            pass
+
+        # Normalize attribute order for saved XML.
+        try:
+            self._hmi_normalize_attr_order_in_place(root)
+        except Exception:
+            pass
+
+    def _hmi_normalize_attr_order_in_place(self, root: ET.Element) -> None:
+        """Normalize attribute ordering for persisted HMI XML.
+
+        Requirements:
+        - HMIDataItem: groupid must appear between name and doRef.
+        - HMIMenu: attributes must be saved in this order:
+            name, desc, instantiate, langRef, hmiMenuDataType, hmiMenuViewType, hmiSubTreeType
+
+        Note: XML attribute order is not semantically significant, but downstream
+        tooling may expect a stable order.
+        """
+
+        def reorder(el: ET.Element, preferred: list[str]) -> None:
+            try:
+                items = list(el.attrib.items())
+            except Exception:
+                items = []
+            if not items:
+                return
+
+            new_attrs: dict[str, str] = {}
+            for k in preferred:
+                if k in el.attrib:
+                    new_attrs[k] = el.attrib.get(k) or ""
+            for k, v in items:
+                if k not in new_attrs:
+                    new_attrs[k] = v
+            try:
+                el.attrib.clear()
+                el.attrib.update(new_attrs)
+            except Exception:
+                pass
+
+        for el in root.iter():
+            if not (isinstance(el.tag, str) and el.attrib):
+                continue
+            local = _local_name(el.tag)
+            if local == "HMIDataItem":
+                reorder(el, ["name", "groupid", "doRef", "daRef"])
+            elif local == "HMIMenu":
+                menu_name = (el.attrib.get("name") or "").strip()
+                if menu_name.startswith("Manual_Protection"):
+                    # Manual auto menus must not carry these attributes.
+                    for k in ("desc", "langRef", "hmiMenuDataType", "hmiMenuViewType"):
+                        el.attrib.pop(k, None)
+                    reorder(el, ["name", "instantiate", "hmiSubTreeType"])
+                else:
+                    # Persist-time defaults required by downstream tooling.
+                    # Always emit desc/langRef even when not filled in UI.
+                    if "desc" not in el.attrib:
+                        el.attrib["desc"] = ""
+                    if "langRef" not in el.attrib:
+                        el.attrib["langRef"] = "0.0"
+                    reorder(
+                        el,
+                        [
+                            "name",
+                            "desc",
+                            "instantiate",
+                            "langRef",
+                            "hmiMenuDataType",
+                            "hmiMenuViewType",
+                            "hmiSubTreeType",
+                        ],
+                    )
+
+    def _hmi_sync_names_from_refs_in_place(self, root: ET.Element) -> None:
+        """Ensure DO/DA node @name matches doRef/daRef (derived display name).
+
+        DO level: HMIMenuItem without @ref => if @doRef set, @name = last segment of @doRef.
+        DA level: HMIDataItem => if @daRef set, @name = @daRef without leading '.', then last segment.
+        """
+
+        def _da_name_from_daref(da_ref: str) -> str:
+            txt = (da_ref or "").strip()
+            if not txt:
+                return ""
+            if txt.startswith("."):
+                txt = txt[1:]
+            if "." in txt:
+                txt = (txt.rsplit(".", 1)[-1] or "").strip()
+            return txt
+
+        for menu in list(root):
+            if not (isinstance(menu.tag, str) and _local_name(menu.tag) == "HMIMenu"):
+                continue
+            for item in list(menu):
+                if not (isinstance(item.tag, str) and _local_name(item.tag) == "HMIMenuItem"):
+                    continue
+                if (item.attrib.get("ref") or "").strip():
+                    continue
+                do_ref = (item.attrib.get("doRef") or "").strip()
+                if do_ref:
+                    item.attrib["name"] = self._hmi_do_name_from_doref(do_ref)
+                else:
+                    item.attrib.pop("name", None)
+                for di in list(item):
+                    if not (isinstance(di.tag, str) and _local_name(di.tag) == "HMIDataItem"):
+                        continue
+                    da_ref = (di.attrib.get("daRef") or "").strip()
+                    if da_ref:
+                        di.attrib["name"] = _da_name_from_daref(da_ref)
+                    else:
+                        di.attrib.pop("name", None)
 
     def _update_dirty_ui_hmi(self) -> None:
         cur = self._hmi_signature_from_model()
         dirty = (self._hmi_saved_sig is None) or (cur != self._hmi_saved_sig)
         self._set_save_button_dirty(self.btn_hmi_save, dirty=dirty)
 
+        # Refresh requires an opened/saved HMI file (used to locate matching application XML).
+        try:
+            if self.btn_hmi_refresh is not None:
+                enabled = self._hmi_root is not None and self._hmi_file_path is not None
+                self.btn_hmi_refresh.configure(state=("normal" if enabled else "disabled"))
+        except Exception:
+            pass
+
+    def _hmi_clear_changed_tags_if_clean(self) -> bool:
+        """If the persisted HMI equals the saved signature, clear all 'changed' tags.
+
+        This ensures that when a user edits a value and then changes it back to the
+        original, the background highlight automatically disappears.
+
+        Returns True if any tag was cleared.
+        """
+        if self._hmi_root is None:
+            return False
+        if self._hmi_saved_sig is None:
+            return False
+        try:
+            cur = self._hmi_signature_from_model()
+        except Exception:
+            return False
+        if cur != self._hmi_saved_sig:
+            return False
+
+        cleared = False
+        try:
+            for el in self._hmi_root.iter():
+                if not isinstance(el.tag, str):
+                    continue
+                if (el.attrib.get(self._HMI_UI_TAG_ATTR) or "").strip() == "changed":
+                    try:
+                        el.attrib.pop(self._HMI_UI_TAG_ATTR, None)
+                        cleared = True
+                    except Exception:
+                        pass
+        except Exception:
+            return False
+        return cleared
+
     def _mark_hmi_saved(self) -> None:
         self._hmi_saved_sig = self._hmi_signature_from_model()
+        try:
+            self._hmi_capture_saved_el_baseline()
+        except Exception:
+            self._hmi_saved_el_sig_by_key = None
+        try:
+            self._hmi_ui_moved_el_ids.clear()
+        except Exception:
+            pass
         self._update_dirty_ui_hmi()
 
     def _mark_hmi_unsaved(self) -> None:
-        self._hmi_saved_sig = None
         self._update_dirty_ui_hmi()
+        # If a node returned to the last saved state, clear only that node's 'changed' highlight.
+        try:
+            if self._hmi_clear_changed_tags_if_reverted():
+                self._refresh_hmi_views(select_first_menu=False, open_selection_path=False)
+        except Exception:
+            pass
+
+    def _hmi_tree_text_path_for_iid(self, iid: str) -> list[str]:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return []
+        parts: list[str] = []
+        cur = iid
+        while cur:
+            try:
+                parts.append((tv.item(cur, "text") or "").strip())
+            except Exception:
+                parts.append("")
+            try:
+                cur = tv.parent(cur)
+            except Exception:
+                break
+        parts.reverse()
+        return [p for p in parts if p]
+
+    def _hmi_iter_tree_iids(self) -> list[str]:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return []
+        out: list[str] = []
+
+        def walk(parent: str) -> None:
+            try:
+                kids = tv.get_children(parent)
+            except Exception:
+                kids = ()
+            for k in kids:
+                out.append(k)
+                walk(k)
+
+        walk("")
+        return out
+
+    def _hmi_capture_tree_state(self) -> tuple[list[str] | None, list[list[str]]]:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return None, []
+
+        sel_path: list[str] | None = None
+        try:
+            sel = tv.selection()
+            if sel:
+                sel_path = self._hmi_tree_text_path_for_iid(sel[0])
+        except Exception:
+            sel_path = None
+
+        open_paths: list[list[str]] = []
+        for iid in self._hmi_iter_tree_iids():
+            try:
+                if bool(tv.item(iid, "open")):
+                    p = self._hmi_tree_text_path_for_iid(iid)
+                    if p:
+                        open_paths.append(p)
+            except Exception:
+                pass
+        return sel_path, open_paths
+
+    def _hmi_find_iid_by_text_path(self, path: list[str]) -> str | None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return None
+        if not path:
+            return None
+        cur_parent = ""
+        cur_iid: str | None = None
+        for seg in path:
+            found: str | None = None
+            try:
+                kids = tv.get_children(cur_parent)
+            except Exception:
+                kids = ()
+            for k in kids:
+                try:
+                    if (tv.item(k, "text") or "").strip() == seg:
+                        found = k
+                        break
+                except Exception:
+                    continue
+            if found is None:
+                return None
+            cur_iid = found
+            cur_parent = found
+        return cur_iid
+
+    def _hmi_push_undo(self) -> None:
+        if self._hmi_root is None:
+            return
+        if getattr(self, "_hmi_undoing", False):
+            return
+
+        try:
+            xml_text = ET.tostring(self._hmi_root, encoding="unicode", short_empty_elements=True)
+        except Exception:
+            return
+        sel_path, open_paths = self._hmi_capture_tree_state()
+        try:
+            self._hmi_undo_stack.append((xml_text, sel_path, open_paths))
+            if len(self._hmi_undo_stack) > int(getattr(self, "_hmi_undo_max", 50) or 50):
+                self._hmi_undo_stack = self._hmi_undo_stack[-int(getattr(self, "_hmi_undo_max", 50) or 50) :]
+        except Exception:
+            pass
+
+    def _hmi_undo(self) -> None:
+        if self._hmi_root is None:
+            return
+        if not (getattr(self, "_hmi_undo_stack", None) or []):
+            return
+
+        try:
+            xml_text, sel_path, open_paths = self._hmi_undo_stack.pop()
+        except Exception:
+            return
+
+        try:
+            self._hmi_undoing = True
+            try:
+                self._hmi_end_cell_edit(commit=True)
+                self._hmi_end_combo_edit(commit=True)
+            except Exception:
+                pass
+            try:
+                self._hmi_root = ET.fromstring(xml_text)
+            except Exception:
+                return
+            # Element identities changed; clear move tracking.
+            try:
+                self._hmi_ui_moved_el_ids.clear()
+            except Exception:
+                pass
+
+            self._refresh_hmi_views(select_first_menu=True, open_selection_path=False)
+            tv = self._hmi_tv_menus
+            if tv is not None:
+                for p in open_paths or []:
+                    iid = self._hmi_find_iid_by_text_path(p)
+                    if iid:
+                        try:
+                            tv.item(iid, open=True)
+                        except Exception:
+                            pass
+                if sel_path:
+                    iid = self._hmi_find_iid_by_text_path(sel_path)
+                    if iid:
+                        try:
+                            tv.selection_set(iid)
+                            self._hmi_open_iid_path(iid, open_self=True)
+                        except Exception:
+                            pass
+        finally:
+            try:
+                self._hmi_undoing = False
+            except Exception:
+                pass
+
+        try:
+            self._update_dirty_ui_hmi()
+        except Exception:
+            pass
 
     def _new_shortcut(self) -> None:
         tab = self._active_tab()
@@ -5987,14 +7242,18 @@ class MainWindow(tk.Tk):
                 filtered = [v for v in self._all_enum_files if ok(v)]
 
             cur = (self.var_enum_selected.get() or "").strip()
-            if cur and cur not in filtered:
-                filtered = [cur] + filtered
 
             max_show = 1200
             shown = filtered[:max_show]
             self.cb_enum["values"] = shown
             suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
             self.lbl_enum_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
+            if raw:
+                if shown:
+                    self.var_enum_selected.set(shown[0])
+                return
+            if shown and cur not in shown:
+                self.var_enum_selected.set(shown[0])
 
         if getattr(self, "_enum_apply_filter", None) is None:
             if self.var_enum_filter is not None:
@@ -6032,14 +7291,18 @@ class MainWindow(tk.Tk):
                 filtered = [v for v in self._all_afg_files if ok(v)]
 
             cur = (self.var_afg_selected.get() or "").strip()
-            if cur and cur not in filtered:
-                filtered = [cur] + filtered
 
             max_show = 1200
             shown = filtered[:max_show]
             self.cb_afg["values"] = shown
             suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
             self.lbl_afg_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
+            if raw:
+                if shown:
+                    self.var_afg_selected.set(shown[0])
+                return
+            if shown and cur not in shown:
+                self.var_afg_selected.set(shown[0])
 
         if getattr(self, "_afg_apply_filter", None) is None:
             if self.var_afg_filter is not None:
@@ -6084,22 +7347,51 @@ class MainWindow(tk.Tk):
     # -----------------
 
     def _new_afg(self) -> None:
-        dlg = _AfgNewDialog(self, initial_name="", initial_proxy="", initial_chapter="", initial_topic="")
+        base_dir = self._applicationgroup_dir()
+        source_relpaths = self._scan_xml_relpaths(base_dir)
+        dlg = _AfgNewDialog(
+            self,
+            source_relpaths=source_relpaths,
+            source_base_dir=base_dir,
+            initial_name="",
+            initial_proxy="",
+            initial_chapter="",
+            initial_topic="",
+        )
         res = dlg.show()
         if not res:
             return
 
-        root = ET.Element("AfgDiagramXml")
+        source_rel = (res.get("source_rel") or "").strip()
+        source_blank = "(Blank)"
+        root: ET.Element
+        if source_rel and source_rel != source_blank:
+            src_path = base_dir / source_rel
+            try:
+                tree = ET.parse(src_path)
+                src_root = tree.getroot()
+            except Exception as e:
+                messagebox.showerror("Create failed", f"Failed to load source AFG:\n\n{os.fspath(src_path)}\n\n{e}", parent=self)
+                return
+
+            if not (isinstance(src_root.tag, str) and _local_name(src_root.tag) == "AfgDiagramXml"):
+                messagebox.showerror("Invalid", "Source root element is not <AfgDiagramXml>", parent=self)
+                return
+
+            root = _deepcopy_et_element(src_root)
+        else:
+            root = ET.Element("AfgDiagramXml")
+            ET.SubElement(root, "fbItems")
+            ET.SubElement(root, "afgInItems")
+            ET.SubElement(root, "afgOutItems")
+            ET.SubElement(root, "arrows")
+
         root.attrib["name"] = (res.get("name") or "").strip()
         root.attrib["proxyName"] = res.get("proxyName") or ""
         root.attrib["chapterName"] = res.get("chapterName") or ""
         root.attrib["topicName"] = res.get("topicName") or ""
-        root.attrib["maxPinID"] = "0"
-
-        ET.SubElement(root, "fbItems")
-        ET.SubElement(root, "afgInItems")
-        ET.SubElement(root, "afgOutItems")
-        ET.SubElement(root, "arrows")
+        if (root.attrib.get("maxPinID") or "").strip() == "":
+            root.attrib["maxPinID"] = "0"
 
         self._afg_root = root
         self._afg_file_path = None
@@ -6116,7 +7408,10 @@ class MainWindow(tk.Tk):
 
         self._refresh_afg_views(select_first_fb=False)
         self._mark_afg_unsaved()
-        self._set_status("New AFG created (unsaved)")
+        if source_rel and source_rel != source_blank:
+            self._set_status(f"New AFG created from {source_rel} (unsaved)")
+        else:
+            self._set_status("New AFG created (unsaved)")
 
     def _sync_afg_meta_vars_to_root(self) -> None:
         root = self._afg_root
@@ -9290,6 +10585,13 @@ class MainWindow(tk.Tk):
         base_dir = self._hmi_template_dir()
         self._all_hmi_files = self._scan_xml_relpaths(base_dir)
 
+        # Build dropdown values for menu columns (scanned across all HMI templates).
+        try:
+            self._hmi_collect_menu_type_values(base_dir=base_dir, rel_paths=self._all_hmi_files)
+        except Exception:
+            self._hmi_menu_data_type_values = []
+            self._hmi_menu_view_type_values = []
+
         def apply_filter(*_args) -> None:
             raw = ""
             if self.var_hmi_filter is not None:
@@ -9306,14 +10608,18 @@ class MainWindow(tk.Tk):
                 filtered = [v for v in self._all_hmi_files if ok(v)]
 
             cur = (self.var_hmi_selected.get() or "").strip()
-            if cur and cur not in filtered:
-                filtered = [cur] + filtered
 
             max_show = 1200
             shown = filtered[:max_show]
             self.cb_hmi["values"] = shown
             suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
             self.lbl_hmi_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
+            if raw:
+                if shown:
+                    self.var_hmi_selected.set(shown[0])
+                return
+            if shown and cur not in shown:
+                self.var_hmi_selected.set(shown[0])
 
         if getattr(self, "_hmi_apply_filter", None) is None:
             if self.var_hmi_filter is not None:
@@ -9329,27 +10635,157 @@ class MainWindow(tk.Tk):
                 pass
         apply_filter()
 
+    def _hmi_collect_menu_type_values(self, *, base_dir: Path, rel_paths: list[str]) -> None:
+        data_set: set[str] = set()
+        view_set: set[str] = set()
+
+        for rel in rel_paths or []:
+            try:
+                p = Path(base_dir) / rel
+            except Exception:
+                continue
+            if not p.exists():
+                continue
+            try:
+                root = ET.parse(p).getroot()
+            except Exception:
+                continue
+            if not (isinstance(root.tag, str) and _local_name(root.tag) == "PowerLogicHmiCustomization"):
+                continue
+            for menu in list(root):
+                if not (isinstance(menu.tag, str) and _local_name(menu.tag) == "HMIMenu"):
+                    continue
+                dt = (menu.attrib.get("hmiMenuDataType") or "").strip()
+                vt = (menu.attrib.get("hmiMenuViewType") or "").strip()
+                if dt:
+                    data_set.add(dt)
+                if vt:
+                    view_set.add(vt)
+
+        self._hmi_menu_data_type_values = sorted(data_set)
+        self._hmi_menu_view_type_values = sorted(view_set)
+
     def _new_hmi(self) -> None:
         base_dir = self._hmi_template_dir()
         base_dir.mkdir(parents=True, exist_ok=True)
-        stem = simpledialog.askstring("New HMI", "HMI file name (without .xml)", parent=self)
-        if not stem:
+
+        choice = _NewHmiChoiceDialog(self).show()
+        if not choice:
             return
-        safe = re.sub(r'[<>:"/\\|?*]', "_", (stem or "").strip()) or "HMI"
-        target_path = base_dir / f"{safe}.xml"
-        if target_path.exists():
-            ok = messagebox.askyesno(
-                "Overwrite?",
-                f"File already exists:\n\n{os.fspath(target_path)}\n\nOverwrite?",
-                parent=self,
-            )
-            if not ok:
+
+        def make_blank_root() -> ET.Element:
+            root0 = ET.Element(_q(HMI_CUST_NS, "PowerLogicHmiCustomization"))
+            root0.attrib[_q(XSI_NS, "schemaLocation")] = f"{HMI_CUST_NS} SE_PowerLogic_HmiCustomization.xsd"
+            root0.attrib["desc"] = "yyy"
+            return root0
+
+        if choice == "from_application":
+            app_dir = self._application_dir()
+            app_items = self._scan_xml_relpaths(app_dir)
+            if not app_items:
+                messagebox.showerror("Missing", f"No application (*.xml) found under:\n\n{os.fspath(app_dir)}", parent=self)
                 return
 
-        root = ET.Element(_q(HMI_CUST_NS, "PowerLogicHmiCustomization"))
-        root.attrib["version"] = "1.0"
+            dlg = _CreateHmiFromApplicationDialog(self, app_relpaths=app_items)
+            res = dlg.show()
+            if not res:
+                return
+
+            app_path = app_dir / (res.get("app_rel") or "")
+            try:
+                tree = ET.parse(app_path)
+                app_root = tree.getroot()
+            except Exception as e:
+                messagebox.showerror("Open failed", str(e), parent=self)
+                return
+
+            funblock = None
+            for el in app_root.iter():
+                if not isinstance(el.tag, str):
+                    continue
+                if self._local_name(el.tag) == "funBlock":
+                    funblock = el
+                    break
+            if funblock is None:
+                messagebox.showerror("Invalid", "No <funBlock> found in file", parent=self)
+                return
+
+            old_app_root = self._app_root
+            old_app_funblock = self._app_funblock
+            old_app_path = self._app_file_path
+            try:
+                self._app_root = app_root
+                self._app_funblock = funblock
+                self._app_file_path = app_path
+                self._create_hmi_for_this_afb(sync_from_app_ui=False)
+            finally:
+                self._app_root = old_app_root
+                self._app_funblock = old_app_funblock
+                self._app_file_path = old_app_path
+            return
+
+        if choice == "copy":
+            items = self._scan_xml_relpaths(base_dir)
+            dlg = _CopyHmiDialog(
+                self,
+                hmi_relpaths=items,
+                suggested_filename="HMI.xml",
+            )
+            res = dlg.show()
+            if not res:
+                return
+
+            src_rel = (res.get("src_rel") or "").strip()
+            target_path = base_dir / (res.get("new_name") or "")
+            if not (target_path.name or "").strip():
+                return
+            if target_path.exists():
+                ok = messagebox.askyesno(
+                    "Overwrite?",
+                    f"File already exists:\n\n{os.fspath(target_path)}\n\nOverwrite?",
+                    parent=self,
+                )
+                if not ok:
+                    return
+            if src_rel == "Blank":
+                root = make_blank_root()
+            else:
+                src = base_dir / src_rel
+                if not src.exists():
+                    messagebox.showerror("Missing", f"Source file not found:\n\n{os.fspath(src)}", parent=self)
+                    return
+                try:
+                    root = ET.parse(src).getroot()
+                except Exception as e:
+                    messagebox.showerror("Read failed", str(e), parent=self)
+                    return
+                if not (isinstance(root.tag, str) and _local_name(root.tag) == "PowerLogicHmiCustomization"):
+                    messagebox.showerror("Invalid", "Source root element is not <PowerLogicHmiCustomization>", parent=self)
+                    return
+                root = _deepcopy_et_element(root)
+        else:
+            stem = simpledialog.askstring("New HMI", "HMI file name (without .xml)", parent=self)
+            if not stem:
+                return
+            safe = re.sub(r'[<>:"/\\|?*]', "_", (stem or "").strip()) or "HMI"
+            target_path = base_dir / f"{safe}.xml"
+            if target_path.exists():
+                ok = messagebox.askyesno(
+                    "Overwrite?",
+                    f"File already exists:\n\n{os.fspath(target_path)}\n\nOverwrite?",
+                    parent=self,
+                )
+                if not ok:
+                    return
+            root = make_blank_root()
+
         self._hmi_root = root
         self._hmi_file_path = target_path
+        self._hmi_saved_sig = None
+        try:
+            self._hmi_undo_stack = []
+        except Exception:
+            pass
         self._refresh_hmi_views(select_first_menu=False)
         self._mark_hmi_unsaved()
         try:
@@ -9357,7 +10793,10 @@ class MainWindow(tk.Tk):
         except Exception:
             rel = os.fspath(target_path.name)
         self._refresh_hmi_search_list(select_rel=rel)
-        self._set_status(f"Created HMI: {os.fspath(target_path)}")
+        if choice == "copy":
+            self._set_status(f"Created HMI from selected source: {os.fspath(target_path)}")
+        else:
+            self._set_status(f"Created HMI: {os.fspath(target_path)}")
 
     def _open_hmi(self) -> None:
         base_dir = self._hmi_template_dir()
@@ -9402,7 +10841,48 @@ class MainWindow(tk.Tk):
 
         self._hmi_file_path = path
         self._hmi_root = root
-        self._refresh_hmi_views(select_first_menu=True)
+        try:
+            self._hmi_undo_stack = []
+        except Exception:
+            pass
+
+        # UX requirement: on open, IED/IET/Manual trees should start fully expanded.
+        # IMPORTANT: _hmi_set_scope() normally refreshes the tree. Refreshing again after
+        # unfolding can lose open state (depending on prior tree state). So we:
+        # 1) switch scope without refreshing
+        # 2) refresh+unfold that scope
+        # 3) restore original scope without refreshing
+        scope0 = (getattr(self, "_hmi_scope", "ied") or "ied").strip().lower()
+        if scope0 not in {"ied", "iet", "manual"}:
+            scope0 = "ied"
+
+        for s in ("ied", "iet", "manual"):
+            try:
+                self._hmi_set_scope(s, refresh=False)
+            except Exception:
+                continue
+            try:
+                self._refresh_hmi_views(select_first_menu=True, open_selection_path=False)
+            except Exception:
+                pass
+            try:
+                self._hmi_unfold_all()
+            except Exception:
+                pass
+
+        try:
+            self._hmi_set_scope(scope0, refresh=False)
+        except Exception:
+            pass
+        try:
+            self._hmi_update_hmi_action_state()
+        except Exception:
+            pass
+        try:
+            self._hmi_update_fold_all_button()
+        except Exception:
+            pass
+
         self._mark_hmi_saved()
 
         try:
@@ -9420,7 +10900,18 @@ class MainWindow(tk.Tk):
             ET.register_namespace("", HMI_CUST_NS)
         except Exception:
             pass
+        try:
+            ET.register_namespace("xsi", XSI_NS)
+        except Exception:
+            pass
         root = self._hmi_root
+        # Always normalize attribute ordering right before serialization.
+        # (Save normally calls _hmi_apply_persist_in_place which already does this,
+        # but other code paths may call _write_hmi_xml directly.)
+        try:
+            self._hmi_normalize_attr_order_in_place(root)
+        except Exception:
+            pass
         try:
             ET.indent(root, space="    ")
         except Exception:
@@ -9435,18 +10926,73 @@ class MainWindow(tk.Tk):
         if self._hmi_root is None or self._hmi_file_path is None:
             messagebox.showerror("Missing", "No HMI loaded", parent=self)
             return
+
         try:
+            msg = self._hmi_validate_before_save()
+        except Exception:
+            msg = None
+        if msg:
+            messagebox.showerror("Missing", msg, parent=self)
+            return
+        try:
+            self._hmi_end_cell_edit(commit=True)
+            self._hmi_end_combo_edit(commit=True)
+        except Exception:
+            pass
+        try:
+            # Apply staged deletions and strip UI-only diff markers.
+            self._hmi_apply_persist_in_place()
             self._write_hmi_xml(self._hmi_file_path)
         except Exception as e:
             messagebox.showerror("Save failed", str(e), parent=self)
             return
         self._set_status(f"Saved HMI: {os.fspath(self._hmi_file_path)}")
         self._mark_hmi_saved()
+        self._refresh_hmi_views(select_first_menu=True, open_selection_path=False)
+
+    def _hmi_validate_before_save(self) -> str | None:
+        """Return an error message if the current HMI cannot be saved yet."""
+
+        root = self._hmi_root
+        if root is None:
+            return None
+
+        missing: list[str] = []
+        for el in root.iter():
+            if not (isinstance(el.tag, str) and _local_name(el.tag) == "HMIMenu"):
+                continue
+            name = (el.attrib.get("name") or "").strip()
+            dt = (el.attrib.get("hmiMenuDataType") or "").strip()
+            vt = (el.attrib.get("hmiMenuViewType") or "").strip()
+            st = (el.attrib.get("hmiSubTreeType") or "").strip()
+
+            # Create-HMI requirement: tabs menu must have hmiSubTreeType chosen.
+            if (
+                name.startswith("Menu_Protection_")
+                and dt == "HMI_MENU_DATA_TYPE_TAB"
+                and vt == "HMI_MENU_VIEW_TYPE_TABS"
+                and not st
+            ):
+                missing.append(f"{name or '(unnamed)'}: hmiSubTreeType")
+
+            # Create-HMI requirement: outputs menu view type must be chosen.
+            if name.startswith("Menu_Protection_") and name.endswith("_Outputs"):
+                if not vt:
+                    missing.append(f"{name or '(unnamed)'}: hmiMenuViewType")
+
+        if not missing:
+            return None
+        return "Cannot save yet. Fill required HMI menu fields:\n\n" + "\n".join(missing)
 
     def _save_hmi_as(self) -> None:
         if self._hmi_root is None:
             messagebox.showerror("Missing", "No HMI loaded", parent=self)
             return
+        try:
+            self._hmi_end_cell_edit(commit=True)
+            self._hmi_end_combo_edit(commit=True)
+        except Exception:
+            pass
         base_dir = self._hmi_template_dir()
         base_dir.mkdir(parents=True, exist_ok=True)
         initialfile = ""
@@ -9478,16 +11024,121 @@ class MainWindow(tk.Tk):
         root = self._hmi_root
         if root is None:
             return []
+        scope = (getattr(self, "_hmi_scope", "ied") or "ied").strip().lower()
         menus: list[ET.Element] = []
         for el in root.iter():
             if not (isinstance(el.tag, str) and _local_name(el.tag) == "HMIMenu"):
                 continue
             name = (el.attrib.get("name") or "").strip()
-            if not name.startswith("Menu_"):
-                continue
+            is_iet = name.startswith("IET_Protection")
+            is_manual = name.startswith("Manual_Protection")
+            if scope == "iet":
+                if not is_iet:
+                    continue
+            elif scope == "manual":
+                if not is_manual:
+                    continue
+            else:
+                # IED view shows everything that is not IET/Manual.
+                if is_iet or is_manual:
+                    continue
             menus.append(el)
         menus.sort(key=lambda m: (m.attrib.get("name") or "").lower())
         return menus
+
+    def _hmi_set_scope(self, scope: str, *, refresh: bool = True) -> None:
+        """Switch HMI UI scope between IED, IET and Manual.
+
+        This updates which menu treeview is considered active and refreshes the
+        visible menu table.
+        """
+
+        prev_scope = (getattr(self, "_hmi_scope", "ied") or "ied").strip().lower()
+        if prev_scope in {"ied", "iet", "manual"}:
+            self._hmi_save_scope_tree_state(prev_scope)
+
+        s = (scope or "").strip().lower()
+        if s not in {"ied", "iet", "manual"}:
+            s = "ied"
+        self._hmi_scope = s
+
+        # Update the active tree reference used by the rest of the HMI logic.
+        if s == "ied":
+            tv = self._hmi_tv_menus_ied
+        elif s == "iet":
+            tv = self._hmi_tv_menus_iet
+        else:
+            tv = self._hmi_tv_menus_manual
+        if tv is not None:
+            self._hmi_tv_menus = tv
+
+        # Restore this scope's mapping snapshot so refresh can read current open state
+        # from the correct tree ids.
+        self._hmi_restore_scope_tree_state(s)
+
+        # Buttons live inside each sub-tab (IED/IET/Manual). Point generic button
+        # refs used by the existing handlers to the currently active set.
+        suffix = s
+        for key in (
+            "_hmi_btn_add",
+            "_hmi_btn_insert",
+            "_hmi_btn_edit",
+            "_hmi_btn_copy",
+            "_hmi_btn_cut",
+            "_hmi_btn_paste",
+            "_hmi_btn_delete",
+            "_hmi_btn_up",
+            "_hmi_btn_down",
+            "_hmi_btn_fold_all",
+        ):
+            try:
+                btn = getattr(self, f"{key}_{suffix}", None)
+            except Exception:
+                btn = None
+            setattr(self, key, btn)
+
+        if refresh:
+            try:
+                self._hmi_restore_column_widths()
+            except Exception:
+                pass
+
+            # Refresh just the menu table for the newly active scope.
+            try:
+                self._refresh_hmi_views(select_first_menu=True, open_selection_path=False)
+            except Exception:
+                pass
+
+            try:
+                self._hmi_schedule_column_resize()
+            except Exception:
+                pass
+
+            try:
+                self._hmi_update_hmi_action_state()
+            except Exception:
+                pass
+
+            # Keep the cache aligned with whichever scope was just refreshed.
+            self._hmi_save_scope_tree_state(s)
+
+    def _hmi_save_scope_tree_state(self, scope: str) -> None:
+        s = (scope or "").strip().lower()
+        if s not in {"ied", "iet", "manual"}:
+            return
+        self._hmi_menu_iid_to_el_by_scope[s] = dict(self._hmi_menu_iid_to_el or {})
+        self._hmi_tree_iid_to_kind_by_scope[s] = dict(self._hmi_tree_iid_to_kind or {})
+        self._hmi_tree_iid_to_node_by_scope[s] = dict(self._hmi_tree_iid_to_node or {})
+        self._hmi_tree_iid_to_ref_link_by_scope[s] = dict(self._hmi_tree_iid_to_ref_link or {})
+
+    def _hmi_restore_scope_tree_state(self, scope: str) -> None:
+        s = (scope or "").strip().lower()
+        if s not in {"ied", "iet", "manual"}:
+            return
+        self._hmi_menu_iid_to_el = dict(self._hmi_menu_iid_to_el_by_scope.get(s, {}) or {})
+        self._hmi_tree_iid_to_kind = dict(self._hmi_tree_iid_to_kind_by_scope.get(s, {}) or {})
+        self._hmi_tree_iid_to_node = dict(self._hmi_tree_iid_to_node_by_scope.get(s, {}) or {})
+        self._hmi_tree_iid_to_ref_link = dict(self._hmi_tree_iid_to_ref_link_by_scope.get(s, {}) or {})
 
     def _hmi_selected_menu(self) -> tuple[ET.Element, ET.Element] | None:
         if self._hmi_tv_menus is None:
@@ -9495,7 +11146,14 @@ class MainWindow(tk.Tk):
         sel = self._hmi_tv_menus.selection()
         if not sel:
             return None
-        return self._hmi_menu_iid_to_el.get(sel[0])
+        iid = sel[0]
+        node = self._hmi_tree_iid_to_node.get(iid)
+        if node is None:
+            return None
+        kind, _parent, el = node
+        if kind != "menu" or el is None:
+            return None
+        return self._hmi_menu_iid_to_el.get(iid)
 
     def _hmi_selected_item(self) -> tuple[ET.Element, ET.Element] | None:
         if self._hmi_tv_items is None:
@@ -9513,20 +11171,1578 @@ class MainWindow(tk.Tk):
             return None
         return self._hmi_data_iid_to_el.get(sel[0])
 
-    def _refresh_hmi_views(self, *, select_first_menu: bool) -> None:
-        self._refresh_hmi_menu_table(select_first=select_first_menu)
-        self._refresh_hmi_item_table(select_first=False)
-        self._refresh_hmi_data_table(select_first=False)
+    def _refresh_hmi_views(self, *, select_first_menu: bool, open_selection_path: bool = True) -> None:
+        self._refresh_hmi_menu_table(select_first=select_first_menu, open_selection_path=open_selection_path)
         try:
             self._update_dirty_ui_hmi()
         except Exception:
             pass
+        try:
+            self._hmi_schedule_column_resize()
+        except Exception:
+            pass
 
-    def _refresh_hmi_menu_table(self, *, select_first: bool) -> None:
+    def _hmi_schedule_column_resize(self) -> None:
         tv = self._hmi_tv_menus
         if tv is None:
             return
+        try:
+            if self._hmi_resize_after_id is not None:
+                self.after_cancel(self._hmi_resize_after_id)
+        except Exception:
+            pass
+        try:
+            self._hmi_resize_after_id = self.after(80, self._hmi_resize_columns)
+        except Exception:
+            self._hmi_resize_after_id = None
+
+    def _hmi_resize_columns(self) -> None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+        self._hmi_resize_after_id = None
+
+        # Fit all columns into the visible width (no horizontal scrolling).
+        try:
+            total = int(tv.winfo_width())
+        except Exception:
+            total = 0
+        if total <= 0:
+            return
+
+        # Conservative padding for borders.
+        avail = max(260, total - 2)
+
+        cols = ["#0"] + list(tv["columns"])
+
+        # Minimums: keep small so we can always show all columns.
+        mins: dict[str, int] = {
+            "#0": 60,
+            "desc": 40,
+            "value": 40,
+            "instantiate": 30,
+            "langRef": 40,
+            "hmiMenuDataType": 60,
+            "hmiMenuViewType": 60,
+            "hmiSubTreeType": 60,
+            "doRef": 60,
+            "daRef": 40,
+            "hideunit": 30,
+        }
+
+        # Preferred widths come from user-resized columns (persisted). If missing, seed from current.
+        pref = dict(getattr(self, "_hmi_pref_col_widths", None) or {})
+        if not pref:
+            try:
+                pref["#0"] = int(tv.column("#0").get("width") or 0)
+                for c in tv["columns"]:
+                    pref[c] = int(tv.column(c).get("width") or 0)
+            except Exception:
+                pref = {}
+            self._hmi_pref_col_widths = {k: v for k, v in pref.items() if v > 0}
+            pref = dict(self._hmi_pref_col_widths)
+
+        # If mins don't fit, scale mins down (best-effort) so all columns remain visible.
+        min_sum = sum(int(mins.get(c, 20)) for c in cols)
+        if min_sum > avail:
+            scale = avail / float(min_sum) if min_sum else 1.0
+            for c in cols:
+                lo = 30 if c == "#0" else 20
+                mins[c] = max(lo, int(mins.get(c, 20) * scale))
+
+            # If we still don't fit (due to lower bounds), fall back to ultra-compact mins.
+            if sum(int(mins.get(c, 20)) for c in cols) > avail:
+                for c in cols:
+                    mins[c] = 30 if c == "#0" else 20
+
+        # Start with proportional widths based on pref.
+        safe_pref = {c: max(int(pref.get(c, mins.get(c, 20)) or 0), 1) for c in cols}
+        pref_sum = sum(safe_pref.values())
+        if pref_sum <= 0:
+            return
+
+        widths: dict[str, int] = {
+            c: int(avail * safe_pref[c] / float(pref_sum)) for c in cols
+        }
+        for c in cols:
+            widths[c] = max(int(mins.get(c, 20)), int(widths.get(c, 0)))
+
+        # If we overshot due to mins rounding, shrink in a stable order.
+        diff = int(avail - sum(widths.values()))
+        if diff < 0:
+            need = -diff
+            shrink_order = [
+                "#0",
+                "desc",
+                "value",
+                "doRef",
+                "hmiMenuDataType",
+                "hmiMenuViewType",
+                "hmiSubTreeType",
+                "instantiate",
+                "langRef",
+                "daRef",
+                "hideunit",
+            ]
+            for c in shrink_order:
+                if c not in widths:
+                    continue
+                reducible = int(widths[c] - mins.get(c, 20))
+                if reducible <= 0:
+                    continue
+                take = reducible if reducible < need else need
+                widths[c] -= take
+                need -= take
+                if need <= 0:
+                    break
+        elif diff > 0:
+            # Give extra space to the tree column for readability.
+            widths["#0"] = int(widths.get("#0", 0) + diff)
+
+        try:
+            tv.column("#0", width=widths["#0"], minwidth=mins["#0"], stretch=True)
+            for c in tv["columns"]:
+                if c in widths:
+                    tv.column(c, width=widths[c], minwidth=mins.get(c, 20), stretch=True)
+        except Exception:
+            pass
+
+    def _hmi_current_ln_instance_path(self) -> Path | None:
+        # Prefer the currently-open LN instance in the LN instance tab.
+        try:
+            if self.instance_editor is not None and getattr(self.instance_editor, "doc", None) is not None:
+                p = getattr(self.instance_editor.doc, "file_path", None)
+                if p:
+                    pp = Path(p)
+                    return pp if pp.exists() else None
+        except Exception:
+            pass
+        return None
+
+    def _hmi_current_ln_type_id(self) -> str | None:
+        # Prefer the lnType shown in the LN instance tab (template id).
+        try:
+            if self.instance_editor is not None and hasattr(self.instance_editor, "var_lnType"):
+                v = (self.instance_editor.var_lnType.get() or "").strip()
+                if v:
+                    return v
+        except Exception:
+            pass
+
+        # Fallback: try reading from the loaded document (if any).
+        try:
+            if self.instance_editor is not None and getattr(self.instance_editor, "doc", None) is not None:
+                doc = self.instance_editor.doc
+                ln_elements = getattr(doc, "ln_elements", None)
+                if ln_elements:
+                    ln0 = ln_elements[0]
+                    if isinstance(ln0, ET.Element):
+                        v = (ln0.attrib.get("lnType") or "").strip()
+                        if v:
+                            return v
+        except Exception:
+            pass
+
+        # Fallback: use the currently-loaded LN template editor (no need to open LN instance).
+        try:
+            ed = getattr(self, "editor", None)
+            if ed is not None:
+                model = getattr(ed, "model", None)
+                if model is not None:
+                    info = getattr(model, "info", None)
+                    v = (getattr(info, "id", "") or "").strip()
+                    if v:
+                        return v
+                if hasattr(ed, "var_selected"):
+                    v2 = (ed.var_selected.get() or "").strip()
+                    if v2:
+                        return v2
+        except Exception:
+            pass
+
+        return None
+
+    def _hmi_parse_ln_instance_do_names(self, path: Path) -> list[str]:
+        # Parse LN instance and list all DOI names.
+        tree = ET.parse(path)
+        root = tree.getroot()
+        ln_el: ET.Element | None = None
+        for el in root.iter():
+            if isinstance(el.tag, str) and _local_name(el.tag) == "LN":
+                ln_el = el
+                break
+        if ln_el is None:
+            return []
+
+        names: list[str] = []
+        for doi in ln_el.iter():
+            if not (isinstance(doi.tag, str) and _local_name(doi.tag) == "DOI"):
+                continue
+            dn = (doi.attrib.get("name") or "").strip()
+            if dn:
+                names.append(dn)
+
+        # Stable unique sort.
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for n in names:
+            if n in seen:
+                continue
+            seen.add(n)
+            uniq.append(n)
+        uniq.sort(key=lambda s: (s or "").lower())
+        return uniq
+
+    def _hmi_peek_ln_instance_ln_attrs(self, path: Path) -> tuple[str, str, str]:
+        """Return (lnType, prefix, lnClass) from the first <LN> element in an LNDM instance."""
+
+        try:
+            tree = ET.parse(path)
+            root = tree.getroot()
+        except Exception:
+            return ("", "", "")
+
+        ln_el: ET.Element | None = None
+        for el in root.iter():
+            if isinstance(el.tag, str) and _local_name(el.tag) == "LN":
+                ln_el = el
+                break
+        if ln_el is None:
+            return ("", "", "")
+
+        try:
+            ln_type = (ln_el.attrib.get("lnType") or "").strip()
+        except Exception:
+            ln_type = ""
+        try:
+            prefix = (ln_el.attrib.get("prefix") or "").strip()
+        except Exception:
+            prefix = ""
+        try:
+            ln_class = (ln_el.attrib.get("lnClass") or "").strip()
+        except Exception:
+            ln_class = ""
+
+        return (ln_type, prefix, ln_class)
+
+    def _hmi_matching_application_path(self) -> Path | None:
+        try:
+            if self._hmi_file_path is None:
+                return None
+            return self._application_dir() / f"{self._hmi_file_path.stem}.xml"
+        except Exception:
+            return None
+
+    def _hmi_read_matching_application_lnref(self) -> str:
+        """Read LnRef from the same-stem Application XML for the current HMI file.
+
+        This is used for resolving the LN instance for doRef suggestions without requiring
+        the LN instance tab to be opened.
+        """
+
+        app_path = self._hmi_matching_application_path()
+        if app_path is None or (not app_path.exists()):
+            self._hmi_app_cached_path = None
+            self._hmi_app_cached_mtime = None
+            self._hmi_app_cached_lnref = ""
+            return ""
+
+        try:
+            mtime = float(app_path.stat().st_mtime)
+        except Exception:
+            mtime = None
+
+        if (
+            self._hmi_app_cached_path is not None
+            and app_path == self._hmi_app_cached_path
+            and mtime is not None
+            and self._hmi_app_cached_mtime == mtime
+        ):
+            return (self._hmi_app_cached_lnref or "").strip()
+
+        ln_ref = ""
+        try:
+            app_root = ET.parse(app_path).getroot()
+            fun_block: ET.Element | None = None
+            for el in app_root.iter():
+                if isinstance(el.tag, str) and _local_name(el.tag) == "funBlock":
+                    fun_block = el
+                    break
+            if fun_block is not None:
+                ln_ref = (fun_block.attrib.get("LnRef") or "").strip()
+        except Exception:
+            ln_ref = ""
+
+        self._hmi_app_cached_path = app_path
+        self._hmi_app_cached_mtime = mtime
+        self._hmi_app_cached_lnref = ln_ref
+        return (ln_ref or "").strip()
+
+    def _hmi_normalize_lnref_for_doref(self, lnref: str) -> str:
+        """Normalize LnRef into the canonical doRef prefix form, e.g. 'ZNPDIS#'."""
+
+        s = (lnref or "").strip()
+        if not s:
+            return ""
+        if "#" in s:
+            s = s.split("#", 1)[0]
+        s = s.strip().rstrip("#.;:,_- ")
+        if not s:
+            return ""
+        return f"{s}#"
+
+    def _hmi_ensure_ln_do_suggestions_loaded(self) -> None:
+        # Prefer resolving doRef suggestions from the LN instance referenced by the
+        # same-stem Application XML (HMI stem -> application/<stem>.xml -> funBlock@LnRef).
+        ln_ref_raw = self._hmi_read_matching_application_lnref()
+        ln_ref = self._hmi_normalize_lnref_for_doref(ln_ref_raw)
+        if ln_ref:
+            self._hmi_ln_ref = ln_ref
+        elif not (ln_ref_raw or "").strip():
+            # No matching application (or no LnRef): avoid reusing an old prefix.
+            self._hmi_ln_ref = ""
+
+        try:
+            inst_path = self._guess_ln_instance_path_from_lnref(ln_ref_raw) if ln_ref_raw else None
+        except Exception:
+            inst_path = None
+
+        if inst_path is not None and inst_path.exists():
+            try:
+                inst_mtime = float(inst_path.stat().st_mtime)
+            except Exception:
+                inst_mtime = None
+
+            if inst_path != self._hmi_ln_cached_path or inst_mtime != self._hmi_ln_cached_mtime:
+                try:
+                    parsed = self._hmi_parse_ln_instance_do_names(inst_path)
+                except Exception:
+                    parsed = []
+                if parsed:
+                    self._hmi_ln_do_names = parsed
+                    self._hmi_ln_do_names_source = "instance"
+                else:
+                    # If we previously showed instance-derived DOIs, clear them so we can
+                    # fall back to template-based suggestions.
+                    if (getattr(self, "_hmi_ln_do_names_source", "") or "") == "instance":
+                        self._hmi_ln_do_names = []
+                    self._hmi_ln_do_names_source = ""
+                self._hmi_ln_cached_path = inst_path
+                self._hmi_ln_cached_mtime = inst_mtime
+        else:
+            self._hmi_ln_cached_path = None
+            self._hmi_ln_cached_mtime = None
+            if (getattr(self, "_hmi_ln_do_names_source", "") or "") == "instance":
+                self._hmi_ln_do_names = []
+                self._hmi_ln_do_names_source = ""
+
+        ln_type_id = self._hmi_current_ln_type_id()
+        if (not ln_type_id) and inst_path is not None and inst_path.exists():
+            # Key fix: if user didn't open LN instance/template tabs, derive lnType from
+            # the resolved LNDM instance so we can load LNodeType -> DOType -> DA list.
+            try:
+                ln_type_id, inst_prefix, inst_ln_class = self._hmi_peek_ln_instance_ln_attrs(inst_path)
+            except Exception:
+                ln_type_id, inst_prefix, inst_ln_class = ("", "", "")
+
+            # If we also lack LnRef, synthesize it from instance prefix+lnClass.
+            try:
+                if not (getattr(self, "_hmi_ln_ref", "") or "").strip():
+                    if (inst_prefix or inst_ln_class):
+                        self._hmi_ln_ref = f"{(inst_prefix or '')}{(inst_ln_class or '')}#"
+            except Exception:
+                pass
+        if not ln_type_id:
+            # We can still provide doRef dropdown values from the LN instance (above),
+            # but DA suggestions require an LN template mapping.
+            self._hmi_ln_class = ""
+            try:
+                self._hmi_ln_do_types_by_name = {}
+            except Exception:
+                pass
+            try:
+                self._hmi_ln_cached_lntype_id = None
+            except Exception:
+                pass
+            return
+
+        # If the LN template editor has a loaded model for this lnType, always source from it.
+        # This keeps dropdowns up-to-date even when the user edits DO list without saving.
+        try:
+            ed = getattr(self, "editor", None)
+            model = getattr(ed, "model", None) if ed is not None else None
+            if model is not None:
+                info0 = getattr(model, "info", None)
+                if (getattr(info0, "id", "") or "").strip() == ln_type_id:
+                    self._hmi_ln_cached_lntype_id = ln_type_id
+                    template_do_names = [d.name for d in (model.dos or []) if (d.name or "").strip()]
+                    self._hmi_ln_do_types_by_name = {
+                        d.name: (d.do_type or "").strip() for d in (model.dos or []) if (d.name or "").strip()
+                    }
+                    self._hmi_ln_class = (getattr(info0, "ln_class", "") or "").strip()
+                    if not self._hmi_ln_do_names:
+                        self._hmi_ln_do_names = template_do_names
+                        self._hmi_ln_do_names_source = "template"
+        except Exception:
+            pass
+
+        cached_id = getattr(self, "_hmi_ln_cached_lntype_id", None)
+        if isinstance(cached_id, str) and cached_id == ln_type_id:
+            return
+
+        self._hmi_ln_cached_lntype_id = ln_type_id
+        # Only clear DO names if they were not loaded from the LN instance.
+        if not self._hmi_ln_do_names:
+            self._hmi_ln_do_names = []
+        self._hmi_ln_do_types_by_name = {}
+        self._hmi_ln_class = ""
+
+        # (Editor-model sourcing handled earlier.)
+
+        try:
+            info = None
+            if getattr(self, "catalog", None) is not None:
+                for it in (self.catalog.lnode_types or []):
+                    if it.id == ln_type_id:
+                        info = it
+                        break
+            if info is None:
+                # Catalog scan is non-recursive; try locating the template file directly.
+                try:
+                    ln_dir = Path(self.iec61850_dir) / "LNodeType"
+                    cand = None
+                    p0 = ln_dir / f"{ln_type_id}.xml"
+                    if p0.is_file():
+                        cand = p0
+                    else:
+                        for p in ln_dir.rglob(f"{ln_type_id}.xml"):
+                            if p.is_file():
+                                cand = p
+                                break
+                    if cand is not None:
+                        tree = ET.parse(cand)
+                        rr = tree.getroot()
+                        ln = rr.find(f".//{_q(SCL_NS, 'LNodeType')}")
+                        ln_class = (ln.attrib.get("lnClass") or "").strip() if ln is not None else ""
+                        desc = (ln.attrib.get("desc") or "").strip() if ln is not None else ""
+                        info = LNodeTypeInfo(id=ln_type_id, ln_class=ln_class, desc=desc, file_path=cand)
+                except Exception:
+                    info = None
+
+            if info is None:
+                raise ValueError("LNodeType not found")
+            model = load_lnode_type(info)
+            template_do_names = [d.name for d in (model.dos or []) if (d.name or "").strip()]
+            self._hmi_ln_do_types_by_name = {d.name: (d.do_type or "").strip() for d in (model.dos or []) if d.name}
+            try:
+                self._hmi_ln_class = (getattr(getattr(model, "info", None), "ln_class", "") or "").strip()
+            except Exception:
+                self._hmi_ln_class = (getattr(info, "ln_class", "") or "").strip()
+            if not self._hmi_ln_do_names:
+                self._hmi_ln_do_names = template_do_names
+                self._hmi_ln_do_names_source = "template"
+        except Exception:
+            if not self._hmi_ln_do_names:
+                self._hmi_ln_do_names = []
+            self._hmi_ln_do_types_by_name = {}
+            self._hmi_ln_class = ""
+
+            # Fallback 1: template DOI order exposed by the LN instance tab.
+            try:
+                if self.instance_editor is not None:
+                    tpl = list(getattr(self.instance_editor, "_tpl_doi_names", []) or [])
+                    if tpl:
+                        if not self._hmi_ln_do_names:
+                            self._hmi_ln_do_names = [str(x).strip() for x in tpl if str(x).strip()]
+                            self._hmi_ln_do_names_source = "template"
+            except Exception:
+                pass
+
+            # Fallback 2: DOI names present in the currently opened instance file.
+            try:
+                if not self._hmi_ln_do_names:
+                    path = self._hmi_current_ln_instance_path()
+                    if path is not None:
+                        self._hmi_ln_do_names = self._hmi_parse_ln_instance_do_names(path)
+            except Exception:
+                pass
+
+    def _hmi_doref_dropdown_values(self, *, current: str = "") -> list[str]:
+        self._hmi_ensure_ln_do_suggestions_loaded()
+        try:
+            ln_ref = (getattr(self, "_hmi_ln_ref", "") or "").strip()
+        except Exception:
+            ln_ref = ""
+        if ln_ref:
+            prefix = f"{ln_ref}."
+        else:
+            try:
+                ln_class = (getattr(self, "_hmi_ln_class", "") or "").strip()
+            except Exception:
+                ln_class = ""
+            prefix = f"{ln_class}#." if ln_class else ""
+        base = [""] + [prefix + n for n in (self._hmi_ln_do_names or [])]
+        # Custom group functionality placeholder.
+        if "bay.LLN0.SettingControl" not in base:
+            base.append("bay.LLN0.SettingControl")
+        cur = (current or "").strip()
+        if cur and cur not in base:
+            base.insert(1, cur)
+        # Keep stable; do not sort so blank/current stay near top.
+        return base
+
+    def _hmi_daref_dropdown_values(self, *, do_ref: str, current: str = "") -> list[str]:
+        self._hmi_ensure_ln_do_suggestions_loaded()
+
+        def _dot(v: str) -> str:
+            vv = (v or "").strip()
+            if not vv:
+                return ""
+            return vv if vv.startswith(".") else ("." + vv)
+
+        do_ref = (do_ref or "").strip()
+        cur = _dot(current)
+        if not do_ref:
+            base = [""]
+            if cur:
+                base.append(cur)
+            return base
+
+        do_name = self._hmi_do_name_from_doref(do_ref)
+        do_type = (getattr(self, "_hmi_ln_do_types_by_name", {}) or {}).get(do_name) or ""
+        do_type = (do_type or "").strip()
+        if not do_type:
+            base = [""]
+            if cur:
+                base.append(cur)
+            return base
+
+        cache = getattr(self, "_hmi_ln_da_names_by_dotype", None)
+        if cache is None:
+            cache = {}
+            self._hmi_ln_da_names_by_dotype = cache
+        if do_type not in cache:
+            cache[do_type] = self._hmi_parse_dotype_da_names(do_type)
+
+        da_names = list(cache.get(do_type) or [])
+        da_names = [_dot(n) for n in da_names]
+        base = [""] + da_names
+        if cur and cur not in base:
+            base.insert(1, cur)
+        return base
+
+    def _hmi_inref_dropdown_values(self, *, current: str = "") -> list[str]:
+        """Return dropdown values for IET_HARDLINK_DEFINITION.
+
+        Values are sourced from the current LN's InRef purposes and formatted as:
+        `.InRef%<purpose>`.
+        """
+
+        cur = (current or "").strip()
+
+        # Prefer currently-open LN instance tab for live values.
+        try:
+            if self.instance_editor is not None and getattr(self.instance_editor, "doc", None) is not None:
+                ln_el = self._current_ln_instance_element()
+                if ln_el is not None:
+                    inrefs = self._extract_inrefs_from_ln_element(ln_el)
+                    vals: list[str] = []
+                    seen: set[str] = set()
+                    for it in (inrefs or []):
+                        purpose = (it.get("purpose_clean") or "").strip()
+                        if not purpose:
+                            continue
+                        v = f".InRef%{purpose}"
+                        if v in seen:
+                            continue
+                        seen.add(v)
+                        vals.append(v)
+                    base = [""] + vals
+                    if cur and cur not in base:
+                        base.insert(1, cur)
+                    return base
+        except Exception:
+            pass
+
+        # Fallback: resolve LN instance via matching application LnRef.
+        try:
+            ln_ref_raw = self._hmi_read_matching_application_lnref()
+        except Exception:
+            ln_ref_raw = ""
+
+        try:
+            inst_path = self._guess_ln_instance_path_from_lnref(ln_ref_raw) if ln_ref_raw else None
+        except Exception:
+            inst_path = None
+
+        if inst_path is None or not inst_path.exists():
+            base = [""]
+            if cur and cur not in base:
+                base.append(cur)
+            return base
+
+        try:
+            inst_mtime = float(inst_path.stat().st_mtime)
+        except Exception:
+            inst_mtime = None
+
+        cache_path = getattr(self, "_hmi_inref_cached_path", None)
+        cache_mtime = getattr(self, "_hmi_inref_cached_mtime", None)
+        cache_vals = getattr(self, "_hmi_inref_cached_values", None)
+        if (
+            isinstance(cache_vals, list)
+            and cache_path == inst_path
+            and ((cache_mtime is None and inst_mtime is None) or (cache_mtime == inst_mtime))
+        ):
+            base = [""] + list(cache_vals)
+            if cur and cur not in base:
+                base.insert(1, cur)
+            return base
+
+        vals2: list[str] = []
+        try:
+            doc = load_ln_instance_document(Path(inst_path))
+            lnref_norm = self._normalize_lnref(ln_ref_raw)
+            ln_el = self._pick_ln_element_for_lnref(doc, lnref_norm)
+            if ln_el is not None:
+                inrefs = self._extract_inrefs_from_ln_element(ln_el)
+                seen2: set[str] = set()
+                for it in (inrefs or []):
+                    purpose = (it.get("purpose_clean") or "").strip()
+                    if not purpose:
+                        continue
+                    v = f".InRef%{purpose}"
+                    if v in seen2:
+                        continue
+                    seen2.add(v)
+                    vals2.append(v)
+        except Exception:
+            vals2 = []
+
+        try:
+            self._hmi_inref_cached_path = inst_path
+            self._hmi_inref_cached_mtime = inst_mtime
+            self._hmi_inref_cached_values = list(vals2)
+        except Exception:
+            pass
+
+        base = [""] + vals2
+        if cur and cur not in base:
+            base.insert(1, cur)
+        return base
+
+    def _hmi_parse_dotype_da_names(self, do_type_id: str) -> list[str]:
+        do_type_id = (do_type_id or "").strip()
+        if not do_type_id:
+            return []
+
+        root = None
+        try:
+            root = getattr(self, "iec61850_dir", None)
+        except Exception:
+            root = None
+        if root is None:
+            return []
+
+        do_dir = Path(root) / "DOType"
+        if not do_dir.exists():
+            return []
+
+        # Fast path: file name often matches the DOType id.
+        candidates: list[Path] = []
+        try:
+            direct = do_dir / f"{do_type_id}.xml"
+            if direct.is_file():
+                candidates.append(direct)
+        except Exception:
+            pass
+
+        try:
+            if not candidates:
+                for p in do_dir.rglob(f"{do_type_id}.xml"):
+                    if p.is_file():
+                        candidates.append(p)
+                        break
+        except Exception:
+            pass
+
+        # Fallback: scan files for a matching DOType id.
+        if not candidates:
+            try:
+                candidates = list(do_dir.rglob("*.xml"))
+            except Exception:
+                candidates = []
+
+        def local(tag: str) -> str:
+            return _local_name(tag) if isinstance(tag, str) else ""
+
+        def find_da_type_el(da_type_id: str) -> ET.Element | None:
+            da_type_id = (da_type_id or "").strip()
+            if not da_type_id:
+                return None
+
+            cache = getattr(self, "_hmi_da_type_el_cache", None)
+            if cache is None:
+                cache = {}
+                setattr(self, "_hmi_da_type_el_cache", cache)
+            if da_type_id in cache:
+                return cache.get(da_type_id)
+
+            da_dir = Path(root) / "DAType"
+            if not da_dir.exists():
+                cache[da_type_id] = None
+                return None
+
+            # Fast path: matching file name.
+            candidates0: list[Path] = []
+            try:
+                direct0 = da_dir / f"{da_type_id}.xml"
+                if direct0.is_file():
+                    candidates0.append(direct0)
+            except Exception:
+                pass
+            try:
+                if not candidates0:
+                    for p0 in da_dir.rglob(f"{da_type_id}.xml"):
+                        if p0.is_file():
+                            candidates0.append(p0)
+                            break
+            except Exception:
+                pass
+
+            if not candidates0:
+                try:
+                    candidates0 = list(da_dir.rglob("*.xml"))
+                except Exception:
+                    candidates0 = []
+
+            found0: ET.Element | None = None
+            for p0 in candidates0:
+                try:
+                    tr0 = ET.parse(p0)
+                    rr0 = tr0.getroot()
+                    for el0 in rr0.findall(f".//{_q(SCL_NS, 'DAType')}"):
+                        if (el0.attrib.get("id") or "").strip() == da_type_id:
+                            found0 = el0
+                            break
+                    if found0 is not None:
+                        break
+                except Exception:
+                    continue
+
+            cache[da_type_id] = found0
+            return found0
+
+        def expand_struct(type_id: str, prefix: str, stack: set[str]) -> list[str]:
+            type_id = (type_id or "").strip()
+            if not type_id:
+                return []
+            if type_id in stack:
+                return []
+            stack.add(type_id)
+            out0: list[str] = []
+            dt = find_da_type_el(type_id)
+            if dt is not None:
+                for ch0 in list(dt):
+                    if local(ch0.tag) != "BDA":
+                        continue
+                    nm0 = (ch0.attrib.get("name") or "").strip()
+                    if not nm0:
+                        continue
+                    path0 = f"{prefix}{nm0}" if prefix else nm0
+                    out0.append(path0)
+                    btype0 = (ch0.attrib.get("bType") or "").strip()
+                    t0 = (ch0.attrib.get("type") or "").strip()
+                    if (btype0 or "").lower() == "struct" and t0:
+                        out0.extend(expand_struct(t0, path0 + ".", stack))
+            stack.remove(type_id)
+            return out0
+
+        def find_do_type_el(do_type_id0: str) -> ET.Element | None:
+            do_type_id0 = (do_type_id0 or "").strip()
+            if not do_type_id0:
+                return None
+
+            cache0 = getattr(self, "_hmi_do_type_el_cache", None)
+            if cache0 is None:
+                cache0 = {}
+                setattr(self, "_hmi_do_type_el_cache", cache0)
+            if do_type_id0 in cache0:
+                return cache0.get(do_type_id0)
+
+            if not do_dir.exists():
+                cache0[do_type_id0] = None
+                return None
+
+            candidates0: list[Path] = []
+            try:
+                direct0 = do_dir / f"{do_type_id0}.xml"
+                if direct0.is_file():
+                    candidates0.append(direct0)
+            except Exception:
+                pass
+            try:
+                if not candidates0:
+                    for p0 in do_dir.rglob(f"{do_type_id0}.xml"):
+                        if p0.is_file():
+                            candidates0.append(p0)
+                            break
+            except Exception:
+                pass
+            if not candidates0:
+                try:
+                    candidates0 = list(do_dir.rglob("*.xml"))
+                except Exception:
+                    candidates0 = []
+
+            found0: ET.Element | None = None
+            for p0 in candidates0:
+                try:
+                    tr0 = ET.parse(p0)
+                    rr0 = tr0.getroot()
+                    for el0 in rr0.findall(f".//{_q(SCL_NS, 'DOType')}"):
+                        if (el0.attrib.get("id") or "").strip() == do_type_id0:
+                            found0 = el0
+                            break
+                    if found0 is not None:
+                        break
+                except Exception:
+                    continue
+
+            cache0[do_type_id0] = found0
+            return found0
+
+        def expand_do_el(do_el: ET.Element, prefix: str, do_stack: set[str]) -> list[str]:
+            out1: list[str] = []
+            for ch1 in list(do_el):
+                loc1 = local(ch1.tag)
+                if loc1 == "DA":
+                    nm1 = (ch1.attrib.get("name") or "").strip()
+                    if not nm1:
+                        continue
+                    path1 = f"{prefix}{nm1}" if prefix else nm1
+                    out1.append(path1)
+                    btype1 = (ch1.attrib.get("bType") or "").strip()
+                    t1 = (ch1.attrib.get("type") or "").strip()
+                    if (btype1 or "").lower() == "struct" and t1:
+                        out1.extend(expand_struct(t1, path1 + ".", set()))
+                elif loc1 == "SDO":
+                    nm1 = (ch1.attrib.get("name") or "").strip()
+                    t1 = (ch1.attrib.get("type") or "").strip()
+                    if not (nm1 and t1):
+                        continue
+
+                    # Add the SDO itself as an option (sub DO), e.g. 'phsAB'.
+                    # This allows selecting '.phsAB' in daRef dropdown.
+                    sdo_path = f"{prefix}{nm1}" if prefix else nm1
+                    if sdo_path:
+                        out1.append(sdo_path)
+
+                    if t1 in do_stack:
+                        continue
+                    do_stack.add(t1)
+                    sub_el = find_do_type_el(t1)
+                    if sub_el is not None:
+                        out1.extend(expand_do_el(sub_el, f"{prefix}{nm1}.", do_stack))
+                    do_stack.remove(t1)
+            return out1
+
+        da_names: list[str] = []
+        for path in candidates:
+            try:
+                tree = ET.parse(path)
+                r = tree.getroot()
+                found = None
+                for el in r.findall(f".//{_q(SCL_NS, 'DOType')}"):
+                    if (el.attrib.get("id") or "").strip() == do_type_id:
+                        found = el
+                        break
+                if found is None:
+                    continue
+
+                try:
+                    da_names.extend(expand_do_el(found, "", {do_type_id}))
+                except Exception:
+                    pass
+                break
+            except Exception:
+                continue
+
+        # Stable unique sort.
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for n in da_names:
+            if n in seen:
+                continue
+            seen.add(n)
+            uniq.append(n)
+        uniq.sort(key=lambda s: (s or "").lower())
+        return uniq
+
+    def _hmi_dotype_cdc(self, do_type_id: str) -> str:
+        do_type_id = (do_type_id or "").strip()
+        if not do_type_id:
+            return ""
+
+        cache = getattr(self, "_hmi_dotype_cdc_cache", None)
+        if cache is None:
+            cache = {}
+            setattr(self, "_hmi_dotype_cdc_cache", cache)
+        if do_type_id in cache:
+            try:
+                return str(cache.get(do_type_id) or "")
+            except Exception:
+                return ""
+
+        root = None
+        try:
+            root = getattr(self, "iec61850_dir", None)
+        except Exception:
+            root = None
+        if root is None:
+            cache[do_type_id] = ""
+            return ""
+
+        do_dir = Path(root) / "DOType"
+        if not do_dir.exists():
+            cache[do_type_id] = ""
+            return ""
+
+        candidates: list[Path] = []
+        try:
+            direct = do_dir / f"{do_type_id}.xml"
+            if direct.is_file():
+                candidates.append(direct)
+        except Exception:
+            pass
+        try:
+            if not candidates:
+                for p in do_dir.rglob(f"{do_type_id}.xml"):
+                    if p.is_file():
+                        candidates.append(p)
+                        break
+        except Exception:
+            pass
+        if not candidates:
+            try:
+                candidates = list(do_dir.rglob("*.xml"))
+            except Exception:
+                candidates = []
+
+        cdc = ""
+        for p in candidates:
+            try:
+                rr = ET.parse(p).getroot()
+            except Exception:
+                continue
+            try:
+                for el in rr.findall(f".//{_q(SCL_NS, 'DOType')}"):
+                    if (el.attrib.get("id") or "").strip() != do_type_id:
+                        continue
+                    cdc = (el.attrib.get("cdc") or "").strip()
+                    break
+            except Exception:
+                pass
+            if cdc:
+                break
+
+        cache[do_type_id] = cdc
+        return cdc
+
+    def _hmi_cdc_st_da_paths(self, do_type_id: str, *, cdc: str) -> list[str]:
+        """Return DA/SDO paths (no leading dot) for a CDC where DA fc=ST.
+
+        Excludes q/t (quality/timestamp). Used for auto-populating HMIDataItem rows
+        during HMI Refresh.
+        """
+
+        do_type_id = (do_type_id or "").strip()
+        cdc = (cdc or "").strip().upper()
+        if not do_type_id or not cdc:
+            return []
+
+        cache = getattr(self, "_hmi_cdc_st_da_cache", None)
+        if cache is None:
+            cache = {}
+            setattr(self, "_hmi_cdc_st_da_cache", cache)
+        cache_key = (do_type_id, cdc)
+        if cache_key in cache:
+            try:
+                return list(cache.get(cache_key) or [])
+            except Exception:
+                return []
+
+        root0 = None
+        try:
+            root0 = getattr(self, "iec61850_dir", None)
+        except Exception:
+            root0 = None
+        if root0 is None:
+            cache[do_type_id] = []
+            return []
+
+        do_dir = Path(root0) / "DOType"
+        da_dir = Path(root0) / "DAType"
+        if not do_dir.exists():
+            cache[do_type_id] = []
+            return []
+
+        def local(tag: str) -> str:
+            return _local_name(tag) if isinstance(tag, str) else ""
+
+        def _is_st_fc(v: str | None) -> bool:
+            return (v or "").strip().upper() == "ST"
+
+        def _is_excluded_path(path0: str) -> bool:
+            last = (path0.split(".")[-1] if path0 else "").strip().lower()
+            return last in {"q", "t"}
+
+        def find_da_type_el(da_type_id: str) -> ET.Element | None:
+            da_type_id = (da_type_id or "").strip()
+            if not da_type_id:
+                return None
+
+            cache_dt = getattr(self, "_hmi_da_type_el_cache", None)
+            if cache_dt is None:
+                cache_dt = {}
+                setattr(self, "_hmi_da_type_el_cache", cache_dt)
+            if da_type_id in cache_dt:
+                return cache_dt.get(da_type_id)
+
+            if not da_dir.exists():
+                cache_dt[da_type_id] = None
+                return None
+
+            candidates0: list[Path] = []
+            try:
+                direct0 = da_dir / f"{da_type_id}.xml"
+                if direct0.is_file():
+                    candidates0.append(direct0)
+            except Exception:
+                pass
+            try:
+                if not candidates0:
+                    for p0 in da_dir.rglob(f"{da_type_id}.xml"):
+                        if p0.is_file():
+                            candidates0.append(p0)
+                            break
+            except Exception:
+                pass
+            if not candidates0:
+                try:
+                    candidates0 = list(da_dir.rglob("*.xml"))
+                except Exception:
+                    candidates0 = []
+
+            found0: ET.Element | None = None
+            for p0 in candidates0:
+                try:
+                    tr0 = ET.parse(p0)
+                    rr0 = tr0.getroot()
+                    for el0 in rr0.findall(f".//{_q(SCL_NS, 'DAType')}"):
+                        if (el0.attrib.get("id") or "").strip() == da_type_id:
+                            found0 = el0
+                            break
+                    if found0 is not None:
+                        break
+                except Exception:
+                    continue
+
+            cache_dt[da_type_id] = found0
+            return found0
+
+        def find_do_type_el(do_type_id0: str) -> ET.Element | None:
+            do_type_id0 = (do_type_id0 or "").strip()
+            if not do_type_id0:
+                return None
+
+            cache_do = getattr(self, "_hmi_do_type_el_cache", None)
+            if cache_do is None:
+                cache_do = {}
+                setattr(self, "_hmi_do_type_el_cache", cache_do)
+            if do_type_id0 in cache_do:
+                return cache_do.get(do_type_id0)
+
+            candidates0: list[Path] = []
+            try:
+                direct0 = do_dir / f"{do_type_id0}.xml"
+                if direct0.is_file():
+                    candidates0.append(direct0)
+            except Exception:
+                pass
+            try:
+                if not candidates0:
+                    for p0 in do_dir.rglob(f"{do_type_id0}.xml"):
+                        if p0.is_file():
+                            candidates0.append(p0)
+                            break
+            except Exception:
+                pass
+            if not candidates0:
+                try:
+                    candidates0 = list(do_dir.rglob("*.xml"))
+                except Exception:
+                    candidates0 = []
+
+            found0: ET.Element | None = None
+            for p0 in candidates0:
+                try:
+                    tr0 = ET.parse(p0)
+                    rr0 = tr0.getroot()
+                    for el0 in rr0.findall(f".//{_q(SCL_NS, 'DOType')}"):
+                        if (el0.attrib.get("id") or "").strip() == do_type_id0:
+                            found0 = el0
+                            break
+                    if found0 is not None:
+                        break
+                except Exception:
+                    continue
+
+            cache_do[do_type_id0] = found0
+            return found0
+
+        def expand_struct(type_id: str, prefix: str, stack: set[str]) -> list[str]:
+            type_id = (type_id or "").strip()
+            if not type_id:
+                return []
+            if type_id in stack:
+                return []
+            stack.add(type_id)
+            out0: list[str] = []
+            dt = find_da_type_el(type_id)
+            if dt is not None:
+                for ch0 in list(dt):
+                    if local(ch0.tag) != "BDA":
+                        continue
+                    nm0 = (ch0.attrib.get("name") or "").strip()
+                    if not nm0:
+                        continue
+                    path0 = f"{prefix}{nm0}" if prefix else nm0
+                    if not _is_excluded_path(path0):
+                        out0.append(path0)
+                    btype0 = (ch0.attrib.get("bType") or "").strip()
+                    t0 = (ch0.attrib.get("type") or "").strip()
+                    if (btype0 or "").lower() == "struct" and t0:
+                        out0.extend(expand_struct(t0, path0 + ".", stack))
+            stack.remove(type_id)
+            return out0
+
+        def expand_do_el(do_el: ET.Element, prefix: str, do_stack: set[str]) -> list[str]:
+            out1: list[str] = []
+            for ch1 in list(do_el):
+                loc1 = local(ch1.tag)
+                if loc1 == "DA":
+                    nm1 = (ch1.attrib.get("name") or "").strip()
+                    if not nm1:
+                        continue
+                    if not _is_st_fc(ch1.attrib.get("fc")):
+                        continue
+                    path1 = f"{prefix}{nm1}" if prefix else nm1
+                    if _is_excluded_path(path1):
+                        continue
+                    out1.append(path1)
+                    btype1 = (ch1.attrib.get("bType") or "").strip()
+                    t1 = (ch1.attrib.get("type") or "").strip()
+                    if (btype1 or "").lower() == "struct" and t1:
+                        out1.extend(expand_struct(t1, path1 + ".", set()))
+                elif loc1 == "SDO":
+                    nm1 = (ch1.attrib.get("name") or "").strip()
+                    t1 = (ch1.attrib.get("type") or "").strip()
+                    if not (nm1 and t1):
+                        continue
+                    if t1 in do_stack:
+                        continue
+                    do_stack.add(t1)
+                    sub_el = find_do_type_el(t1)
+                    if sub_el is not None:
+                        out1.extend(expand_do_el(sub_el, f"{prefix}{nm1}.", do_stack))
+                    do_stack.remove(t1)
+            return out1
+
+        do_el0 = find_do_type_el(do_type_id)
+        if do_el0 is None:
+            cache[cache_key] = []
+            return []
+
+        if (do_el0.attrib.get("cdc") or "").strip().upper() != cdc:
+            cache[cache_key] = []
+            return []
+
+        try:
+            paths = expand_do_el(do_el0, "", {do_type_id})
+        except Exception:
+            paths = []
+
+        # Stable unique sort.
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for n in paths:
+            if n in seen:
+                continue
+            seen.add(n)
+            uniq.append(n)
+        cache[cache_key] = uniq
+        return uniq
+
+    def _hmi_acd_st_da_paths(self, do_type_id: str) -> list[str]:
+        """Return DA/SDO paths (no leading dot) for ACD CDC with fc=ST.
+
+        Excludes q/t (quality/timestamp). Used for auto-populating HMIDataItem rows
+        when an ACD-type DO is added via HMI Refresh.
+        """
+
+        return self._hmi_cdc_st_da_paths(do_type_id, cdc="ACD")
+
+    def _hmi_act_st_da_paths(self, do_type_id: str) -> list[str]:
+        """Return DA/SDO paths (no leading dot) for ACT CDC with fc=ST.
+
+        Excludes q/t (quality/timestamp). Used for auto-populating HMIDataItem rows
+        when an ACT-type DO is added via HMI Refresh.
+        """
+
+        return self._hmi_cdc_st_da_paths(do_type_id, cdc="ACT")
+
+    def _hmi_find_do_type_el(self, do_type_id: str) -> ET.Element | None:
+        do_type_id = (do_type_id or "").strip()
+        if not do_type_id:
+            return None
+
+        cache_do = getattr(self, "_hmi_do_type_el_cache", None)
+        if cache_do is None:
+            cache_do = {}
+            setattr(self, "_hmi_do_type_el_cache", cache_do)
+        if do_type_id in cache_do:
+            return cache_do.get(do_type_id)
+
+        root0 = None
+        try:
+            root0 = getattr(self, "iec61850_dir", None)
+        except Exception:
+            root0 = None
+        if root0 is None:
+            cache_do[do_type_id] = None
+            return None
+
+        do_dir = Path(root0) / "DOType"
+        if not do_dir.exists():
+            cache_do[do_type_id] = None
+            return None
+
+        candidates0: list[Path] = []
+        try:
+            direct0 = do_dir / f"{do_type_id}.xml"
+            if direct0.is_file():
+                candidates0.append(direct0)
+        except Exception:
+            pass
+        try:
+            if not candidates0:
+                for p0 in do_dir.rglob(f"{do_type_id}.xml"):
+                    if p0.is_file():
+                        candidates0.append(p0)
+                        break
+        except Exception:
+            pass
+        if not candidates0:
+            try:
+                candidates0 = list(do_dir.rglob("*.xml"))
+            except Exception:
+                candidates0 = []
+
+        found0: ET.Element | None = None
+        for p0 in candidates0:
+            try:
+                tr0 = ET.parse(p0)
+                rr0 = tr0.getroot()
+                for el0 in rr0.findall(f".//{_q(SCL_NS, 'DOType')}"):
+                    if (el0.attrib.get("id") or "").strip() == do_type_id:
+                        found0 = el0
+                        break
+                if found0 is not None:
+                    break
+            except Exception:
+                continue
+
+        cache_do[do_type_id] = found0
+        return found0
+
+    def _hmi_measure_da_paths_for_do_type(self, do_type_id: str) -> list[str]:
+        """Return desired DA/SDO paths (no leading dot) for supported CDCs.
+
+        Rules (per user request):
+        - DEL/WYE/SEQ: add all CMV SDOs (including e.g. neut) + each's cVal/units
+        - CMV: cVal + units
+        - MV: mag + units
+        """
+
+        do_type_id0 = (do_type_id or "").strip()
+        if not do_type_id0:
+            return []
+
+        cdc0 = (self._hmi_dotype_cdc(do_type_id0) or "").strip().upper()
+
+        if cdc0 == "CMV":
+            return ["cVal", "units"]
+        if cdc0 == "MV":
+            return ["mag", "units"]
+
+        def _fallback_bases(cdc1: str) -> list[str]:
+            if cdc1 == "DEL":
+                return ["phsAB", "phsBC", "phsCA"]
+            if cdc1 == "WYE":
+                return ["phsA", "phsB", "phsC"]
+            if cdc1 == "SEQ":
+                return ["c1", "c2", "c3"]
+            return []
+
+        if cdc0 in {"DEL", "WYE", "SEQ"}:
+            out: list[str] = []
+            do_el0 = self._hmi_find_do_type_el(do_type_id0)
+            if do_el0 is not None:
+                try:
+                    for ch in list(do_el0):
+                        if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "SDO"):
+                            continue
+                        nm = (ch.attrib.get("name") or "").strip()
+                        t = (ch.attrib.get("type") or "").strip()
+                        if not (nm and t):
+                            continue
+                        if (self._hmi_dotype_cdc(t) or "").strip().upper() != "CMV":
+                            continue
+                        out.append(nm)
+                        out.append(f"{nm}.cVal")
+                        out.append(f"{nm}.units")
+                except Exception:
+                    out = []
+
+            if not out:
+                for b in _fallback_bases(cdc0):
+                    out.append(b)
+                    out.append(f"{b}.cVal")
+                    out.append(f"{b}.units")
+
+            # Stable unique keep order.
+            seen: set[str] = set()
+            uniq: list[str] = []
+            for p in out:
+                p0 = (p or "").strip()
+                if not p0 or p0 in seen:
+                    continue
+                seen.add(p0)
+                uniq.append(p0)
+            return uniq
+
+        return []
+
+    def _hmi_measure_da_entries_for_do_type(self, do_type_id: str) -> list[tuple[str, int]]:
+        """Return desired DA/SDO paths and their groupid for supported CDCs.
+
+        groupid rules (per user request):
+        - DEL/WYE/SEQ: each CMV SDO gets its own groupid (1..N). The SDO row itself
+          and its cVal/units rows share that same groupid.
+        - CMV/MV: all generated rows share groupid=1.
+        """
+
+        do_type_id0 = (do_type_id or "").strip()
+        if not do_type_id0:
+            return []
+        cdc0 = (self._hmi_dotype_cdc(do_type_id0) or "").strip().upper()
+
+        if cdc0 == "CMV":
+            return [("cVal", 1), ("units", 1)]
+        if cdc0 == "MV":
+            return [("mag", 1), ("units", 1)]
+
+        def _fallback_bases(cdc1: str) -> list[str]:
+            if cdc1 == "DEL":
+                return ["phsAB", "phsBC", "phsCA"]
+            if cdc1 == "WYE":
+                return ["phsA", "phsB", "phsC"]
+            if cdc1 == "SEQ":
+                return ["c1", "c2", "c3"]
+            return []
+
+        if cdc0 in {"DEL", "WYE", "SEQ"}:
+            bases: list[str] = []
+            do_el0 = self._hmi_find_do_type_el(do_type_id0)
+            if do_el0 is not None:
+                try:
+                    for ch in list(do_el0):
+                        if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "SDO"):
+                            continue
+                        nm = (ch.attrib.get("name") or "").strip()
+                        t = (ch.attrib.get("type") or "").strip()
+                        if not (nm and t):
+                            continue
+                        if (self._hmi_dotype_cdc(t) or "").strip().upper() != "CMV":
+                            continue
+                        bases.append(nm)
+                except Exception:
+                    bases = []
+
+            if not bases:
+                bases = _fallback_bases(cdc0)
+
+            out: list[tuple[str, int]] = []
+            gid = 1
+            for b in bases:
+                b0 = (b or "").strip()
+                if not b0:
+                    continue
+                out.append((b0, gid))
+                out.append((f"{b0}.cVal", gid))
+                out.append((f"{b0}.units", gid))
+                gid += 1
+
+            # Stable unique keep order: first occurrence wins groupid.
+            seen: set[str] = set()
+            uniq: list[tuple[str, int]] = []
+            for p, g in out:
+                p0 = (p or "").strip()
+                if not p0 or p0 in seen:
+                    continue
+                seen.add(p0)
+                uniq.append((p0, int(g)))
+            return uniq
+
+        return []
+
+    def _hmi_sync_dataitems_for_do(
+        self,
+        parent_it: ET.Element,
+        *,
+        full_do: str,
+        do_type_id: str,
+        prune_extra: bool = False,
+    ) -> bool:
+        """Sync required HMIDataItem children for the DO's CDC.
+
+        Adds missing items and (optionally) stage-removes extras. Returns True if
+        any add/remove happened.
+        """
+
+        do_type_id = (do_type_id or "").strip()
+        if not do_type_id:
+            return False
+        entries = self._hmi_measure_da_entries_for_do_type(do_type_id)
+        if not entries:
+            return False
+
+        def _norm_da_ref(v: str) -> str:
+            vv = (v or "").strip()
+            if vv.startswith("."):
+                vv = vv[1:]
+            return vv
+
+        expected_gid_by_path: dict[str, int] = {}
+        for p, gid in entries:
+            p0 = _norm_da_ref(p)
+            if not p0:
+                continue
+            expected_gid_by_path[p0] = int(gid)
+
+        expected: set[str] = set(expected_gid_by_path.keys())
+        expected.discard("")
+
+        existing_by_path: dict[str, ET.Element] = {}
+        try:
+            for ch in list(parent_it):
+                if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIDataItem"):
+                    continue
+                da0 = _norm_da_ref(ch.attrib.get("daRef") or "")
+                if da0:
+                    existing_by_path[da0] = ch
+        except Exception:
+            existing_by_path = {}
+
+        changed_any = False
+
+        if prune_extra and expected:
+            for da0, ch in list(existing_by_path.items()):
+                if da0 in expected:
+                    continue
+                if self._hmi_ui_is_added(ch):
+                    try:
+                        parent_it.remove(ch)
+                    except Exception:
+                        pass
+                else:
+                    self._hmi_ui_tag_set(ch, "removed")
+                changed_any = True
+                existing_by_path.pop(da0, None)
+
+        for p, gid in entries:
+            p0 = (p or "").strip()
+            if not p0:
+                continue
+            existing = existing_by_path.get(p0)
+            if existing is None:
+                di = ET.SubElement(parent_it, _q(HMI_CUST_NS, "HMIDataItem"))
+                di.attrib["name"] = (p0.rsplit(".", 1)[-1] or "").strip()
+                di.attrib["groupid"] = str(int(gid))
+                di.attrib["doRef"] = (full_do or "").strip()
+                di.attrib["daRef"] = f".{p0}"
+                self._hmi_ui_tag_set(di, "added")
+                changed_any = True
+                existing_by_path[p0] = di
+            else:
+                # Keep groupid in sync even when item already exists.
+                want = str(int(expected_gid_by_path.get(p0, int(gid))))
+                cur = (existing.attrib.get("groupid") or "").strip()
+                if cur != want:
+                    try:
+                        existing.attrib["groupid"] = want
+                        self._hmi_ui_tag_set(existing, "changed")
+                        changed_any = True
+                    except Exception:
+                        pass
+
+        return changed_any
+
+    def _refresh_hmi_menu_table(self, *, select_first: bool, open_selection_path: bool = True) -> None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+
+        # Preserve selection element identity so we can re-select and open only its path.
+        prev_sel_el: ET.Element | None = None
+        # Preserve open/closed state per element so refresh does not change the current display.
+        open_by_el: dict[ET.Element, bool] = {}
+        try:
+            sel0 = tv.selection()
+            if sel0:
+                node0 = self._hmi_tree_iid_to_node.get(sel0[0])
+                if node0 is not None:
+                    _k0, _p0, e0 = node0
+                    if isinstance(e0, ET.Element):
+                        prev_sel_el = e0
+        except Exception:
+            prev_sel_el = None
+
+        try:
+            for iid, node in (self._hmi_tree_iid_to_node or {}).items():
+                try:
+                    _k, _p, e = node
+                except Exception:
+                    continue
+                if not isinstance(e, ET.Element):
+                    continue
+                try:
+                    open_by_el[e] = bool(tv.item(iid, "open"))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         self._hmi_menu_iid_to_el.clear()
+        self._hmi_tree_iid_to_kind.clear()
+        self._hmi_tree_iid_to_node.clear()
+        self._hmi_tree_iid_to_ref_link.clear()
+        try:
+            self._hmi_end_cell_edit(commit=True)
+            self._hmi_end_combo_edit(commit=True)
+        except Exception:
+            pass
         try:
             for iid in tv.get_children(""):
                 tv.delete(iid)
@@ -9537,25 +12753,2621 @@ class MainWindow(tk.Tk):
         if root is None:
             return
 
-        for idx, menu in enumerate(self._hmi_all_menus()):
-            name = menu.attrib.get("name") or ""
-            desc = menu.attrib.get("desc") or ""
-            dt = menu.attrib.get("hmiMenuDataType") or ""
-            vt = menu.attrib.get("hmiMenuViewType") or ""
-            iid = f"m{idx}"
-            try:
-                tv.insert("", "end", iid=iid, values=(name, desc, dt, vt))
-            except Exception:
+        menus = self._hmi_all_menus()
+        menu_by_name: dict[str, ET.Element] = {}
+        menu_names: list[str] = []
+        for menu in menus:
+            name = (menu.attrib.get("name") or "").strip()
+            if not name:
                 continue
-            self._hmi_menu_iid_to_el[iid] = (root, menu)
+            menu_by_name[name] = menu
+            menu_names.append(name)
+
+        referenced_names: set[str] = set()
+        for menu in menu_by_name.values():
+            for ch in list(menu):
+                if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIMenuItem"):
+                    continue
+                ref = (ch.attrib.get("ref") or "").strip()
+                if ref:
+                    referenced_names.add(ref)
+
+        root_names = [n for n in menu_names if n not in referenced_names]
+        if not root_names:
+            root_names = menu_names
+
+        idx = 0
+        first_top: str | None = None
+
+        def _tags_for_state(*, removed: bool, added: bool, changed: bool) -> tuple[str, ...]:
+            if removed:
+                return ("removed",)
+            if added:
+                return ("added",)
+            if changed:
+                return ("changed",)
+            return ()
+
+        def _tags_for_el(el: ET.Element, *, inherited_removed: bool = False) -> tuple[str, ...]:
+            return _tags_for_state(
+                removed=inherited_removed or self._hmi_ui_is_removed(el),
+                added=(not inherited_removed) and self._hmi_ui_is_added(el),
+                changed=(not inherited_removed) and self._hmi_ui_is_changed(el),
+            )
+
+        def _tags_for_ref_node(menu_el: ET.Element, ref_link_el: ET.Element, *, inherited_removed: bool = False) -> tuple[str, ...]:
+            removed = inherited_removed or self._hmi_ui_is_removed(ref_link_el) or self._hmi_ui_is_removed(menu_el)
+            added = (not removed) and (self._hmi_ui_is_added(ref_link_el) or self._hmi_ui_is_added(menu_el))
+            changed = (not removed) and (self._hmi_ui_is_changed(ref_link_el) or self._hmi_ui_is_changed(menu_el))
+            return _tags_for_state(removed=removed, added=added, changed=changed)
+
+        def _instantiate_cell(menu_el: ET.Element) -> str:
+            v = (menu_el.attrib.get("instantiate") or "").strip().lower()
+            return "☑" if v == "false" else "☐"
+
+        def _menu_values(menu_el: ET.Element) -> dict[str, str]:
+            return {
+                "desc": menu_el.attrib.get("desc") or "",
+                "value": "",
+                "instantiate": _instantiate_cell(menu_el),
+                "langRef": menu_el.attrib.get("langRef") or "",
+                "hmiMenuDataType": menu_el.attrib.get("hmiMenuDataType") or "",
+                "hmiMenuViewType": menu_el.attrib.get("hmiMenuViewType") or "",
+                "hmiSubTreeType": menu_el.attrib.get("hmiSubTreeType") or "",
+                "doRef": "",
+                "daRef": "",
+                "hideunit": "",
+            }
+
+        def _hideunit_cell(item_el: ET.Element) -> str:
+            try:
+                opt = (item_el.attrib.get("attrOption") or "").strip()
+            except Exception:
+                opt = ""
+            if not opt:
+                return "☐"
+            parts = [p for p in re.split(r"[\s,;|]+", opt) if p]
+            return "☑" if any(p.strip().lower() == "hideunits" for p in parts) else "☐"
+
+        def _item_values(item_el: ET.Element) -> dict[str, str]:
+            return {
+                "desc": "",
+                "value": "",
+                "instantiate": "",
+                "langRef": "",
+                "hmiMenuDataType": "",
+                "hmiMenuViewType": "",
+                "hmiSubTreeType": "",
+                "doRef": item_el.attrib.get("doRef") or "",
+                "daRef": item_el.attrib.get("daRef") or "",
+                "hideunit": _hideunit_cell(item_el),
+            }
+
+        def _data_values(data_el: ET.Element) -> dict[str, str]:
+            return {
+                "desc": "",
+                "value": "",
+                "instantiate": "",
+                "langRef": "",
+                "hmiMenuDataType": "",
+                "hmiMenuViewType": "",
+                "hmiSubTreeType": "",
+                "doRef": "",
+                "daRef": data_el.attrib.get("daRef") or "",
+                "hideunit": "",
+            }
+
+        def _attr_values(attr_el: ET.Element) -> dict[str, str]:
+            # HMIAttr is displayed as a row under its parent menu.
+            v = (attr_el.attrib.get("value") or attr_el.attrib.get("val") or "").strip()
+            return {
+                "desc": "",
+                "value": v,
+                "instantiate": "",
+                "langRef": "",
+                "hmiMenuDataType": "",
+                "hmiMenuViewType": "",
+                "hmiSubTreeType": "",
+                "doRef": "",
+                "daRef": "",
+                "hideunit": "",
+            }
+
+        def _values_tuple(values_by_col: dict[str, str]) -> tuple[str, ...]:
+            # Treeview values must match the current column set (IED vs IET differ).
+            cols = list(tv["columns"])
+            return tuple(values_by_col.get(c, "") for c in cols)
+
+        def _insert_menu_node(parent_iid: str, menu_el: ET.Element, kind: str, *, tags: tuple[str, ...] = ()) -> str | None:
+            nonlocal idx, first_top
+            name = (menu_el.attrib.get("name") or "").strip()
+            iid = f"m{idx}"
+            idx += 1
+            try:
+                tv.insert(
+                    parent_iid,
+                    "end",
+                    iid=iid,
+                    text=name,
+                    values=_values_tuple(_menu_values(menu_el)),
+                    tags=tags,
+                    open=bool(open_by_el.get(menu_el, False)),
+                )
+            except Exception:
+                return None
+            if parent_iid == "" and first_top is None:
+                first_top = iid
+            self._hmi_menu_iid_to_el[iid] = (root, menu_el)
+            self._hmi_tree_iid_to_kind[iid] = kind
+            self._hmi_tree_iid_to_node[iid] = ("menu", root, menu_el)
+            return iid
+
+        def _insert_missing_ref(parent_iid: str, ref_name: str) -> None:
+            nonlocal idx
+            iid = f"m{idx}"
+            idx += 1
+            try:
+                tv.insert(parent_iid, "end", iid=iid, text=ref_name, values=_values_tuple({}))
+            except Exception:
+                return
+            self._hmi_tree_iid_to_kind[iid] = "missing_ref"
+            self._hmi_tree_iid_to_node[iid] = ("missing_ref", None, None)
+
+        def _insert_attr_node(parent_iid: str, parent_menu_el: ET.Element, attr_el: ET.Element, *, inherited_removed: bool) -> None:
+            nonlocal idx
+            name = (attr_el.attrib.get("name") or "").strip() or "HMIAttr"
+            iid = f"m{idx}"
+            idx += 1
+            try:
+                tv.insert(
+                    parent_iid,
+                    "end",
+                    iid=iid,
+                    text=name,
+                    values=_values_tuple(_attr_values(attr_el)),
+                    tags=_tags_for_el(attr_el, inherited_removed=inherited_removed),
+                )
+            except Exception:
+                return
+            self._hmi_tree_iid_to_kind[iid] = "attr"
+            self._hmi_tree_iid_to_node[iid] = ("attr", parent_menu_el, attr_el)
+
+        def _insert_item_node(
+            parent_iid: str,
+            parent_menu_el: ET.Element,
+            item_el: ET.Element,
+            *,
+            inherited_removed: bool,
+        ) -> None:
+            nonlocal idx
+            do_ref0 = (item_el.attrib.get("doRef") or "").strip()
+            if do_ref0:
+                name = self._hmi_do_name_from_doref(do_ref0)
+            else:
+                name = (item_el.attrib.get("name") or "").strip()
+            iid = f"m{idx}"
+            idx += 1
+            try:
+                tv.insert(
+                    parent_iid,
+                    "end",
+                    iid=iid,
+                    text=name,
+                    values=_values_tuple(_item_values(item_el)),
+                    tags=_tags_for_el(item_el, inherited_removed=inherited_removed),
+                    open=bool(open_by_el.get(item_el, False)),
+                )
+            except Exception:
+                return
+            self._hmi_tree_iid_to_kind[iid] = "item"
+            self._hmi_tree_iid_to_node[iid] = ("item", parent_menu_el, item_el)
+
+            # Level 4: DA rows under DO (HMIDataItem)
+            for ch in list(item_el):
+                if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIDataItem"):
+                    continue
+                da_ref0 = (ch.attrib.get("daRef") or "").strip()
+                if da_ref0.startswith("."):
+                    da_ref0 = da_ref0[1:]
+                if "." in da_ref0:
+                    da_ref0 = (da_ref0.rsplit(".", 1)[-1] or "").strip()
+                di_name = da_ref0 if da_ref0 else (ch.attrib.get("name") or "").strip()
+                di_iid = f"m{idx}"
+                idx += 1
+                try:
+                    tv.insert(
+                        iid,
+                        "end",
+                        iid=di_iid,
+                        text=di_name,
+                        values=_values_tuple(_data_values(ch)),
+                        tags=_tags_for_el(ch, inherited_removed=inherited_removed or self._hmi_ui_is_removed(item_el)),
+                    )
+                except Exception:
+                    continue
+                self._hmi_tree_iid_to_kind[di_iid] = "data"
+                self._hmi_tree_iid_to_node[di_iid] = ("data", item_el, ch)
+
+        def _populate_menu_children(
+            menu_iid: str,
+            menu_el: ET.Element,
+            *,
+            inherited_removed: bool,
+            path: tuple[str, ...],
+            depth: int,
+        ) -> None:
+            # Menu hierarchy depth is not fixed. Expand HMIMenuItem/@ref recursively
+            # based on the actual HMI file content.
+            if depth > 16:
+                return
+            menu_removed = inherited_removed or self._hmi_ui_is_removed(menu_el)
+            cur_name = (menu_el.attrib.get("name") or "").strip()
+            new_path = path + ((cur_name,) if cur_name else ())
+            for ch in list(menu_el):
+                if not isinstance(ch.tag, str):
+                    continue
+
+                local = _local_name(ch.tag)
+                if local == "HMIAttr":
+                    _insert_attr_node(menu_iid, menu_el, ch, inherited_removed=menu_removed)
+                    continue
+
+                if local != "HMIMenuItem":
+                    continue
+                ref = (ch.attrib.get("ref") or "").strip()
+                if ref:
+                    ref_menu = menu_by_name.get(ref)
+                    if ref_menu is None:
+                        _insert_missing_ref(menu_iid, ref)
+                        continue
+                    sub_iid = _insert_menu_node(
+                        menu_iid,
+                        ref_menu,
+                        kind="ref_menu",
+                        tags=_tags_for_ref_node(ref_menu, ch, inherited_removed=menu_removed),
+                    )
+                    if sub_iid:
+                        # Track the ref-link element (HMIMenuItem with ref=...) so we can delete/move/paste.
+                        try:
+                            self._hmi_tree_iid_to_ref_link[sub_iid] = (menu_el, ch)
+                        except Exception:
+                            pass
+                        # Prevent infinite recursion on cyclic refs.
+                        if ref not in new_path:
+                            _populate_menu_children(
+                                sub_iid,
+                                ref_menu,
+                                inherited_removed=menu_removed or self._hmi_ui_is_removed(ch),
+                                path=new_path,
+                                depth=depth + 1,
+                            )
+                    continue
+
+                # No ref => treat as DO config row
+                _insert_item_node(menu_iid, menu_el, ch, inherited_removed=menu_removed)
+
+        for top_name in root_names:
+            top_menu = menu_by_name.get(top_name)
+            if top_menu is None:
+                continue
+            top_iid = _insert_menu_node("", top_menu, kind="menu", tags=_tags_for_el(top_menu))
+            if top_iid:
+                _populate_menu_children(top_iid, top_menu, inherited_removed=False, path=(), depth=0)
 
         if select_first:
             try:
-                kids = tv.get_children("")
-                if kids:
-                    tv.selection_set(kids[0])
+                if first_top is not None:
+                    tv.selection_set(first_top)
             except Exception:
                 pass
+
+        # Restore selection; optionally open its path.
+        try:
+            if prev_sel_el is not None:
+                new_iid = self._hmi_find_iid_for_element(prev_sel_el)
+                if new_iid:
+                    tv.selection_set(new_iid)
+                    if open_selection_path:
+                        self._hmi_open_iid_path(new_iid, open_self=True)
+            else:
+                if select_first and first_top is not None:
+                    if open_selection_path:
+                        self._hmi_open_iid_path(first_top, open_self=True)
+        except Exception:
+            pass
+
+        try:
+            self._hmi_update_hmi_action_state()
+        except Exception:
+            pass
+
+        try:
+            self._hmi_update_fold_all_button()
+        except Exception:
+            pass
+
+    def _hmi_selected_tree_iid(self) -> str | None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return None
+        try:
+            sel = tv.selection()
+        except Exception:
+            sel = ()
+        if not sel:
+            return None
+        return sel[0]
+
+    def _hmi_selected_tree_kind(self) -> str:
+        iid = self._hmi_selected_tree_iid()
+        if not iid:
+            return ""
+        try:
+            return (self._hmi_tree_iid_to_kind.get(iid) or "").strip()
+        except Exception:
+            return ""
+
+    def _hmi_update_hmi_action_state(self) -> None:
+        """Update toolbar button enabled states based on current selection.
+
+        Rules:
+        - DA level (data) is leaf: only Delete is enabled.
+        - missing_ref rows: actions disabled.
+        """
+
+        def set_btn(btn: ttk.Button | None, enabled: bool) -> None:
+            if btn is None:
+                return
+            try:
+                btn.configure(state=("normal" if enabled else "disabled"))
+            except Exception:
+                pass
+
+        def can_move(delta: int) -> bool:
+            try:
+                return self._hmi_can_move_selected(delta)
+            except Exception:
+                return False
+
+        kind = self._hmi_selected_tree_kind()
+        is_leaf = kind == "data"
+        is_missing = kind == "missing_ref"
+        has_sel = bool(kind)
+
+        # Default: nothing selected -> allow adding a top menu only.
+        if not has_sel:
+            set_btn(self._hmi_btn_add, self._hmi_root is not None)
+            set_btn(self._hmi_btn_insert, False)
+            set_btn(self._hmi_btn_edit, False)
+            set_btn(self._hmi_btn_copy, False)
+            set_btn(self._hmi_btn_cut, False)
+            set_btn(self._hmi_btn_paste, self._hmi_root is not None and self._hmi_clipboard is not None)
+            set_btn(self._hmi_btn_delete, False)
+            set_btn(getattr(self, "_hmi_btn_up", None), False)
+            set_btn(getattr(self, "_hmi_btn_down", None), False)
+            return
+
+        if is_missing:
+            set_btn(self._hmi_btn_add, False)
+            set_btn(self._hmi_btn_insert, False)
+            set_btn(self._hmi_btn_edit, False)
+            set_btn(self._hmi_btn_copy, False)
+            set_btn(self._hmi_btn_cut, False)
+            set_btn(self._hmi_btn_paste, False)
+            set_btn(self._hmi_btn_delete, False)
+            set_btn(getattr(self, "_hmi_btn_up", None), False)
+            set_btn(getattr(self, "_hmi_btn_down", None), False)
+            return
+
+        if is_leaf:
+            set_btn(self._hmi_btn_add, False)
+            set_btn(self._hmi_btn_insert, False)
+            set_btn(self._hmi_btn_edit, False)
+            set_btn(self._hmi_btn_copy, False)
+            set_btn(self._hmi_btn_cut, False)
+            set_btn(self._hmi_btn_paste, False)
+            set_btn(self._hmi_btn_delete, True)
+            # Level 4 (DA rows): allow ordering.
+            set_btn(getattr(self, "_hmi_btn_up", None), can_move(-1))
+            set_btn(getattr(self, "_hmi_btn_down", None), can_move(1))
+            return
+
+        # Non-leaf nodes.
+        set_btn(self._hmi_btn_add, self._hmi_root is not None and kind in {"menu", "ref_menu", "item", "attr"})
+        set_btn(self._hmi_btn_insert, self._hmi_root is not None and kind in {"menu", "ref_menu", "item", "attr"})
+        set_btn(self._hmi_btn_edit, self._hmi_root is not None and kind in {"menu", "ref_menu", "item", "attr"})
+        set_btn(self._hmi_btn_copy, kind in {"menu", "ref_menu", "item", "attr"})
+        set_btn(self._hmi_btn_cut, kind in {"menu", "ref_menu", "item", "attr"})
+        # Paste is sibling-level: require clipboard kind matches selection kind (or no selection for top menu).
+        can_paste = False
+        if self._hmi_root is not None and self._hmi_clipboard is not None:
+            try:
+                ck, _cel = self._hmi_clipboard
+            except Exception:
+                ck = ""
+            can_paste = (ck == kind) or (ck == "attr" and kind in {"menu", "ref_menu"})
+        set_btn(self._hmi_btn_paste, can_paste)
+        set_btn(self._hmi_btn_delete, kind in {"menu", "ref_menu", "item", "attr"})
+
+        # Up/Down only for level 2-4.
+        if kind in {"ref_menu", "item", "attr"}:
+            set_btn(getattr(self, "_hmi_btn_up", None), can_move(-1))
+            set_btn(getattr(self, "_hmi_btn_down", None), can_move(1))
+        else:
+            set_btn(getattr(self, "_hmi_btn_up", None), False)
+            set_btn(getattr(self, "_hmi_btn_down", None), False)
+
+    def _hmi_build_tree_context_menu(self) -> tk.Menu:
+        m = tk.Menu(self, tearoff=0)
+        m.add_command(label="Add", command=self._hmi_action_add)
+        m.add_command(label="Insert", command=self._hmi_action_insert)
+        m.add_command(label="Edit", command=self._hmi_action_edit)
+        m.add_command(label="Select parent menu", command=self._hmi_action_select_parent_menu)
+        m.add_separator()
+        m.add_command(label="Copy", command=self._hmi_action_copy)
+        m.add_command(label="Cut", command=self._hmi_action_cut)
+        m.add_command(label="Paste", command=self._hmi_action_paste)
+        m.add_separator()
+        m.add_command(label="Delete", command=self._hmi_action_delete)
+        m.add_separator()
+        m.add_command(label="Up", command=self._hmi_action_move_up)
+        m.add_command(label="Down", command=self._hmi_action_move_down)
+        return m
+
+    def _hmi_configure_tree_context_menu(self, kind: str) -> None:
+        """Enable/disable context menu entries based on selection kind."""
+        if self._hmi_tree_ctx_menu is None:
+            return
+
+        def set_state(label: str, enabled: bool) -> None:
+            try:
+                self._hmi_tree_ctx_menu.entryconfigure(label, state=("normal" if enabled else "disabled"))
+            except Exception:
+                pass
+
+        if not kind:
+            for lb in (
+                "Add",
+                "Insert",
+                "Edit",
+                "Select parent menu",
+                "Copy",
+                "Cut",
+                "Paste",
+                "Delete",
+                "Up",
+                "Down",
+            ):
+                set_state(lb, False)
+            return
+
+        if kind == "missing_ref":
+            for lb in (
+                "Add",
+                "Insert",
+                "Edit",
+                "Select parent menu",
+                "Copy",
+                "Cut",
+                "Paste",
+                "Delete",
+                "Up",
+                "Down",
+            ):
+                set_state(lb, False)
+            return
+
+        if kind == "data":
+            for lb in ("Add", "Insert", "Edit", "Copy", "Cut", "Paste"):
+                set_state(lb, False)
+            set_state("Select parent menu", False)
+            set_state("Delete", True)
+            set_state("Up", self._hmi_can_move_selected(-1))
+            set_state("Down", self._hmi_can_move_selected(1))
+            return
+
+        if kind == "attr":
+            set_state("Add", self._hmi_root is not None)
+            set_state("Insert", self._hmi_root is not None)
+            set_state("Edit", self._hmi_root is not None)
+            set_state("Select parent menu", False)
+            set_state("Copy", True)
+            set_state("Cut", self._hmi_root is not None)
+            can_paste = False
+            if self._hmi_root is not None and self._hmi_clipboard is not None:
+                try:
+                    ck, _el = self._hmi_clipboard
+                except Exception:
+                    ck = ""
+                can_paste = ck == "attr"
+            set_state("Paste", can_paste)
+            set_state("Delete", self._hmi_root is not None)
+            set_state("Up", self._hmi_can_move_selected(-1))
+            set_state("Down", self._hmi_can_move_selected(1))
+            return
+
+        set_state("Add", self._hmi_root is not None and kind in {"menu", "ref_menu", "item"})
+        set_state("Insert", self._hmi_root is not None and kind in {"menu", "ref_menu", "item"})
+        set_state("Edit", self._hmi_root is not None and kind in {"menu", "ref_menu", "item"})
+        scope = (getattr(self, "_hmi_scope", "ied") or "ied").strip().lower()
+        set_state("Select parent menu", scope == "iet" and kind in {"menu", "ref_menu"})
+        set_state("Copy", kind in {"menu", "ref_menu", "item"})
+        set_state("Cut", kind in {"menu", "ref_menu", "item"})
+        can_paste = False
+        if self._hmi_root is not None and self._hmi_clipboard is not None:
+            try:
+                ck, _el = self._hmi_clipboard
+            except Exception:
+                ck = ""
+            can_paste = (ck == kind) or (ck == "attr" and kind in {"menu", "ref_menu"})
+        set_state("Paste", can_paste)
+        set_state("Delete", kind in {"menu", "ref_menu", "item"})
+
+        if kind in {"ref_menu", "item"}:
+            set_state("Up", self._hmi_can_move_selected(-1))
+            set_state("Down", self._hmi_can_move_selected(1))
+        else:
+            set_state("Up", False)
+            set_state("Down", False)
+
+    def _hmi_open_iid_path(self, iid: str, *, open_self: bool) -> None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+
+        # Open ancestors first.
+        cur = iid
+        parents: list[str] = []
+        while True:
+            try:
+                p = tv.parent(cur)
+            except Exception:
+                p = ""
+            if not p:
+                break
+            parents.append(p)
+            cur = p
+
+        for p in reversed(parents):
+            try:
+                tv.item(p, open=True)
+            except Exception:
+                pass
+
+        if open_self:
+            try:
+                tv.item(iid, open=True)
+            except Exception:
+                pass
+
+    def _hmi_fold_all(self) -> None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+
+        def walk(iid0: str) -> None:
+            try:
+                tv.item(iid0, open=False)
+            except Exception:
+                pass
+            try:
+                kids = tv.get_children(iid0)
+            except Exception:
+                kids = ()
+            for k in kids:
+                walk(k)
+
+        try:
+            roots = tv.get_children("")
+        except Exception:
+            roots = ()
+        for r in roots:
+            walk(r)
+
+        try:
+            self._hmi_update_fold_all_button()
+        except Exception:
+            pass
+
+    def _hmi_unfold_all(self) -> None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+
+        def walk(iid0: str) -> None:
+            try:
+                tv.item(iid0, open=True)
+            except Exception:
+                pass
+            try:
+                kids = tv.get_children(iid0)
+            except Exception:
+                kids = ()
+            for k in kids:
+                walk(k)
+
+        try:
+            roots = tv.get_children("")
+        except Exception:
+            roots = ()
+        for r in roots:
+            walk(r)
+
+        try:
+            self._hmi_update_fold_all_button()
+        except Exception:
+            pass
+
+    def _hmi_update_fold_all_button(self) -> None:
+        btn = self._hmi_btn_fold_all
+        tv = self._hmi_tv_menus
+        if btn is None or tv is None:
+            return
+
+        # Find all nodes that can be folded (i.e., have children).
+        foldable: list[str] = []
+
+        def walk(iid0: str) -> None:
+            try:
+                kids = tv.get_children(iid0)
+            except Exception:
+                kids = ()
+            if kids:
+                foldable.append(iid0)
+                for k in kids:
+                    walk(k)
+
+        try:
+            roots = tv.get_children("")
+        except Exception:
+            roots = ()
+        for r in roots:
+            walk(r)
+
+        if not foldable:
+            try:
+                btn.configure(text="Fold all", state="disabled")
+            except Exception:
+                pass
+            return
+
+        all_collapsed = True
+        for iid in foldable:
+            try:
+                if bool(tv.item(iid, "open")):
+                    all_collapsed = False
+                    break
+            except Exception:
+                pass
+
+        try:
+            btn.configure(text=("Unfold all" if all_collapsed else "Fold all"), state="normal")
+        except Exception:
+            pass
+
+    def _hmi_toggle_fold_all(self) -> None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+
+        # Decide based on current open state.
+        foldable: list[str] = []
+
+        def walk(iid0: str) -> None:
+            try:
+                kids = tv.get_children(iid0)
+            except Exception:
+                kids = ()
+            if kids:
+                foldable.append(iid0)
+                for k in kids:
+                    walk(k)
+
+        try:
+            roots = tv.get_children("")
+        except Exception:
+            roots = ()
+        for r in roots:
+            walk(r)
+
+        if not foldable:
+            self._hmi_update_fold_all_button()
+            return
+
+        all_collapsed = True
+        for iid in foldable:
+            try:
+                if bool(tv.item(iid, "open")):
+                    all_collapsed = False
+                    break
+            except Exception:
+                pass
+
+        if all_collapsed:
+            self._hmi_unfold_all()
+        else:
+            self._hmi_fold_all()
+
+    def _hmi_rename_menu_and_refs(self, menu_el: ET.Element, new_name: str) -> None:
+        """Rename a HMIMenu and update all HMIMenuItem/@ref that point to it."""
+        if self._hmi_root is None:
+            return
+        old = (menu_el.attrib.get("name") or "").strip()
+        new0 = (new_name or "").strip()
+        if not new0 or (old == new0):
+            if new0:
+                menu_el.attrib["name"] = new0
+            return
+
+        menu_el.attrib["name"] = new0
+        self._hmi_ui_tag_set(menu_el, "changed")
+
+        for m in (self._hmi_all_menus() or []):
+            for ch in list(m):
+                if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIMenuItem"):
+                    continue
+                if (ch.attrib.get("ref") or "").strip() == old:
+                    ch.attrib["ref"] = new0
+                    self._hmi_ui_tag_set(ch, "changed")
+
+    def _hmi_action_edit(self) -> None:
+        """Edit selected node via dialog (menu/ref_menu/item/attr)."""
+        if self._hmi_root is None:
+            return
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+
+        iid = self._hmi_selected_tree_iid()
+        kind = self._hmi_selected_tree_kind()
+        if not iid or kind not in {"menu", "ref_menu", "item", "attr"}:
+            return
+
+        node = self._hmi_tree_iid_to_node.get(iid)
+        if node is None:
+            return
+        node_type, parent_el, el = node
+        if el is None:
+            return
+
+        # Menus and ref_menus both point to an HMIMenu element.
+        if kind in {"menu", "ref_menu"} and node_type == "menu":
+            dlg = _HmiMenuEditDialog(
+                self,
+                title="Edit HMIMenu",
+                name=el.attrib.get("name") or "",
+                desc=el.attrib.get("desc") or "",
+                lang_ref=el.attrib.get("langRef") or "",
+                data_type=el.attrib.get("hmiMenuDataType") or "",
+                view_type=el.attrib.get("hmiMenuViewType") or "",
+                sub_tree_type=el.attrib.get("hmiSubTreeType") or "",
+                data_type_values=[""] + list(getattr(self, "_hmi_menu_data_type_values", []) or []),
+                view_type_values=[""] + list(getattr(self, "_hmi_menu_view_type_values", []) or []),
+            )
+            res = dlg.show()
+            if not res:
+                return
+
+            self._hmi_push_undo()
+
+            # Rename safely (update ref links).
+            try:
+                self._hmi_rename_menu_and_refs(el, (res.get("name") or "").strip())
+            except Exception:
+                pass
+
+            for k in ("desc", "langRef", "hmiMenuDataType", "hmiMenuViewType", "hmiSubTreeType"):
+                vv = (res.get(k) or "") if k == "desc" else (res.get(k) or "").strip()
+                if vv:
+                    el.attrib[k] = vv
+                else:
+                    el.attrib.pop(k, None)
+
+            self._hmi_ui_tag_set(el, "changed")
+
+            self._refresh_hmi_views(select_first_menu=False)
+            new_iid = self._hmi_find_iid_for_element(el)
+            if new_iid:
+                try:
+                    tv.selection_set(new_iid)
+                except Exception:
+                    pass
+                self._hmi_open_iid_path(new_iid, open_self=True)
+            self._mark_hmi_unsaved()
+            return
+
+        # DO item edit.
+        if kind == "item" and node_type == "item":
+            old_do_ref = (el.attrib.get("doRef") or "").strip()
+            dlg = _HmiMenuItemEditDialog(
+                self,
+                title="Edit HMIMenuItem",
+                name=el.attrib.get("name") or "",
+                ref=el.attrib.get("ref") or "",
+                do_ref=el.attrib.get("doRef") or "",
+                da_ref=el.attrib.get("daRef") or "",
+            )
+            res = dlg.show()
+            if not res:
+                return
+            self._hmi_push_undo()
+            ref = (res.get("ref") or "").strip()
+            for k in ("ref", "name", "doRef", "daRef"):
+                el.attrib.pop(k, None)
+            if ref:
+                el.attrib["ref"] = ref
+            else:
+                nm = (res.get("name") or "").strip()
+                if nm:
+                    el.attrib["name"] = nm
+                do_ref = (res.get("doRef") or "").strip()
+                da_ref = (res.get("daRef") or "").strip()
+                if do_ref:
+                    el.attrib["doRef"] = do_ref
+                if da_ref:
+                    el.attrib["daRef"] = da_ref
+
+                # Keep child data items consistent with the DO.
+                if (do_ref or "") != (old_do_ref or ""):
+                    try:
+                        for ch in list(el):
+                            if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIDataItem"):
+                                continue
+                            if do_ref:
+                                ch.attrib["doRef"] = do_ref
+                            else:
+                                ch.attrib.pop("doRef", None)
+                            self._hmi_ui_tag_set(ch, "changed")
+                    except Exception:
+                        pass
+
+            self._hmi_ui_tag_set(el, "changed")
+
+            self._refresh_hmi_views(select_first_menu=False)
+            new_iid = self._hmi_find_iid_for_element(el)
+            if new_iid:
+                try:
+                    tv.selection_set(new_iid)
+                except Exception:
+                    pass
+                self._hmi_open_iid_path(new_iid, open_self=True)
+            self._mark_hmi_unsaved()
+            return
+
+        # HMIAttr edit.
+        if kind == "attr" and node_type == "attr":
+            cur_name = (el.attrib.get("name") or "").strip()
+            cur_val = el.attrib.get("value") or el.attrib.get("val") or ""
+            val_values = None
+            if cur_name == "IET_HARDLINK_DEFINITION":
+                try:
+                    val_values = self._hmi_inref_dropdown_values(current=cur_val)
+                except Exception:
+                    val_values = None
+            dlg = _HmiAttrEditDialog(self, title="Edit HMIAttr", name=cur_name, value=cur_val, value_values=val_values)
+            res = dlg.show()
+            if not res:
+                return
+
+            self._hmi_push_undo()
+
+            new_name = (res.get("name") or "").strip()
+            new_val = res.get("value") or ""
+
+            if new_name:
+                el.attrib["name"] = new_name
+            else:
+                el.attrib.pop("name", None)
+
+            key = "val" if ("val" in el.attrib and "value" not in el.attrib) else "value"
+            if (new_val or "").strip():
+                el.attrib[key] = new_val
+            else:
+                el.attrib.pop("value", None)
+                el.attrib.pop("val", None)
+
+            self._hmi_ui_tag_set(el, "changed")
+            self._refresh_hmi_views(select_first_menu=False)
+            new_iid = self._hmi_find_iid_for_element(el)
+            if new_iid:
+                try:
+                    tv.selection_set(new_iid)
+                except Exception:
+                    pass
+                try:
+                    self._hmi_open_iid_path(new_iid, open_self=True)
+                except Exception:
+                    pass
+            self._mark_hmi_unsaved()
+            return
+
+    def _hmi_on_tree_right_click(self, event: tk.Event) -> None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+
+        try:
+            iid = tv.identify_row(int(event.y))
+        except Exception:
+            iid = ""
+        if not iid:
+            return
+
+        # Select row under cursor.
+        try:
+            tv.selection_set(iid)
+        except Exception:
+            pass
+
+        kind = (self._hmi_tree_iid_to_kind.get(iid) or "").strip()
+
+        if self._hmi_tree_ctx_menu is None:
+            self._hmi_tree_ctx_menu = self._hmi_build_tree_context_menu()
+
+        self._hmi_configure_tree_context_menu(kind)
+        try:
+            self._hmi_tree_ctx_menu.tk_popup(int(event.x_root), int(event.y_root))
+        finally:
+            try:
+                self._hmi_tree_ctx_menu.grab_release()
+            except Exception:
+                pass
+
+    def _hmi_action_select_parent_menu(self) -> None:
+        if self._hmi_root is None:
+            return
+        scope = (getattr(self, "_hmi_scope", "ied") or "ied").strip().lower()
+        if scope != "iet":
+            return
+
+        iid = self._hmi_selected_tree_iid()
+        kind = self._hmi_selected_tree_kind()
+        if not iid or kind not in {"menu", "ref_menu"}:
+            return
+
+        node = self._hmi_tree_iid_to_node.get(iid)
+        if node is None:
+            return
+        node_type, _parent_el, menu_el = node
+        if node_type != "menu" or menu_el is None:
+            return
+
+        menu_name = (menu_el.attrib.get("name") or "").strip()
+        if not menu_name:
+            return
+
+        menus = list(self._hmi_all_menus() or [])
+        by_name: dict[str, ET.Element] = {}
+        for m in menus:
+            nm = (m.attrib.get("name") or "").strip()
+            if nm:
+                by_name[nm] = m
+
+        links_to_menu: list[tuple[ET.Element, ET.Element]] = []
+        for pm in menus:
+            for ch in list(pm):
+                if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIMenuItem"):
+                    continue
+                if (ch.attrib.get("ref") or "").strip() == menu_name:
+                    links_to_menu.append((pm, ch))
+
+        cur_parent = ""
+        if kind == "ref_menu":
+            link0 = self._hmi_tree_iid_to_ref_link.get(iid)
+            if link0 is not None:
+                try:
+                    pm0, _ref0 = link0
+                    cur_parent = (pm0.attrib.get("name") or "").strip()
+                except Exception:
+                    cur_parent = ""
+        elif links_to_menu:
+            try:
+                cur_parent = (links_to_menu[0][0].attrib.get("name") or "").strip()
+            except Exception:
+                cur_parent = ""
+
+        parent_names = sorted([n for n in by_name.keys() if n != menu_name], key=str.lower)
+        dlg = _SelectParentMenuDialog(
+            self,
+            menu_name=menu_name,
+            parent_names=parent_names,
+            current_parent=cur_parent,
+        )
+        res = dlg.show()
+        if not res:
+            return
+        target_parent_name = (res.get("parent") or "").strip()
+
+        if target_parent_name:
+            target_menu = by_name.get(target_parent_name)
+            if target_menu is None:
+                messagebox.showerror("Invalid", "Selected parent menu not found.", parent=self)
+                return
+
+            descendant_names: set[str] = set()
+            visited: set[str] = set()
+
+            def walk_desc(m0: ET.Element) -> None:
+                nm0 = (m0.attrib.get("name") or "").strip()
+                if not nm0 or nm0 in visited:
+                    return
+                visited.add(nm0)
+                for ch in list(m0):
+                    if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIMenuItem"):
+                        continue
+                    rn = (ch.attrib.get("ref") or "").strip()
+                    if not rn:
+                        continue
+                    if rn not in descendant_names:
+                        descendant_names.add(rn)
+                    rm = by_name.get(rn)
+                    if rm is not None:
+                        walk_desc(rm)
+
+            walk_desc(menu_el)
+            if target_parent_name in descendant_names:
+                messagebox.showerror(
+                    "Invalid",
+                    "Selected parent would create a cyclic menu reference.",
+                    parent=self,
+                )
+                return
+
+        self._hmi_push_undo()
+
+        moved_link_el: ET.Element | None = None
+        for pm, link in links_to_menu:
+            if moved_link_el is None:
+                moved_link_el = link
+            try:
+                pm.remove(link)
+                self._hmi_ui_tag_set(pm, "changed")
+            except Exception:
+                pass
+
+        if target_parent_name:
+            target_menu = by_name.get(target_parent_name)
+            if target_menu is not None:
+                if moved_link_el is None:
+                    moved_link_el = ET.Element(_q(HMI_CUST_NS, "HMIMenuItem"))
+                    moved_link_el.attrib["ref"] = menu_name
+                    self._hmi_ui_tag_set(moved_link_el, "added")
+                else:
+                    moved_link_el.attrib["ref"] = menu_name
+                try:
+                    target_menu.append(moved_link_el)
+                    self._hmi_ui_tag_set(target_menu, "changed")
+                except Exception:
+                    pass
+
+        self._refresh_hmi_views(select_first_menu=False)
+        try:
+            new_iid = self._hmi_find_iid_for_element(menu_el)
+            if new_iid:
+                if self._hmi_tv_menus is not None:
+                    self._hmi_tv_menus.selection_set(new_iid)
+                self._hmi_open_iid_path(new_iid, open_self=True)
+        except Exception:
+            pass
+
+        self._mark_hmi_unsaved()
+
+    def _hmi_unique_name(self, existing: set[str], base: str) -> str:
+        base0 = (base or "").strip() or "New"
+        if base0 not in existing:
+            return base0
+        i = 2
+        while True:
+            cand = f"{base0}{i}"
+            if cand not in existing:
+                return cand
+            i += 1
+
+    def _hmi_existing_menu_names(self) -> set[str]:
+        out: set[str] = set()
+        for m in (self._hmi_all_menus() or []):
+            try:
+                nm = (m.attrib.get("name") or "").strip()
+            except Exception:
+                nm = ""
+            if nm:
+                out.add(nm)
+        return out
+
+    def _hmi_existing_item_names(self, menu_el: ET.Element) -> set[str]:
+        out: set[str] = set()
+        for ch in list(menu_el):
+            if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIMenuItem"):
+                continue
+            if (ch.attrib.get("ref") or "").strip():
+                continue
+            nm = (ch.attrib.get("name") or "").strip()
+            if nm:
+                out.add(nm)
+        return out
+
+    def _hmi_existing_data_names(self, item_el: ET.Element) -> set[str]:
+        out: set[str] = set()
+        for ch in list(item_el):
+            if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIDataItem"):
+                continue
+            nm = (ch.attrib.get("name") or "").strip()
+            if nm:
+                out.add(nm)
+        return out
+
+    def _hmi_find_iid_for_element(self, el: ET.Element) -> str | None:
+        for iid, node in (self._hmi_tree_iid_to_node or {}).items():
+            try:
+                _k, _p, e2 = node
+            except Exception:
+                continue
+            if e2 is el:
+                return iid
+        return None
+
+    def _hmi_action_add(self) -> None:
+        self._hmi_add_child(insert=False)
+
+    def _hmi_action_insert(self) -> None:
+        self._hmi_add_child(insert=True)
+
+    def _hmi_add_child(self, *, insert: bool) -> None:
+        """Add a child node under the current selection.
+
+        - Select a menu -> add either a submenu (ref_menu) or a DO item (depending on menu type)
+        - Select a DO item -> add a DA (data) row
+        - DA rows: no-op
+        """
+
+        if self._hmi_root is None:
+            return
+
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+
+        iid = self._hmi_selected_tree_iid()
+        kind = self._hmi_selected_tree_kind()
+
+        # If nothing selected, Add creates a top-level menu.
+        if not iid or not kind:
+            self._hmi_push_undo()
+            existing = self._hmi_existing_menu_names()
+            nm = self._hmi_unique_name(existing, "Menu_")
+            menu = ET.SubElement(self._hmi_root, _q(HMI_CUST_NS, "HMIMenu"))
+            menu.attrib["name"] = nm
+            self._hmi_ui_tag_set(menu, "added")
+            self._refresh_hmi_views(select_first_menu=False)
+            new_iid = self._hmi_find_iid_for_element(menu)
+            if new_iid:
+                try:
+                    tv.selection_set(new_iid)
+                except Exception:
+                    pass
+                try:
+                    self._hmi_open_iid_path(new_iid, open_self=True)
+                except Exception:
+                    pass
+            self._mark_hmi_unsaved()
+            return
+
+        if kind in {"data", "missing_ref"}:
+            return
+
+        node = self._hmi_tree_iid_to_node.get(iid)
+        if node is None:
+            return
+
+        node_type, parent_el, el = node
+        if el is None:
+            return
+
+        new_el: ET.Element | None = None
+
+        # Menu -> add submenu (ref_menu) OR add DO item, depending on menu type.
+        if kind in {"menu", "ref_menu"} and node_type == "menu":
+            menu_el = el
+
+            def _menu_wants_ref_children(menu0: ET.Element) -> bool:
+                dt0 = (menu0.attrib.get("hmiMenuDataType") or "").strip()
+                vt0 = (menu0.attrib.get("hmiMenuViewType") or "").strip()
+                if dt0 == "HMI_MENU_DATA_TYPE_TAB" or vt0 == "HMI_MENU_VIEW_TYPE_TABS":
+                    return True
+                # If it already contains ref-links, treat it as a menu-of-menus.
+                for ch0 in list(menu0):
+                    if not (isinstance(ch0.tag, str) and _local_name(ch0.tag) == "HMIMenuItem"):
+                        continue
+                    if (ch0.attrib.get("ref") or "").strip():
+                        return True
+                return False
+
+            self._hmi_push_undo()
+            if _menu_wants_ref_children(menu_el):
+                parent_menu_el = menu_el
+                existing_menus = self._hmi_existing_menu_names()
+                parent_name = (parent_menu_el.attrib.get("name") or "").strip()
+                parent_dt = (parent_menu_el.attrib.get("hmiMenuDataType") or "").strip()
+
+                # Special case: IET SectionA -> create sequential SettingN.
+                is_iet_section_a = (
+                    parent_dt == "IET_MENU_DATA_TYPE_SECTION"
+                    and parent_name.lower().startswith("iet_protection_")
+                    and parent_name.lower().endswith("_sectiona")
+                )
+
+                if is_iet_section_a:
+                    # Determine next N from existing children refs: <SectionA>_Setting<N>
+                    max_n = 0
+                    try:
+                        rx = re.compile(re.escape(parent_name) + r"_Setting(\d+)$", re.IGNORECASE)
+                        for ch0 in list(parent_menu_el):
+                            if not (isinstance(ch0.tag, str) and _local_name(ch0.tag) == "HMIMenuItem"):
+                                continue
+                            ref0 = (ch0.attrib.get("ref") or "").strip()
+                            if not ref0:
+                                continue
+                            m0 = rx.match(ref0)
+                            if not m0:
+                                continue
+                            try:
+                                max_n = max(max_n, int(m0.group(1)))
+                            except Exception:
+                                continue
+                    except Exception:
+                        max_n = 0
+                    next_n = (max_n + 1) if max_n > 0 else 1
+
+                    # Ensure uniqueness even if name already exists.
+                    while True:
+                        cand = f"{parent_name}_Setting{next_n}"
+                        if cand not in existing_menus:
+                            new_menu_name = cand
+                            break
+                        next_n += 1
+
+                    new_menu = ET.Element(_q(HMI_CUST_NS, "HMIMenu"))
+                    new_menu.attrib["name"] = new_menu_name
+                    new_menu.attrib["hmiMenuDataType"] = "IET_MENU_DATA_TYPE_SETTING_PARAMETERS"
+                    new_menu.attrib["hmiMenuViewType"] = "IET_MENU_VIEW_TYPE_SETTING_SECTION"
+
+                    # Auto-fill attrs like Setting1, with order=N.
+                    for nm1 in ("order", "langRef", "label", "readonly", "IET_HARDLINK_DEFINITION"):
+                        a = ET.SubElement(new_menu, _q(HMI_CUST_NS, "HMIAttr"))
+                        a.attrib["name"] = nm1
+                        if nm1 == "order":
+                            a.attrib["value"] = str(next_n)
+                        elif nm1 == "langRef":
+                            a.attrib["value"] = "0.0"
+                        else:
+                            a.attrib["value"] = ""
+                        # Make new HMIAttr visually stand out as newly added.
+                        try:
+                            self._hmi_ui_tag_set(a, "added")
+                        except Exception:
+                            pass
+
+                    self._hmi_ui_tag_set(new_menu, "added")
+                    try:
+                        self._hmi_root.append(new_menu)
+                    except Exception:
+                        return
+
+                    link = ET.Element(_q(HMI_CUST_NS, "HMIMenuItem"))
+                    link.attrib["ref"] = new_menu_name
+                    self._hmi_ui_tag_set(link, "added")
+                    try:
+                        # Always append so parent order matches numbering.
+                        parent_menu_el.append(link)
+                    except Exception:
+                        return
+                    new_el = new_menu
+                else:
+                    new_menu_name = self._hmi_unique_name(existing_menus, f"{(parent_name or 'Menu_')}_")
+                    new_menu = ET.Element(_q(HMI_CUST_NS, "HMIMenu"))
+                    new_menu.attrib["name"] = new_menu_name
+                    self._hmi_ui_tag_set(new_menu, "added")
+                    try:
+                        self._hmi_root.append(new_menu)
+                    except Exception:
+                        return
+
+                    link = ET.Element(_q(HMI_CUST_NS, "HMIMenuItem"))
+                    link.attrib["ref"] = new_menu_name
+                    self._hmi_ui_tag_set(link, "added")
+                    try:
+                        if insert:
+                            parent_menu_el.insert(0, link)
+                        else:
+                            parent_menu_el.append(link)
+                    except Exception:
+                        return
+                    new_el = new_menu
+            else:
+                existing_items = self._hmi_existing_item_names(menu_el)
+                nm = self._hmi_unique_name(existing_items, "Item_")
+                it = ET.Element(_q(HMI_CUST_NS, "HMIMenuItem"))
+                it.attrib["name"] = nm
+                self._hmi_ui_tag_set(it, "added")
+                try:
+                    if insert:
+                        menu_el.insert(0, it)
+                    else:
+                        menu_el.append(it)
+                except Exception:
+                    return
+                new_el = it
+
+        # DO item -> add DA data row
+        elif kind == "item" and node_type == "item":
+            self._hmi_push_undo()
+            item_el = el
+            existing_data = self._hmi_existing_data_names(item_el)
+            nm = self._hmi_unique_name(existing_data, "DA_")
+            di = ET.Element(_q(HMI_CUST_NS, "HMIDataItem"))
+            di.attrib["name"] = nm
+            self._hmi_ui_tag_set(di, "added")
+            try:
+                do_ref = (item_el.attrib.get("doRef") or "").strip()
+            except Exception:
+                do_ref = ""
+            if do_ref:
+                di.attrib["doRef"] = do_ref
+            try:
+                if insert:
+                    item_el.insert(0, di)
+                else:
+                    item_el.append(di)
+            except Exception:
+                return
+            new_el = di
+
+        # HMIAttr -> add another attr as sibling under the parent menu
+        elif kind == "attr" and node_type == "attr":
+            if parent_el is None:
+                return
+            self._hmi_push_undo()
+            menu_el = parent_el
+            try:
+                existing = {
+                    (ch.attrib.get("name") or "").strip()
+                    for ch in list(menu_el)
+                    if isinstance(ch.tag, str)
+                    and _local_name(ch.tag) == "HMIAttr"
+                    and (ch.attrib.get("name") or "").strip()
+                }
+            except Exception:
+                existing = set()
+            nm = self._hmi_unique_name(existing, "Attr_")
+            at = ET.Element(_q(HMI_CUST_NS, "HMIAttr"))
+            at.attrib["name"] = nm
+            self._hmi_ui_tag_set(at, "added")
+
+            try:
+                kids = list(menu_el)
+                cur_idx = kids.index(el)
+            except Exception:
+                cur_idx = -1
+            try:
+                if cur_idx >= 0:
+                    if insert:
+                        menu_el.insert(cur_idx, at)
+                    else:
+                        menu_el.insert(cur_idx + 1, at)
+                else:
+                    menu_el.append(at)
+            except Exception:
+                return
+            new_el = at
+
+        else:
+            return
+
+        self._refresh_hmi_views(select_first_menu=False)
+        # Do NOT auto-select the newly-added node.
+        # Keep the previous selection so the user can repeatedly Add siblings.
+        self._mark_hmi_unsaved()
+
+    def _hmi_action_copy(self) -> None:
+        iid = self._hmi_selected_tree_iid()
+        if not iid:
+            return
+        kind = self._hmi_selected_tree_kind()
+        if kind not in {"menu", "ref_menu", "item", "data", "attr"}:
+            return
+        node = self._hmi_tree_iid_to_node.get(iid)
+        if node is None:
+            return
+        _t, _p, el = node
+        if el is None:
+            return
+        try:
+            self._hmi_clipboard = (kind, _deepcopy_et_element(el))
+        except Exception:
+            self._hmi_clipboard = None
+        self._hmi_update_hmi_action_state()
+
+    def _hmi_action_cut(self) -> None:
+        # Implement cut as copy + delete (no confirmation).
+        iid = self._hmi_selected_tree_iid()
+        if not iid:
+            return
+        kind = self._hmi_selected_tree_kind()
+        if kind not in {"menu", "ref_menu", "item", "attr"}:
+            return
+        self._hmi_action_copy()
+        self._hmi_delete_selected()
+
+    def _hmi_action_paste(self) -> None:
+        if self._hmi_root is None:
+            return
+        if self._hmi_clipboard is None:
+            return
+
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+
+        iid = self._hmi_selected_tree_iid()
+        kind = self._hmi_selected_tree_kind()
+        if not iid or not kind:
+            # No selection: only allow pasting a top menu.
+            try:
+                ck, cel = self._hmi_clipboard
+            except Exception:
+                return
+            if ck != "menu":
+                return
+            self._hmi_push_undo()
+            el_copy = _deepcopy_et_element(cel)
+            existing = self._hmi_existing_menu_names()
+            new_name = self._hmi_unique_name(existing, (el_copy.attrib.get("name") or "Menu_"))
+            el_copy.attrib["name"] = new_name
+            self._hmi_mark_added_recursive(el_copy)
+            self._hmi_root.append(el_copy)
+            self._refresh_hmi_views(select_first_menu=False)
+            new_iid = self._hmi_find_iid_for_element(el_copy)
+            if new_iid:
+                try:
+                    tv.selection_set(new_iid)
+                except Exception:
+                    pass
+                try:
+                    self._hmi_open_iid_path(new_iid, open_self=True)
+                except Exception:
+                    pass
+            self._mark_hmi_unsaved()
+            return
+
+        if kind in {"data", "missing_ref"}:
+            return
+
+        try:
+            ck, cel = self._hmi_clipboard
+        except Exception:
+            return
+        if ck != kind:
+            # Allow pasting HMIAttr into a menu/ref_menu selection.
+            if not (ck == "attr" and kind in {"menu", "ref_menu"}):
+                return
+
+        # Paste as sibling AFTER current selection.
+        node = self._hmi_tree_iid_to_node.get(iid)
+        if node is None:
+            return
+        node_type, parent_el, el = node
+        if el is None:
+            return
+
+        pasted_el: ET.Element | None = None
+
+        if ck == "attr" and kind in {"menu", "ref_menu"} and node_type == "menu":
+            # Paste as a child under the selected menu.
+            menu_el = el
+            self._hmi_push_undo()
+            at_copy = _deepcopy_et_element(cel)
+            try:
+                existing = {
+                    (ch.attrib.get("name") or "").strip()
+                    for ch in list(menu_el)
+                    if isinstance(ch.tag, str)
+                    and _local_name(ch.tag) == "HMIAttr"
+                    and (ch.attrib.get("name") or "").strip()
+                }
+            except Exception:
+                existing = set()
+            new_nm = self._hmi_unique_name(existing, (at_copy.attrib.get("name") or "Attr_"))
+            at_copy.attrib["name"] = new_nm
+            self._hmi_mark_added_recursive(at_copy)
+            try:
+                menu_el.append(at_copy)
+            except Exception:
+                return
+            pasted_el = at_copy
+
+        elif kind == "attr" and node_type == "attr":
+            if parent_el is None:
+                return
+            menu_el = parent_el
+            self._hmi_push_undo()
+            at_copy = _deepcopy_et_element(cel)
+            try:
+                existing = {
+                    (ch.attrib.get("name") or "").strip()
+                    for ch in list(menu_el)
+                    if isinstance(ch.tag, str)
+                    and _local_name(ch.tag) == "HMIAttr"
+                    and (ch.attrib.get("name") or "").strip()
+                }
+            except Exception:
+                existing = set()
+            new_nm = self._hmi_unique_name(existing, (at_copy.attrib.get("name") or "Attr_"))
+            at_copy.attrib["name"] = new_nm
+            self._hmi_mark_added_recursive(at_copy)
+            try:
+                kids = list(menu_el)
+                full_idx = kids.index(el)
+            except Exception:
+                full_idx = -1
+            try:
+                if full_idx >= 0:
+                    menu_el.insert(full_idx + 1, at_copy)
+                else:
+                    menu_el.append(at_copy)
+            except Exception:
+                return
+            pasted_el = at_copy
+
+        elif kind == "menu" and node_type == "menu":
+            self._hmi_push_undo()
+            el_copy = _deepcopy_et_element(cel)
+            existing = self._hmi_existing_menu_names()
+            new_name = self._hmi_unique_name(existing, (el_copy.attrib.get("name") or "Menu_"))
+            el_copy.attrib["name"] = new_name
+            self._hmi_mark_added_recursive(el_copy)
+            self._hmi_root.append(el_copy)
+            pasted_el = el_copy
+
+        elif kind == "ref_menu" and node_type == "menu":
+            # Need to clone submenu menu definition + add a new ref-link in the parent menu.
+            link = self._hmi_tree_iid_to_ref_link.get(iid)
+            if link is None:
+                return
+            parent_menu_el, ref_link_el = link
+
+            self._hmi_push_undo()
+            menu_copy = _deepcopy_et_element(cel)
+            existing = self._hmi_existing_menu_names()
+            new_menu_name = self._hmi_unique_name(existing, (menu_copy.attrib.get("name") or "Menu_"))
+            menu_copy.attrib["name"] = new_menu_name
+            self._hmi_mark_added_recursive(menu_copy)
+            self._hmi_root.append(menu_copy)
+
+            new_ref = ET.Element(_q(HMI_CUST_NS, "HMIMenuItem"))
+            new_ref.attrib["ref"] = new_menu_name
+            self._hmi_ui_tag_set(new_ref, "added")
+            try:
+                kids = list(parent_menu_el)
+                idx = kids.index(ref_link_el)
+            except Exception:
+                idx = -1
+            try:
+                if idx >= 0:
+                    parent_menu_el.insert(idx + 1, new_ref)
+                else:
+                    parent_menu_el.append(new_ref)
+            except Exception:
+                return
+            pasted_el = menu_copy
+
+        elif kind == "item" and node_type == "item":
+            if parent_el is None:
+                return
+            menu_el = parent_el
+            self._hmi_push_undo()
+            it_copy = _deepcopy_et_element(cel)
+            # Ensure unique item name.
+            existing = self._hmi_existing_item_names(menu_el)
+            new_nm = self._hmi_unique_name(existing, (it_copy.attrib.get("name") or "Item_"))
+            it_copy.attrib["name"] = new_nm
+            self._hmi_mark_added_recursive(it_copy)
+            try:
+                kids = [k for k in list(menu_el) if isinstance(k.tag, str) and _local_name(k.tag) == "HMIMenuItem"]
+                idx = kids.index(el)
+            except Exception:
+                idx = -1
+            try:
+                if idx >= 0:
+                    # Insert relative to full child list index.
+                    full_kids = list(menu_el)
+                    try:
+                        full_idx = full_kids.index(el)
+                    except Exception:
+                        full_idx = len(full_kids) - 1
+                    menu_el.insert(full_idx + 1, it_copy)
+                else:
+                    menu_el.append(it_copy)
+            except Exception:
+                return
+            pasted_el = it_copy
+
+        else:
+            return
+
+        self._refresh_hmi_views(select_first_menu=False)
+        if pasted_el is not None:
+            new_iid = self._hmi_find_iid_for_element(pasted_el)
+            if new_iid:
+                try:
+                    tv.selection_set(new_iid)
+                except Exception:
+                    pass
+                try:
+                    self._hmi_open_iid_path(new_iid, open_self=True)
+                except Exception:
+                    pass
+        self._mark_hmi_unsaved()
+
+    def _hmi_action_delete(self) -> None:
+        self._hmi_delete_selected()
+
+    def _hmi_action_move_up(self) -> None:
+        self._hmi_move_selected(-1)
+
+    def _hmi_action_move_down(self) -> None:
+        self._hmi_move_selected(1)
+
+    def _hmi_find_iid_for_ref_link(self, parent_menu_el: ET.Element, ref_link_el: ET.Element) -> str | None:
+        for iid, link in (self._hmi_tree_iid_to_ref_link or {}).items():
+            try:
+                p, el = link
+            except Exception:
+                continue
+            if p is parent_menu_el and el is ref_link_el:
+                return iid
+        return None
+
+    def _hmi_can_move_selected(self, delta: int) -> bool:
+        if self._hmi_root is None:
+            return False
+        iid = self._hmi_selected_tree_iid()
+        kind = self._hmi_selected_tree_kind()
+        if not iid:
+            return False
+        if kind not in {"ref_menu", "item", "data", "attr"}:
+            return False
+
+        node = self._hmi_tree_iid_to_node.get(iid)
+        if node is None:
+            return False
+        node_type, parent_el, el = node
+        if el is None:
+            return False
+
+        move_parent: ET.Element | None = None
+        move_el: ET.Element | None = None
+
+        if kind == "ref_menu" and node_type == "menu":
+            link = self._hmi_tree_iid_to_ref_link.get(iid)
+            if link is None:
+                return False
+            try:
+                move_parent, move_el = link
+            except Exception:
+                return False
+            if move_parent is None or move_el is None:
+                return False
+            eligible = [
+                ch
+                for ch in list(move_parent)
+                if isinstance(ch.tag, str) and _local_name(ch.tag) in {"HMIMenuItem", "HMIAttr"}
+            ]
+        elif kind == "item" and node_type == "item":
+            if parent_el is None:
+                return False
+            move_parent = parent_el
+            move_el = el
+            eligible = [
+                ch
+                for ch in list(move_parent)
+                if isinstance(ch.tag, str) and _local_name(ch.tag) in {"HMIMenuItem", "HMIAttr"}
+            ]
+        elif kind == "attr" and node_type == "attr":
+            if parent_el is None:
+                return False
+            move_parent = parent_el
+            move_el = el
+            eligible = [
+                ch
+                for ch in list(move_parent)
+                if isinstance(ch.tag, str) and _local_name(ch.tag) in {"HMIMenuItem", "HMIAttr"}
+            ]
+        elif kind == "data" and node_type == "data":
+            if parent_el is None:
+                return False
+            move_parent = parent_el
+            move_el = el
+            eligible = [
+                ch
+                for ch in list(move_parent)
+                if isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIDataItem"
+            ]
+        else:
+            return False
+
+        try:
+            idx = eligible.index(move_el)
+        except Exception:
+            return False
+
+        new_idx = idx + int(delta)
+        return 0 <= new_idx < len(eligible)
+
+    def _hmi_move_selected(self, delta: int) -> None:
+        if self._hmi_root is None:
+            return
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+
+        # Commit/close any inline editing first.
+        try:
+            self._hmi_end_cell_edit(commit=True)
+            self._hmi_end_combo_edit(commit=True)
+        except Exception:
+            pass
+
+        iid = self._hmi_selected_tree_iid()
+        kind = self._hmi_selected_tree_kind()
+        if not iid:
+            return
+        if kind not in {"ref_menu", "item", "data", "attr"}:
+            return
+        if not self._hmi_can_move_selected(delta):
+            return
+
+        node = self._hmi_tree_iid_to_node.get(iid)
+        if node is None:
+            return
+        node_type, parent_el, el = node
+        if el is None:
+            return
+
+        move_parent: ET.Element | None = None
+        move_el: ET.Element | None = None
+        select_iid = None
+
+        if kind == "ref_menu" and node_type == "menu":
+            link = self._hmi_tree_iid_to_ref_link.get(iid)
+            if link is None:
+                return
+            try:
+                move_parent, move_el = link
+            except Exception:
+                return
+            if move_parent is None or move_el is None:
+                return
+            eligible = [
+                ch
+                for ch in list(move_parent)
+                if isinstance(ch.tag, str) and _local_name(ch.tag) in {"HMIMenuItem", "HMIAttr"}
+            ]
+            select_iid = lambda: self._hmi_find_iid_for_ref_link(move_parent, move_el)
+        elif kind == "item" and node_type == "item":
+            if parent_el is None:
+                return
+            move_parent = parent_el
+            move_el = el
+            eligible = [
+                ch
+                for ch in list(move_parent)
+                if isinstance(ch.tag, str) and _local_name(ch.tag) in {"HMIMenuItem", "HMIAttr"}
+            ]
+            select_iid = lambda: self._hmi_find_iid_for_element(move_el)
+        elif kind == "attr" and node_type == "attr":
+            if parent_el is None:
+                return
+            move_parent = parent_el
+            move_el = el
+            eligible = [
+                ch
+                for ch in list(move_parent)
+                if isinstance(ch.tag, str) and _local_name(ch.tag) in {"HMIMenuItem", "HMIAttr"}
+            ]
+            select_iid = lambda: self._hmi_find_iid_for_element(move_el)
+        elif kind == "data" and node_type == "data":
+            if parent_el is None:
+                return
+            move_parent = parent_el
+            move_el = el
+            eligible = [
+                ch
+                for ch in list(move_parent)
+                if isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIDataItem"
+            ]
+            select_iid = lambda: self._hmi_find_iid_for_element(move_el)
+        else:
+            return
+
+        try:
+            cur_idx = eligible.index(move_el)
+        except Exception:
+            return
+        new_idx = cur_idx + int(delta)
+        if not (0 <= new_idx < len(eligible)):
+            return
+        target = eligible[new_idx]
+
+        self._hmi_push_undo()
+
+        try:
+            move_parent.remove(move_el)
+        except Exception:
+            return
+
+        try:
+            kids_now = list(move_parent)
+            tgt_idx = kids_now.index(target)
+        except Exception:
+            # Fallback: append.
+            try:
+                move_parent.append(move_el)
+            except Exception:
+                return
+        else:
+            try:
+                if delta < 0:
+                    move_parent.insert(tgt_idx, move_el)
+                else:
+                    move_parent.insert(tgt_idx + 1, move_el)
+            except Exception:
+                return
+
+        # Mark as changed so diff view highlights the moved row.
+        try:
+            self._hmi_ui_tag_set(move_el, "changed")
+            try:
+                self._hmi_ui_moved_el_ids.add(id(move_el))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        self._refresh_hmi_views(select_first_menu=False, open_selection_path=False)
+
+        try:
+            if select_iid is not None:
+                new_iid = select_iid()
+            else:
+                new_iid = None
+            if new_iid:
+                tv.selection_set(new_iid)
+        except Exception:
+            pass
+
+        self._mark_hmi_unsaved()
+
+    def _hmi_delete_selected(self) -> None:
+        if self._hmi_root is None:
+            return
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+
+        # Commit/close any inline editing first.
+        try:
+            self._hmi_end_cell_edit(commit=True)
+            self._hmi_end_combo_edit(commit=True)
+        except Exception:
+            pass
+
+        iid = self._hmi_selected_tree_iid()
+        if not iid:
+            return
+        kind = self._hmi_selected_tree_kind()
+        if kind not in {"menu", "ref_menu", "item", "data", "attr"}:
+            return
+
+        node = self._hmi_tree_iid_to_node.get(iid)
+        if node is None:
+            return
+        node_type, parent_el, el = node
+        if el is None:
+            return
+
+        self._hmi_push_undo()
+
+        # menu: stage-delete HMIMenu definition; also stage/delete ref links pointing at it.
+        if kind == "menu" and node_type == "menu":
+            try:
+                menu_name = (el.attrib.get("name") or "").strip()
+            except Exception:
+                menu_name = ""
+            if self._hmi_ui_is_added(el):
+                try:
+                    self._hmi_root.remove(el)
+                except Exception:
+                    return
+                if menu_name:
+                    for m in (self._hmi_all_menus() or []):
+                        for ch in list(m):
+                            if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIMenuItem"):
+                                continue
+                            if (ch.attrib.get("ref") or "").strip() == menu_name:
+                                try:
+                                    m.remove(ch)
+                                except Exception:
+                                    pass
+            else:
+                self._hmi_ui_tag_set(el, "removed")
+                if menu_name:
+                    for m in (self._hmi_all_menus() or []):
+                        for ch in list(m):
+                            if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIMenuItem"):
+                                continue
+                            if (ch.attrib.get("ref") or "").strip() == menu_name:
+                                if self._hmi_ui_is_added(ch):
+                                    try:
+                                        m.remove(ch)
+                                    except Exception:
+                                        pass
+                                else:
+                                    self._hmi_ui_tag_set(ch, "removed")
+
+        # ref_menu: stage-delete the ref link; if this makes the submenu unreferenced (in persisted form),
+        # stage-delete the submenu definition too.
+        elif kind == "ref_menu" and node_type == "menu":
+            link = self._hmi_tree_iid_to_ref_link.get(iid)
+            if link is None:
+                return
+            parent_menu_el, ref_link_el = link
+            try:
+                menu_name = (el.attrib.get("name") or "").strip()
+            except Exception:
+                menu_name = ""
+            if self._hmi_ui_is_added(ref_link_el):
+                try:
+                    parent_menu_el.remove(ref_link_el)
+                except Exception:
+                    return
+            else:
+                self._hmi_ui_tag_set(ref_link_el, "removed")
+
+            if menu_name:
+                still_ref = False
+                for m in (self._hmi_all_menus() or []):
+                    for ch in list(m):
+                        if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIMenuItem"):
+                            continue
+                        if (ch.attrib.get("ref") or "").strip() != menu_name:
+                            continue
+                        if self._hmi_ui_is_removed(ch):
+                            continue
+                        still_ref = True
+                        break
+                    if still_ref:
+                        break
+
+                if not still_ref:
+                    if self._hmi_ui_is_added(el):
+                        try:
+                            self._hmi_root.remove(el)
+                        except Exception:
+                            pass
+                    else:
+                        self._hmi_ui_tag_set(el, "removed")
+
+        # item: stage-delete HMIMenuItem from its parent menu.
+        elif kind == "item" and node_type == "item":
+            if parent_el is None:
+                return
+            if self._hmi_ui_is_added(el):
+                try:
+                    parent_el.remove(el)
+                except Exception:
+                    return
+            else:
+                self._hmi_ui_tag_set(el, "removed")
+
+        # data: stage-delete HMIDataItem from its parent HMIMenuItem.
+        elif kind == "data" and node_type == "data":
+            if parent_el is None:
+                return
+            if self._hmi_ui_is_added(el):
+                try:
+                    parent_el.remove(el)
+                except Exception:
+                    return
+            else:
+                self._hmi_ui_tag_set(el, "removed")
+
+        # attr: stage-delete HMIAttr from its parent menu.
+        elif kind == "attr" and node_type == "attr":
+            if parent_el is None:
+                return
+            if self._hmi_ui_is_added(el):
+                try:
+                    parent_el.remove(el)
+                except Exception:
+                    return
+            else:
+                self._hmi_ui_tag_set(el, "removed")
+
+        else:
+            return
+
+        # Refresh without forcing open-path changes (do not affect current display).
+        self._refresh_hmi_views(select_first_menu=False, open_selection_path=False)
+        self._mark_hmi_unsaved()
+
+    def _hmi_on_tree_double_click(self, event: tk.Event) -> str | None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return None
+
+        try:
+            region = tv.identify("region", event.x, event.y)
+            # Always stop Treeview's default double-click behavior (expand/collapse).
+            # We'll still allow editing when double-clicking a data cell
+            # or the tree label column (#0).
+            if region not in {"cell", "tree"}:
+                return "break"
+            iid = tv.identify_row(event.y)
+            if not iid:
+                return "break"
+            col = tv.identify_column(event.x)
+            if not col:
+                return "break"
+        except Exception:
+            return "break"
+
+        tv.selection_set(iid)
+        self._hmi_begin_cell_edit(iid, col)
+        return "break"
+
+    def _hmi_do_name_from_doref(self, do_ref: str) -> str:
+        """Extract DO name from a doRef value.
+
+        Examples:
+        - "Str" -> "Str"
+        - "ZNPDIS#.Str" -> "Str"
+        - "bay.LLN0.SettingControl" -> "SettingControl" (best-effort)
+        """
+        txt = (do_ref or "").strip()
+        if not txt:
+            return ""
+        if "." in txt:
+            txt = (txt.rsplit(".", 1)[-1] or "").strip()
+        if txt.lower().startswith("inref%"):
+            txt = txt[len("InRef%") :].strip()
+        return txt
+
+    def _hmi_on_edit_combobox_focus_out(self, event: tk.Event) -> None:
+        """Commit HMI combobox edit on focus-out.
+
+        Avoid committing while the combobox dropdown is open (Windows focus quirks).
+        """
+        try:
+            widget = event.widget
+        except Exception:
+            widget = None
+
+        if not isinstance(widget, ttk.Combobox):
+            self._hmi_end_combo_edit(commit=True)
+            return
+
+        cb = widget
+        try:
+            popdown = cb.tk.call("ttk::combobox::PopdownWindow", str(cb))
+            focus_w = str(cb.tk.call("focus") or "")
+            if popdown and focus_w and focus_w.startswith(str(popdown)):
+                return
+        except Exception:
+            pass
+
+        try:
+            if self._combobox_is_posted(cb):
+                return
+        except Exception:
+            pass
+
+        self._hmi_end_combo_edit(commit=True)
+
+    def _hmi_begin_cell_edit(self, iid: str, col: str) -> None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+
+        self._hmi_end_cell_edit(commit=True)
+        self._hmi_end_combo_edit(commit=True)
+
+        node = self._hmi_tree_iid_to_node.get(iid)
+        if node is None:
+            return
+        kind, parent_el, el = node
+        if kind not in {"menu", "item", "data", "attr"}:
+            return
+
+        # Resolve clicked display column (#n) to the actual Treeview column id.
+        col_id: str | None = None
+        if col != "#0":
+            try:
+                col_idx = int(col[1:]) - 1
+                cols = list(tv["columns"]) if hasattr(tv, "__getitem__") else []
+                if col_idx < 0 or col_idx >= len(cols):
+                    return
+                col_id = cols[col_idx]
+            except Exception:
+                return
+
+        # Map clicked column to model field.
+        field: str | None = None
+        scope = (getattr(self, "_hmi_scope", "ied") or "ied").strip().lower()
+        if kind == "menu":
+            if col == "#0":
+                field = "name"
+            elif col_id in {"desc", "langRef", "hmiMenuDataType", "hmiMenuViewType", "hmiSubTreeType"}:
+                field = col_id
+            else:
+                return
+        elif kind == "item":
+            # IET: allow editing DO-row name from tree column.
+            if col == "#0" and scope == "iet":
+                field = "name"
+            elif col_id in {"doRef", "daRef"}:
+                field = col_id
+            else:
+                return
+        elif kind == "attr":
+            if col == "#0":
+                field = "name"
+            elif col_id == "value":
+                field = "value"
+            else:
+                return
+        else:
+            # IET: allow editing DA-row name from tree column.
+            if col == "#0" and scope == "iet":
+                field = "name"
+            elif col_id == "daRef":
+                field = col_id
+            else:
+                return
+
+        # Compute bbox.
+        try:
+            bbox = tv.bbox(iid, column="#0" if col == "#0" else (col_id or ""))
+        except Exception:
+            return
+        if not bbox:
+            return
+        x, y, w, h = bbox
+
+        if el is None:
+            return
+        if kind == "attr" and field == "value":
+            cur_text = el.attrib.get("value") or el.attrib.get("val") or ""
+        else:
+            cur_text = el.attrib.get(field) or ""
+
+        # Menu type columns: use dropdown values collected across all HMI files.
+        if kind == "menu" and field in {"hmiMenuDataType", "hmiMenuViewType"}:
+            try:
+                opts = (
+                    self._hmi_menu_data_type_values
+                    if field == "hmiMenuDataType"
+                    else self._hmi_menu_view_type_values
+                )
+            except Exception:
+                opts = []
+            values: list[str] = [""]
+            if cur_text and cur_text not in values and cur_text not in (opts or []):
+                values.append(cur_text)
+            values.extend([v for v in (opts or []) if v not in values])
+
+            cb = ttk.Combobox(tv, state="readonly", values=values)
+            cb.place(x=x, y=y, width=w, height=h)
+            cb.set(cur_text)
+            cb.focus_set()
+            cb.bind("<Button-1>", lambda _e, _cb=cb: (self._combobox_toggle_posted(_cb), "break")[1])
+            try:
+                self.after(1, lambda _cb=cb: self._combobox_post(_cb))
+            except Exception:
+                try:
+                    self._combobox_post(cb)
+                except Exception:
+                    pass
+            cb.bind("<<ComboboxSelected>>", lambda _e: self._hmi_end_combo_edit(commit=True))
+            cb.bind("<Return>", lambda _e: self._hmi_end_combo_edit(commit=True))
+            cb.bind("<Escape>", lambda _e: self._hmi_end_combo_edit(commit=False))
+            cb.bind("<FocusOut>", self._hmi_on_edit_combobox_focus_out)
+            self._hmi_edit_cb = cb
+            self._hmi_edit_cb_iid = iid
+            self._hmi_edit_cb_col = field
+            return
+
+        # doRef: use dropdown suggestions.
+        if field == "doRef" and kind == "item":
+            values = self._hmi_doref_dropdown_values(current=cur_text)
+            cb = ttk.Combobox(tv, state="readonly", values=values)
+            cb.place(x=x, y=y, width=w, height=h)
+            cb.set(cur_text)
+            cb.focus_set()
+            cb.bind("<Button-1>", lambda _e, _cb=cb: (self._combobox_toggle_posted(_cb), "break")[1])
+            try:
+                self.after(1, lambda _cb=cb: self._combobox_post(_cb))
+            except Exception:
+                try:
+                    self._combobox_post(cb)
+                except Exception:
+                    pass
+            cb.bind("<<ComboboxSelected>>", lambda _e: self._hmi_end_combo_edit(commit=True))
+            cb.bind("<Return>", lambda _e: self._hmi_end_combo_edit(commit=True))
+            cb.bind("<Escape>", lambda _e: self._hmi_end_combo_edit(commit=False))
+            cb.bind("<FocusOut>", self._hmi_on_edit_combobox_focus_out)
+            self._hmi_edit_cb = cb
+            self._hmi_edit_cb_iid = iid
+            self._hmi_edit_cb_col = field
+            return
+
+        # daRef: use dropdown suggestions derived from DOType.
+        if field == "daRef" and kind in {"item", "data"}:
+            eff_do_ref = ""
+            try:
+                if kind == "item":
+                    eff_do_ref = (el.attrib.get("doRef") or "").strip()
+                else:
+                    if parent_el is not None:
+                        eff_do_ref = (parent_el.attrib.get("doRef") or "").strip()
+            except Exception:
+                eff_do_ref = ""
+
+            values = self._hmi_daref_dropdown_values(do_ref=eff_do_ref, current=cur_text)
+            cb = ttk.Combobox(tv, state="readonly", values=values)
+            cb.place(x=x, y=y, width=w, height=h)
+            cur_disp = (cur_text or "").strip()
+            if cur_disp and not cur_disp.startswith("."):
+                cur_disp = "." + cur_disp
+            cb.set(cur_disp)
+            cb.focus_set()
+            cb.bind("<Button-1>", lambda _e, _cb=cb: (self._combobox_toggle_posted(_cb), "break")[1])
+            try:
+                self.after(1, lambda _cb=cb: self._combobox_post(_cb))
+            except Exception:
+                try:
+                    self._combobox_post(cb)
+                except Exception:
+                    pass
+            cb.bind("<<ComboboxSelected>>", lambda _e: self._hmi_end_combo_edit(commit=True))
+            cb.bind("<Return>", lambda _e: self._hmi_end_combo_edit(commit=True))
+            cb.bind("<Escape>", lambda _e: self._hmi_end_combo_edit(commit=False))
+            cb.bind("<FocusOut>", self._hmi_on_edit_combobox_focus_out)
+            self._hmi_edit_cb = cb
+            self._hmi_edit_cb_iid = iid
+            self._hmi_edit_cb_col = field
+            return
+
+        # Special-case attribute value editor: IET_HARDLINK_DEFINITION is an InRef dropdown.
+        if kind == "attr" and field == "value":
+            try:
+                attr_name = (el.attrib.get("name") or "").strip()
+            except Exception:
+                attr_name = ""
+            if attr_name == "IET_HARDLINK_DEFINITION":
+                values = self._hmi_inref_dropdown_values(current=cur_text)
+                cb = ttk.Combobox(tv, state="readonly", values=values)
+                cb.place(x=x, y=y, width=w, height=h)
+                cb.set(cur_text)
+                cb.focus_set()
+                cb.bind("<Button-1>", lambda _e, _cb=cb: (self._combobox_toggle_posted(_cb), "break")[1])
+                try:
+                    self.after(1, lambda _cb=cb: self._combobox_post(_cb))
+                except Exception:
+                    try:
+                        self._combobox_post(cb)
+                    except Exception:
+                        pass
+                cb.bind("<<ComboboxSelected>>", lambda _e: self._hmi_end_combo_edit(commit=True))
+                cb.bind("<Return>", lambda _e: self._hmi_end_combo_edit(commit=True))
+                cb.bind("<Escape>", lambda _e: self._hmi_end_combo_edit(commit=False))
+                cb.bind("<FocusOut>", self._hmi_on_edit_combobox_focus_out)
+                self._hmi_edit_cb = cb
+                self._hmi_edit_cb_iid = iid
+                self._hmi_edit_cb_col = field
+                return
+
+        ent = ttk.Entry(tv)
+        ent.place(x=x, y=y, width=w, height=h)
+        ent.insert(0, cur_text)
+        ent.selection_range(0, "end")
+        ent.focus_set()
+
+        ent.bind("<Return>", lambda _e: self._hmi_end_cell_edit(commit=True))
+        ent.bind("<Escape>", lambda _e: self._hmi_end_cell_edit(commit=False))
+        ent.bind("<FocusOut>", lambda _e: self._hmi_end_cell_edit(commit=True))
+
+        self._hmi_edit_entry = ent
+        self._hmi_edit_iid = iid
+        self._hmi_edit_col = field
+
+    def _hmi_end_combo_edit(self, *, commit: bool) -> None:
+        if self._hmi_edit_cb is None or self._hmi_edit_cb_iid is None or self._hmi_edit_cb_col is None:
+            return
+
+        cb = self._hmi_edit_cb
+        iid = self._hmi_edit_cb_iid
+        field = self._hmi_edit_cb_col
+        self._hmi_edit_cb = None
+        self._hmi_edit_cb_iid = None
+        self._hmi_edit_cb_col = None
+
+        new_text = (cb.get() or "")
+        try:
+            cb.place_forget()
+        except Exception:
+            pass
+        try:
+            cb.destroy()
+        except Exception:
+            pass
+
+        if not commit:
+            return
+
+        node = self._hmi_tree_iid_to_node.get(iid)
+        if node is None:
+            return
+        kind, parent_el, el = node
+        if kind not in {"menu", "item", "data", "attr"} or el is None:
+            return
+
+        if kind == "menu" and field not in {"hmiMenuDataType", "hmiMenuViewType"}:
+            return
+
+        if kind == "attr" and field != "value":
+            return
+
+        if kind == "attr" and field == "value":
+            old = el.attrib.get("value") or el.attrib.get("val") or ""
+        else:
+            old = el.attrib.get(field) or ""
+
+        v = (new_text or "").strip()
+        if field == "doRef" and kind == "item":
+            # Auto-complete LN# prefix when user picked/typed bare DO name.
+            try:
+                ln_ref = (getattr(self, "_hmi_ln_ref", "") or "").strip()
+            except Exception:
+                ln_ref = ""
+            if ln_ref and v and ("." not in v):
+                v = f"{ln_ref}.{v}"
+            elif (not ln_ref) and v and ("." not in v):
+                try:
+                    ln_class = (getattr(self, "_hmi_ln_class", "") or "").strip()
+                except Exception:
+                    ln_class = ""
+                if ln_class:
+                    v = f"{ln_class}#.{v}"
+
+        if (old or "") == (v or ""):
+            return
+
+        self._hmi_push_undo()
+
+        if kind == "attr" and field == "value":
+            key = "val" if ("val" in el.attrib and "value" not in el.attrib) else "value"
+            if v:
+                el.attrib[key] = v
+            else:
+                el.attrib.pop("value", None)
+                el.attrib.pop("val", None)
+        else:
+            if v:
+                el.attrib[field] = v
+            else:
+                el.attrib.pop(field, None)
+
+        self._hmi_ui_tag_set(el, "changed")
+
+        # Enforce derived names.
+        if kind == "item" and field == "doRef":
+            try:
+                if v:
+                    el.attrib["name"] = self._hmi_do_name_from_doref(v)
+                else:
+                    el.attrib.pop("name", None)
+            except Exception:
+                pass
+            try:
+                if self._hmi_tv_menus is not None:
+                    self._hmi_tv_menus.item(iid, text=(el.attrib.get("name") or ""))
+            except Exception:
+                pass
+
+            # Sync DA list for supported measurement CDCs (DEL/WYE/SEQ/CMV/MV).
+            try:
+                do_name0 = self._hmi_do_name_from_doref(v)
+                do_type_id0 = (getattr(self, "_hmi_ln_do_types_by_name", {}) or {}).get(do_name0) or ""
+                if do_type_id0:
+                    if self._hmi_sync_dataitems_for_do(el, full_do=v, do_type_id=do_type_id0, prune_extra=False):
+                        if not self._hmi_ui_is_added(el):
+                            self._hmi_ui_tag_set(el, "changed")
+                        # Refresh view so newly added DA rows appear.
+                        try:
+                            self._refresh_hmi_menu_table(select_first=False)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        if kind == "data" and field == "daRef":
+            try:
+                if v:
+                    name0 = (v or "").strip()
+                    if name0.startswith("."):
+                        name0 = name0[1:]
+                    if "." in name0:
+                        name0 = (name0.rsplit(".", 1)[-1] or "").strip()
+                    el.attrib["name"] = name0
+                else:
+                    el.attrib.pop("name", None)
+            except Exception:
+                pass
+            try:
+                if self._hmi_tv_menus is not None:
+                    self._hmi_tv_menus.item(iid, text=(el.attrib.get("name") or ""))
+            except Exception:
+                pass
+
+        try:
+            if self._hmi_tv_menus is not None:
+                if self._hmi_ui_is_removed(el):
+                    self._hmi_tv_menus.item(iid, tags=("removed",))
+                elif self._hmi_ui_is_added(el):
+                    self._hmi_tv_menus.item(iid, tags=("added",))
+                elif self._hmi_ui_is_changed(el):
+                    self._hmi_tv_menus.item(iid, tags=("changed",))
+                else:
+                    self._hmi_tv_menus.item(iid, tags=())
+        except Exception:
+            pass
+
+        # Level-4 rows inherit the parent's DO; keep XML consistent.
+        if field == "doRef" and kind == "item":
+            try:
+                for ch in list(el):
+                    if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIDataItem"):
+                        continue
+                    if v:
+                        ch.attrib["doRef"] = v
+                    else:
+                        ch.attrib.pop("doRef", None)
+                    self._hmi_ui_tag_set(ch, "changed")
+            except Exception:
+                pass
+
+            # Update visible DA row coloring too.
+            try:
+                if self._hmi_tv_menus is not None:
+                    for di_iid in self._hmi_tv_menus.get_children(iid):
+                        try:
+                            self._hmi_tv_menus.item(di_iid, tags=("changed",))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        try:
+            if self._hmi_tv_menus is not None:
+                if kind == "menu" and field in {"hmiMenuDataType", "hmiMenuViewType"}:
+                    self._hmi_tv_menus.set(iid, field, el.attrib.get(field) or "")
+                if field in {"doRef", "daRef"}:
+                    self._hmi_tv_menus.set(iid, field, el.attrib.get(field) or "")
+                if kind == "attr" and field == "value":
+                    self._hmi_tv_menus.set(iid, "value", el.attrib.get("value") or el.attrib.get("val") or "")
+        except Exception:
+            pass
+
+        self._mark_hmi_unsaved()
+        try:
+            self._update_dirty_ui_hmi()
+        except Exception:
+            pass
+
+    def _hmi_end_cell_edit(self, *, commit: bool) -> None:
+        if self._hmi_edit_entry is None or self._hmi_edit_iid is None or self._hmi_edit_col is None:
+            return
+
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+
+        ent = self._hmi_edit_entry
+        iid = self._hmi_edit_iid
+        field = self._hmi_edit_col
+        self._hmi_edit_entry = None
+        self._hmi_edit_iid = None
+        self._hmi_edit_col = None
+
+        new_text = ent.get()
+        try:
+            ent.place_forget()
+        except Exception:
+            pass
+        try:
+            ent.destroy()
+        except Exception:
+            pass
+
+        if not commit:
+            return
+
+        node = self._hmi_tree_iid_to_node.get(iid)
+        if node is None:
+            return
+        kind, parent_el, el = node
+        if kind not in {"menu", "item", "data", "attr"} or el is None:
+            return
+
+        old = el.attrib.get(field) or ""
+        if (old or "") == (new_text or ""):
+            return
+
+        self._hmi_push_undo()
+
+        v = (new_text or "").strip() if field != "desc" else (new_text or "")
+        if kind == "attr" and field == "value":
+            key = "val" if ("val" in el.attrib and "value" not in el.attrib) else "value"
+            if v:
+                el.attrib[key] = v
+            else:
+                el.attrib.pop("value", None)
+                el.attrib.pop("val", None)
+        else:
+            if v:
+                el.attrib[field] = v
+            else:
+                el.attrib.pop(field, None)
+
+        self._hmi_ui_tag_set(el, "changed")
+
+        try:
+            if tv is not None:
+                if self._hmi_ui_is_removed(el):
+                    tv.item(iid, tags=("removed",))
+                elif self._hmi_ui_is_added(el):
+                    tv.item(iid, tags=("added",))
+                elif self._hmi_ui_is_changed(el):
+                    tv.item(iid, tags=("changed",))
+                else:
+                    tv.item(iid, tags=())
+        except Exception:
+            pass
+
+        # Update row display.
+        try:
+            if kind in {"item", "data"} and field == "name":
+                tv.item(iid, text=(el.attrib.get("name") or ""))
+            else:
+                if kind == "menu":
+                    if field in {"desc", "langRef", "hmiMenuDataType", "hmiMenuViewType", "hmiSubTreeType"}:
+                        tv.set(iid, field, el.attrib.get(field) or "")
+                elif kind == "attr":
+                    if field == "name":
+                        tv.item(iid, text=(el.attrib.get("name") or ""))
+                    elif field == "value":
+                        tv.set(iid, "value", el.attrib.get("value") or el.attrib.get("val") or "")
+                else:
+                    if field in {"doRef", "daRef"}:
+                        tv.set(iid, field, el.attrib.get(field) or "")
+        except Exception:
+            pass
+
+        self._mark_hmi_unsaved()
+        try:
+            self._update_dirty_ui_hmi()
+        except Exception:
+            pass
 
     def _refresh_hmi_item_table(self, *, select_first: bool) -> None:
         tv = self._hmi_tv_items
@@ -9585,9 +15397,13 @@ class MainWindow(tk.Tk):
                 da_ref = ""
             else:
                 kind = "item"
-                name = ch.attrib.get("name") or ""
                 do_ref = ch.attrib.get("doRef") or ""
                 da_ref = ch.attrib.get("daRef") or ""
+                do_ref0 = (do_ref or "").strip()
+                if do_ref0:
+                    name = self._hmi_do_name_from_doref(do_ref0)
+                else:
+                    name = (ch.attrib.get("name") or "").strip()
             iid = f"i{idx}"
             idx += 1
             try:
@@ -9624,7 +15440,12 @@ class MainWindow(tk.Tk):
         for ch in list(item):
             if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIDataItem"):
                 continue
-            name = ch.attrib.get("name") or ""
+            da_ref0 = (ch.attrib.get("daRef") or "").strip()
+            if da_ref0.startswith("."):
+                da_ref0 = da_ref0[1:]
+            if "." in da_ref0:
+                da_ref0 = (da_ref0.rsplit(".", 1)[-1] or "").strip()
+            name = da_ref0 if da_ref0 else (ch.attrib.get("name") or "")
             do_ref = ch.attrib.get("doRef") or ""
             da_ref = ch.attrib.get("daRef") or ""
             iid = f"d{idx}"
@@ -9644,17 +15465,27 @@ class MainWindow(tk.Tk):
                 pass
 
     def _hmi_on_menu_selected(self) -> None:
-        self._refresh_hmi_item_table(select_first=False)
-        self._refresh_hmi_data_table(select_first=False)
+        return
 
     def _hmi_on_item_selected(self) -> None:
-        self._refresh_hmi_data_table(select_first=False)
+        return
 
     def _hmi_menu_add(self) -> None:
         if self._hmi_root is None:
             messagebox.showerror("Missing", "No HMI loaded", parent=self)
             return
-        dlg = _HmiMenuEditDialog(self, title="Add HMIMenu", name="Menu_", desc="", data_type="", view_type="")
+        dlg = _HmiMenuEditDialog(
+            self,
+            title="Add HMIMenu",
+            name="Menu_",
+            desc="",
+            lang_ref="",
+            data_type="",
+            view_type="",
+            sub_tree_type="",
+            data_type_values=[""] + list(getattr(self, "_hmi_menu_data_type_values", []) or []),
+            view_type_values=[""] + list(getattr(self, "_hmi_menu_view_type_values", []) or []),
+        )
         res = dlg.show()
         if not res:
             return
@@ -9675,14 +15506,22 @@ class MainWindow(tk.Tk):
             title="Edit HMIMenu",
             name=menu.attrib.get("name") or "",
             desc=menu.attrib.get("desc") or "",
+            lang_ref=menu.attrib.get("langRef") or "",
             data_type=menu.attrib.get("hmiMenuDataType") or "",
             view_type=menu.attrib.get("hmiMenuViewType") or "",
+            sub_tree_type=menu.attrib.get("hmiSubTreeType") or "",
+            data_type_values=[""] + list(getattr(self, "_hmi_menu_data_type_values", []) or []),
+            view_type_values=[""] + list(getattr(self, "_hmi_menu_view_type_values", []) or []),
         )
         res = dlg.show()
         if not res:
             return
-        for k in ("name", "desc", "hmiMenuDataType", "hmiMenuViewType"):
-            v = (res.get(k) or "").strip() if k != "desc" else (res.get(k) or "")
+        try:
+            self._hmi_rename_menu_and_refs(menu, (res.get("name") or "").strip())
+        except Exception:
+            pass
+        for k in ("desc", "langRef", "hmiMenuDataType", "hmiMenuViewType", "hmiSubTreeType"):
+            v = (res.get(k) or "") if k == "desc" else (res.get(k) or "").strip()
             if v:
                 menu.attrib[k] = v
             else:
@@ -9859,8 +15698,19 @@ class MainWindow(tk.Tk):
             )
             return
 
+        app_root: ET.Element
         try:
-            app_root = ET.parse(app_path).getroot()
+            # Prefer in-memory application root when it matches this HMI.
+            if getattr(self, "_app_root", None) is not None and getattr(self, "_app_file_path", None) is not None:
+                try:
+                    if Path(self._app_file_path) == Path(app_path):
+                        app_root = self._app_root
+                    else:
+                        app_root = ET.parse(app_path).getroot()
+                except Exception:
+                    app_root = ET.parse(app_path).getroot()
+            else:
+                app_root = ET.parse(app_path).getroot()
         except Exception as e:
             messagebox.showerror("Read failed", f"Failed to parse application XML:\n\n{e}", parent=self)
             return
@@ -9878,93 +15728,832 @@ class MainWindow(tk.Tk):
             messagebox.showerror("Invalid", "funBlock has no LnRef", parent=self)
             return
 
-        outputs: list[tuple[str, str]] = []
+        # Keep both the raw LnRef from the application file and a normalized form
+        # used by some helper logic.
+        ln_ref_raw = ln_ref
+        try:
+            ln_ref_norm = self._hmi_normalize_lnref_for_doref(ln_ref_raw)
+        except Exception:
+            ln_ref_norm = ""
+
+        def _is_true(v: str | None) -> bool:
+            vv = (v or "").strip().lower()
+            return vv in {"true", "1", "yes", "y", "on"}
+
+        def _src_points_to_current_ln_do(src: str, *, ln_ref_raw0: str, ln_ref0: str) -> bool:
+            s = (src or "").strip()
+            if not s:
+                return False
+            # Common form for local settings in application files.
+            if s.startswith("."):
+                return True
+            # Some files may use fully-qualified LnRef prefix.
+            if ln_ref_raw0 and s.startswith(f"{ln_ref_raw0}."):
+                return True
+            if ln_ref0 and s.startswith(f"{ln_ref0}."):
+                return True
+            return False
+
+        outputs_raw: list[tuple[str, str]] = []
+        # (display_name, full_do_ref)
+        inputs_for_hmi: list[tuple[str, str]] = []
         settings: list[str] = []
+
+        def _extract_inref_purpose(do_ref_text: str) -> str:
+            txt = (do_ref_text or "").strip()
+            if not txt:
+                return ""
+            lo = txt.lower()
+            key = "inref%"
+            pos = lo.find(key)
+            if pos < 0:
+                return ""
+            return txt[pos + len(key) :].strip()
+
+        def _input_ln_sequence(src_text: str) -> tuple[str, ...]:
+            out: list[str] = []
+            for part in (src_text or "").split(";"):
+                p = part.strip()
+                if not p:
+                    continue
+                ln_name = (p.split("@", 1)[0] or "").strip()
+                if not ln_name:
+                    continue
+                out.append(ln_name)
+            return tuple(out)
+
+        seen_input_ln_seq: set[tuple[str, ...]] = set()
         for el in list(fun_block):
             if not isinstance(el.tag, str):
                 continue
             local = _local_name(el.tag)
-            if local == "output":
+            if local == "input":
+                src0 = (el.attrib.get("src") or "").strip()
+                if not src0:
+                    continue
+                ln_seq0 = _input_ln_sequence(src0)
+                if ln_seq0 in seen_input_ln_seq:
+                    continue
+                seen_input_ln_seq.add(ln_seq0)
+
+                name0 = (el.attrib.get("name") or "").strip()
+                do_ref_raw0 = (el.attrib.get("doRef") or "").strip()
+                purpose0 = _extract_inref_purpose(do_ref_raw0)
+                if not purpose0:
+                    purpose0 = name0
+                if not purpose0:
+                    continue
+
+                if ln_ref:
+                    do_ref0 = f"{ln_ref}.InRef%{purpose0}"
+                else:
+                    do_ref0 = f"InRef%{purpose0}"
+
+                display_name = name0 or purpose0
+                inputs_for_hmi.append((display_name, do_ref0))
+            elif local == "output":
                 name = (el.attrib.get("name") or "").strip()
                 do_ref = (el.attrib.get("doRef") or "").strip()
+                # Skip DOs marked for faultlog output; they should not be added to HMI.
+                if _is_true(el.attrib.get("faultlog")):
+                    continue
+                # Skip outputs without explicit doRef in the application file.
+                # (Do not fall back to LnRef + name.)
+                if not do_ref:
+                    continue
+                # Skip outputs that are marked as confpin output.
+                # Some files use @confpin/@conpin, others encode it via @outPurpose.
+                try:
+                    out_purpose = (el.attrib.get("outPurpose") or "").strip().lower()
+                except Exception:
+                    out_purpose = ""
+                if _is_true(el.attrib.get("confpin")) or _is_true(el.attrib.get("conpin")) or out_purpose == "confpin":
+                    continue
                 if name:
-                    outputs.append((name, do_ref))
+                    outputs_raw.append((name, do_ref))
             elif local == "setting":
                 name = (el.attrib.get("name") or "").strip()
+                # Skip settings generated by Confpin.
+                if (el.attrib.get("src") or "").strip().lower() == "confpin":
+                    continue
+                # Only include settings whose src points to the current LN DO.
+                # Example of external src (should be skipped): 'bay.CommonPDIS#.ChrAng'
+                src0 = (el.attrib.get("src") or "").strip()
+                if src0 and (not _src_points_to_current_ln_do(src0, ln_ref_raw0=ln_ref_raw, ln_ref0=ln_ref_norm)):
+                    continue
+                # If setting's referenced DO is empty or numeric, skip.
+                # Some application files may use src like '.' or '.1' which is not a valid DO name.
+                try:
+                    do_from_src = self._hmi_do_name_from_doref(src0)
+                except Exception:
+                    do_from_src = ""
+                if not do_from_src or do_from_src.isdigit():
+                    continue
                 if name:
                     settings.append(name)
 
+        # Ensure some important DOs are present if the corresponding LN has them,
+        # even if application file does not list them under <setting>.
+        # (Examples: SetMod, StartMod)
+        try:
+            inst_path = self._guess_ln_instance_path_from_lnref(ln_ref_raw) if ln_ref_raw else None
+        except Exception:
+            inst_path = None
+        try:
+            if inst_path is not None and inst_path.exists():
+                do_names = self._hmi_parse_ln_instance_do_names(inst_path)
+                have = {s.strip().lower() for s in (settings or []) if (s or "").strip()}
+                for target in ("setmod", "startmod"):
+                    nm0 = next((n for n in do_names if (n or "").strip().lower() == target), "")
+                    if not nm0:
+                        continue
+                    if nm0.strip().lower() not in have:
+                        settings.append(nm0.strip())
+                        have.add(nm0.strip().lower())
+        except Exception:
+            pass
+
+        def _order_settings_names(values: list[str]) -> list[str]:
+            """Return settings in fixed order:
+
+            1) SettingControl (always present)
+            2) SetMod (only when present)
+            3) Remaining settings in original order
+            """
+            seq = [(v or "").strip() for v in (values or []) if (v or "").strip()]
+
+            # De-duplicate while preserving first appearance.
+            seen: set[str] = set()
+            uniq: list[str] = []
+            for nm in seq:
+                key = nm.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                uniq.append(nm)
+
+            has_setmod = any((nm.lower() == "setmod") for nm in uniq)
+            rest = [nm for nm in uniq if nm.lower() not in {"settingcontrol", "setmod"}]
+
+            out = ["SettingControl"]
+            if has_setmod:
+                out.append("SetMod")
+            out.extend(rest)
+            return out
+
+        settings = _order_settings_names(settings)
+
+        # Precompute DO name -> DOType id mapping so Refresh can auto-populate
+        # DA rows for some CDCs (e.g., ACD).
+        do_types_by_name: dict[str, str] = {}
+        try:
+            if inst_path is not None and inst_path.exists():
+                ln_type_id, _inst_prefix, _inst_ln_class = self._hmi_peek_ln_instance_ln_attrs(inst_path)
+                ln_type_id = (ln_type_id or "").strip()
+                if ln_type_id:
+                    info = None
+                    if getattr(self, "catalog", None) is not None:
+                        for it in (self.catalog.lnode_types or []):
+                            if it.id == ln_type_id:
+                                info = it
+                                break
+                    if info is None:
+                        try:
+                            ln_dir = Path(self.iec61850_dir) / "LNodeType"
+                            cand = None
+                            p0 = ln_dir / f"{ln_type_id}.xml"
+                            if p0.is_file():
+                                cand = p0
+                            else:
+                                for p in ln_dir.rglob(f"{ln_type_id}.xml"):
+                                    if p.is_file():
+                                        cand = p
+                                        break
+                            if cand is not None:
+                                tree = ET.parse(cand)
+                                rr = tree.getroot()
+                                ln = rr.find(f".//{_q(SCL_NS, 'LNodeType')}")
+                                ln_class = (ln.attrib.get("lnClass") or "").strip() if ln is not None else ""
+                                desc = (ln.attrib.get("desc") or "").strip() if ln is not None else ""
+                                info = LNodeTypeInfo(id=ln_type_id, ln_class=ln_class, desc=desc, file_path=cand)
+                        except Exception:
+                            info = None
+                    if info is not None:
+                        mdl = load_lnode_type(info)
+                        do_types_by_name = {
+                            (d.name or "").strip(): (d.do_type or "").strip()
+                            for d in (mdl.dos or [])
+                            if (d.name or "").strip()
+                        }
+        except Exception:
+            do_types_by_name = {}
+
+        outputs_status: list[tuple[str, str]] = []
+        outputs_meas: list[tuple[str, str]] = []
+        for nm0, do_ref0 in (outputs_raw or []):
+            do_name0 = self._hmi_do_name_from_doref(do_ref0)
+            cdc0 = ""
+            try:
+                do_type_id0 = (do_types_by_name.get(do_name0) or "").strip()
+                if do_type_id0:
+                    cdc0 = (self._hmi_dotype_cdc(do_type_id0) or "").strip().upper()
+            except Exception:
+                cdc0 = ""
+            if cdc0 in {"WYE", "DEL", "SEQ", "CMV", "MV"}:
+                outputs_meas.append((nm0, do_ref0))
+            else:
+                outputs_status.append((nm0, do_ref0))
+
         # Merge into existing menus.
-        menus = self._hmi_all_menus()
-        out_menus = [m for m in menus if (m.attrib.get("name") or "").endswith("_Outputs")]
-        set_menus = [m for m in menus if (m.attrib.get("name") or "").endswith("_Settings")]
-        if not out_menus and not set_menus:
-            messagebox.showerror(
-                "Missing",
-                "No Menu_*_Outputs or Menu_*_Settings menus found in this HMI file.\n\n"
-                "Load a template (e.g. AZnDis.xml) or create these menus first.",
-                parent=self,
+        # Refresh should affect both IED and Manual menus regardless of current active scope.
+        menus: list[ET.Element] = []
+        for mm in self._hmi_root.iter():
+            if not (isinstance(mm.tag, str) and _local_name(mm.tag) == "HMIMenu"):
+                continue
+            nm0 = (mm.attrib.get("name") or "").strip()
+            if nm0.startswith("IET_Protection"):
+                continue
+            menus.append(mm)
+
+        manual_outputs_name = "Manual_Protection_Outputs"
+        manual_inputs_name = "Manual_Protection_Inputs"
+        manual_settings_name = "Manual_Protection_Settings"
+
+        def _find_menu_by_name(name: str) -> ET.Element | None:
+            key = (name or "").strip().lower()
+            for m0 in menus:
+                if ((m0.attrib.get("name") or "").strip().lower() == key):
+                    return m0
+            return None
+
+        # Ensure Manual menus exist during Refresh so auto-fill also works on files
+        # created before Manual support was introduced.
+        try:
+            if outputs_raw and _find_menu_by_name(manual_outputs_name) is None:
+                m0 = ET.SubElement(self._hmi_root, _q(HMI_CUST_NS, "HMIMenu"))
+                m0.attrib["name"] = manual_outputs_name
+                menus.append(m0)
+                self._hmi_ui_tag_set(m0, "added")
+            if inputs_for_hmi and _find_menu_by_name(manual_inputs_name) is None:
+                m0 = ET.SubElement(self._hmi_root, _q(HMI_CUST_NS, "HMIMenu"))
+                m0.attrib["name"] = manual_inputs_name
+                menus.append(m0)
+                self._hmi_ui_tag_set(m0, "added")
+            manual_settings = [nm for nm in (settings or []) if (nm or "").strip().lower() != "settingcontrol"]
+            if manual_settings and _find_menu_by_name(manual_settings_name) is None:
+                m0 = ET.SubElement(self._hmi_root, _q(HMI_CUST_NS, "HMIMenu"))
+                m0.attrib["name"] = manual_settings_name
+                menus.append(m0)
+                self._hmi_ui_tag_set(m0, "added")
+        except Exception:
+            manual_settings = [nm for nm in (settings or []) if (nm or "").strip().lower() != "settingcontrol"]
+        def _norm_view_type(vt: str | None) -> str:
+            s = (vt or "").strip().upper()
+            if s.startswith("HMI_MENU_VIEW_TYPE_"):
+                s = s[len("HMI_MENU_VIEW_TYPE_") :]
+            # Some sources may use separators; normalize to a compact token.
+            s = s.replace("_", "").replace("-", "").replace(" ", "")
+            return s
+
+        def _is_settings_view_type(vt: str | None) -> bool:
+            # setting tab
+            return _norm_view_type(vt) == "SETTING"
+
+        def _is_outputs_view_type(vt: str | None) -> bool:
+            # output tab
+            return _norm_view_type(vt) in {"STATUS", "MEASWITHCONTROL", "MEASUREGROUP", "MEASURE"}
+
+        def _menu_is_outputs(menu: ET.Element) -> bool:
+            nm = (menu.attrib.get("name") or "").strip()
+            if nm.endswith("_Outputs"):
+                return True
+            return _is_outputs_view_type(menu.attrib.get("hmiMenuViewType"))
+
+        def _menu_outputs_bucket(menu: ET.Element) -> str:
+            nm = (menu.attrib.get("name") or "").strip()
+            if nm.endswith("_Meas"):
+                return "meas"
+            vt = _norm_view_type(menu.attrib.get("hmiMenuViewType"))
+            if vt in {"MEASURE", "MEASUREGROUP", "MEASWITHCONTROL"}:
+                return "meas"
+            return "status"
+
+        def _menu_is_settings(menu: ET.Element) -> bool:
+            nm = (menu.attrib.get("name") or "").strip()
+            if nm.endswith("_Settings"):
+                return True
+            return _is_settings_view_type(menu.attrib.get("hmiMenuViewType"))
+
+        def _is_inputs_view_type(vt: str | None) -> bool:
+            return _norm_view_type(vt) == "INPUT"
+
+        def _menu_is_inputs(menu: ET.Element) -> bool:
+            nm = (menu.attrib.get("name") or "").strip()
+            if nm.endswith("_Inputs"):
+                return True
+            return _is_inputs_view_type(menu.attrib.get("hmiMenuViewType"))
+
+        out_menus = [m for m in menus if _menu_is_outputs(m)]
+        out_status_menus = [m for m in out_menus if _menu_outputs_bucket(m) == "status"]
+        out_meas_menus = [m for m in out_menus if _menu_outputs_bucket(m) == "meas"]
+        in_menus = [m for m in menus if _menu_is_inputs(m)]
+        set_menus = [m for m in menus if _menu_is_settings(m)]
+        if not out_menus and not in_menus and not set_menus:
+            # Not every HMI file is expected to have Outputs/Inputs/Settings pages.
+            # If none exist, Refresh is a no-op.
+            self._set_status(
+                f"Refresh skipped: no Outputs/Inputs/Settings menus found in this HMI (LnRef={ln_ref})"
             )
             return
 
-        def merge_outputs(menu: ET.Element) -> int:
-            existing_by_name: dict[str, ET.Element] = {}
+        undo_len0 = len(self._hmi_undo_stack)
+        self._hmi_push_undo()
+
+        def merge_outputs(
+            menu: ET.Element,
+            expected_outputs: list[tuple[str, str]],
+            *,
+            allow_da_autofill: bool,
+        ) -> tuple[int, int, int]:
+            existing_by_key: dict[str, ET.Element] = {}
             for it in list(menu):
                 if not (isinstance(it.tag, str) and _local_name(it.tag) == "HMIMenuItem"):
                     continue
                 if (it.attrib.get("ref") or "").strip():
                     continue
-                nm = (it.attrib.get("name") or "").strip()
-                if nm:
-                    existing_by_name[nm] = it
+                # Use DO key derived from doRef for stable matching across refreshes,
+                # even when display name differs from DO name.
+                do_ref0 = (it.attrib.get("doRef") or "").strip()
+                if do_ref0:
+                    key = (self._hmi_do_name_from_doref(do_ref0) or "").strip().lower()
+                else:
+                    key = (it.attrib.get("name") or "").strip().lower()
+                if key:
+                    existing_by_key[key] = it
+
+            expected_rows: list[tuple[str, str, str]] = []
+            seen_expected: set[str] = set()
+            for nm, do_ref_raw in expected_outputs:
+                full_do = f"{ln_ref}{do_ref_raw}" if do_ref_raw.startswith(".") else do_ref_raw
+                key = (self._hmi_do_name_from_doref(full_do) or "").strip().lower()
+                if not key or key in seen_expected:
+                    continue
+                seen_expected.add(key)
+                expected_rows.append((key, (nm or "").strip(), full_do))
+
+            expected_keys = {k for k, _nm, _do in expected_rows}
             added = 0
-            for nm, do_ref_raw in outputs:
-                full_do = f"{ln_ref}{do_ref_raw}" if do_ref_raw.startswith(".") else (do_ref_raw or f"{ln_ref}.{nm}")
-                if nm in existing_by_name:
-                    it = existing_by_name[nm]
-                    if not (it.attrib.get("doRef") or "").strip():
+            changed = 0
+            removed = 0
+
+            def ensure_acd_children(parent_it: ET.Element, *, do_name: str, full_do: str) -> bool:
+                do_type_id = (do_types_by_name.get(do_name) or "").strip()
+                if not do_type_id:
+                    return False
+                paths = self._hmi_acd_st_da_paths(do_type_id)
+                if not paths:
+                    return False
+
+                # Conservative: only auto-populate when no DA rows exist yet.
+                for ch in list(parent_it):
+                    if isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIDataItem":
+                        return False
+
+                added_any = False
+                for p in paths:
+                    di = ET.SubElement(parent_it, _q(HMI_CUST_NS, "HMIDataItem"))
+                    di.attrib["name"] = (p.split(".")[-1] if p else "").strip()
+                    di.attrib["doRef"] = full_do
+                    di.attrib["daRef"] = f".{p}"
+                    self._hmi_ui_tag_set(di, "added")
+                    added_any = True
+
+                return added_any
+
+            def ensure_act_children(parent_it: ET.Element, *, do_name: str, full_do: str) -> bool:
+                do_type_id = (do_types_by_name.get(do_name) or "").strip()
+                if not do_type_id:
+                    return False
+                paths = self._hmi_act_st_da_paths(do_type_id)
+                if not paths:
+                    return False
+
+                # Conservative: only auto-populate when no DA rows exist yet.
+                for ch in list(parent_it):
+                    if isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIDataItem":
+                        return False
+
+                added_any = False
+                for p in paths:
+                    di = ET.SubElement(parent_it, _q(HMI_CUST_NS, "HMIDataItem"))
+                    di.attrib["name"] = (p.split(".")[-1] if p else "").strip()
+                    di.attrib["doRef"] = full_do
+                    di.attrib["daRef"] = f".{p}"
+                    self._hmi_ui_tag_set(di, "added")
+                    added_any = True
+
+                return added_any
+
+            def ensure_measure_children(parent_it: ET.Element, *, do_name: str, full_do: str) -> bool:
+                do_type_id = (do_types_by_name.get(do_name) or "").strip()
+                if not do_type_id:
+                    return False
+                # On Refresh, treat these CDCs as auto-managed: add missing and remove stale.
+                return self._hmi_sync_dataitems_for_do(parent_it, full_do=full_do, do_type_id=do_type_id, prune_extra=True)
+
+            for key, nm, full_do in expected_rows:
+                do_name_from_ref = self._hmi_do_name_from_doref(full_do)
+                if key in existing_by_key:
+                    it = existing_by_key[key]
+                    cur_do = (it.attrib.get("doRef") or "").strip()
+                    did_change = False
+                    if cur_do != (full_do or ""):
                         it.attrib["doRef"] = full_do
+                        self._hmi_ui_tag_set(it, "changed")
+                        changed += 1
+                        did_change = True
+
+                    if allow_da_autofill:
+                        # For ACD DOs, auto-populate ST DA list (excluding q/t).
+                        try:
+                            if ensure_acd_children(it, do_name=do_name_from_ref, full_do=full_do):
+                                if not self._hmi_ui_is_added(it) and not did_change:
+                                    self._hmi_ui_tag_set(it, "changed")
+                                    changed += 1
+                        except Exception:
+                            pass
+
+                        # For ACT DOs, auto-populate ST DA list (excluding q/t).
+                        try:
+                            if ensure_act_children(it, do_name=do_name_from_ref, full_do=full_do):
+                                if not self._hmi_ui_is_added(it) and not did_change:
+                                    self._hmi_ui_tag_set(it, "changed")
+                                    changed += 1
+                        except Exception:
+                            pass
+
+                        # For supported measurement CDCs, auto-populate DA list (adds only missing).
+                        try:
+                            if ensure_measure_children(it, do_name=do_name_from_ref, full_do=full_do):
+                                if not self._hmi_ui_is_added(it) and not did_change:
+                                    self._hmi_ui_tag_set(it, "changed")
+                                    changed += 1
+                        except Exception:
+                            pass
+                    else:
+                        # Manual outputs: DO only, no DA refs/data rows.
+                        if (it.attrib.get("daRef") or "").strip():
+                            it.attrib.pop("daRef", None)
+                            if not self._hmi_ui_is_added(it) and not did_change:
+                                self._hmi_ui_tag_set(it, "changed")
+                                changed += 1
+                                did_change = True
+                        di_children = [
+                            ch for ch in list(it)
+                            if isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIDataItem"
+                        ]
+                        if di_children:
+                            for ch in di_children:
+                                try:
+                                    it.remove(ch)
+                                except Exception:
+                                    pass
+                            if not self._hmi_ui_is_added(it) and not did_change:
+                                self._hmi_ui_tag_set(it, "changed")
+                                changed += 1
                     continue
                 it = ET.SubElement(menu, _q(HMI_CUST_NS, "HMIMenuItem"))
                 it.attrib["name"] = nm
                 it.attrib["doRef"] = full_do
+                if allow_da_autofill:
+                    # For SPS DOs, default DA ref should point to stVal.
+                    try:
+                        do_type_id0 = (do_types_by_name.get(do_name_from_ref) or "").strip()
+                        if do_type_id0 and (self._hmi_dotype_cdc(do_type_id0) or "").strip().upper() == "SPS":
+                            if not (it.attrib.get("daRef") or "").strip():
+                                it.attrib["daRef"] = ".stVal"
+                    except Exception:
+                        pass
+                self._hmi_ui_tag_set(it, "added")
                 added += 1
-            return added
 
-        def merge_settings(menu: ET.Element) -> int:
+                if allow_da_autofill:
+                    # For ACD DOs, auto-populate ST DA list (excluding q/t).
+                    try:
+                        ensure_acd_children(it, do_name=do_name_from_ref, full_do=full_do)
+                    except Exception:
+                        pass
+
+                    # For ACT DOs, auto-populate ST DA list (excluding q/t).
+                    try:
+                        ensure_act_children(it, do_name=do_name_from_ref, full_do=full_do)
+                    except Exception:
+                        pass
+
+                    # For supported measurement CDCs, auto-populate DA list (adds only missing).
+                    try:
+                        ensure_measure_children(it, do_name=do_name_from_ref, full_do=full_do)
+                    except Exception:
+                        pass
+
+            # Stage-delete items that are no longer present in the application output list.
+            for key, it in existing_by_key.items():
+                if key in expected_keys:
+                    continue
+                if self._hmi_ui_is_added(it):
+                    try:
+                        menu.remove(it)
+                    except Exception:
+                        pass
+                else:
+                    self._hmi_ui_tag_set(it, "removed")
+                removed += 1
+
+            return (added, changed, removed)
+
+        def merge_settings(
+            menu: ET.Element,
+            settings_expected: list[str],
+            *,
+            preserve_setting_control: bool,
+        ) -> tuple[int, int, int]:
             existing_by_name: dict[str, ET.Element] = {}
             for it in list(menu):
                 if not (isinstance(it.tag, str) and _local_name(it.tag) == "HMIMenuItem"):
                     continue
                 if (it.attrib.get("ref") or "").strip():
                     continue
-                nm = (it.attrib.get("name") or "").strip()
+                do_ref0 = (it.attrib.get("doRef") or "").strip()
+                if do_ref0:
+                    nm = (do_ref0.rsplit(".", 1)[-1] or "").strip()
+                else:
+                    nm = (it.attrib.get("name") or "").strip()
                 if nm:
                     existing_by_name[nm] = it
+
+            # SettingControl is managed outside Application->HMI refresh.
+            # If it was previously staged as removed by an older Refresh, revive it.
+            for nm0, it0 in existing_by_name.items():
+                if (nm0 or "").strip().lower() == "settingcontrol" and self._hmi_ui_is_removed(it0):
+                    self._hmi_ui_tag_clear(it0)
+                    break
+            expected_names = {nm for nm in settings_expected if (nm or "").strip()}
             added = 0
-            for nm in settings:
+            changed = 0
+            removed = 0
+
+            def _setting_doref(nm: str) -> str:
+                if (nm or "").strip().lower() == "settingcontrol":
+                    return "bay.LLN0.SettingControl"
+                return f"{ln_ref}.{nm}"
+
+            for nm in settings_expected:
                 if nm in existing_by_name:
                     it = existing_by_name[nm]
-                    if not (it.attrib.get("doRef") or "").strip():
-                        it.attrib["doRef"] = f"{ln_ref}.{nm}"
+                    full_do = _setting_doref(nm)
+                    cur_do = (it.attrib.get("doRef") or "").strip()
+                    if cur_do != (full_do or ""):
+                        it.attrib["doRef"] = full_do
+                        self._hmi_ui_tag_set(it, "changed")
+                        changed += 1
+                    if (it.attrib.get("name") or "").strip() != nm:
+                        it.attrib["name"] = nm
+                        self._hmi_ui_tag_set(it, "changed")
+                        changed += 1
+
+                    # For ACT DOs, auto-populate ST DA list (excluding q/t).
+                    try:
+                        do_type_id0 = (do_types_by_name.get(nm) or "").strip()
+                        if do_type_id0 and (self._hmi_dotype_cdc(do_type_id0) or "").strip().upper() == "ACT":
+                            # Conservative: only auto-populate when no DA rows exist yet.
+                            have_di = any(
+                                isinstance(ch.tag, str) and _local_name(ch.tag) == "HMIDataItem" for ch in list(it)
+                            )
+                            if not have_di:
+                                paths0 = self._hmi_act_st_da_paths(do_type_id0)
+                                for p in paths0:
+                                    di0 = ET.SubElement(it, _q(HMI_CUST_NS, "HMIDataItem"))
+                                    di0.attrib["name"] = (p.split(".")[-1] if p else "").strip()
+                                    di0.attrib["doRef"] = full_do
+                                    di0.attrib["daRef"] = f".{p}"
+                                    self._hmi_ui_tag_set(di0, "added")
+                                if paths0 and not self._hmi_ui_is_added(it):
+                                    self._hmi_ui_tag_set(it, "changed")
+                                    changed += 1
+                    except Exception:
+                        pass
                     continue
                 it = ET.SubElement(menu, _q(HMI_CUST_NS, "HMIMenuItem"))
                 it.attrib["name"] = nm
-                it.attrib["doRef"] = f"{ln_ref}.{nm}"
+                it.attrib["doRef"] = _setting_doref(nm)
+                self._hmi_ui_tag_set(it, "added")
                 added += 1
-            return added
+
+                # For ACT DOs, auto-populate ST DA list (excluding q/t).
+                try:
+                    do_type_id0 = (do_types_by_name.get(nm) or "").strip()
+                    if do_type_id0 and (self._hmi_dotype_cdc(do_type_id0) or "").strip().upper() == "ACT":
+                        paths0 = self._hmi_act_st_da_paths(do_type_id0)
+                        for p in paths0:
+                            di0 = ET.SubElement(it, _q(HMI_CUST_NS, "HMIDataItem"))
+                            di0.attrib["name"] = (p.split(".")[-1] if p else "").strip()
+                            di0.attrib["doRef"] = f"{ln_ref}.{nm}"
+                            di0.attrib["daRef"] = f".{p}"
+                            self._hmi_ui_tag_set(di0, "added")
+                except Exception:
+                    pass
+
+            # Stage-delete items that are no longer present in the application settings list.
+            for nm, it in existing_by_name.items():
+                # Preserve SettingControl: do not delete it during Refresh.
+                if preserve_setting_control and (nm or "").strip().lower() == "settingcontrol":
+                    continue
+                if nm in expected_names:
+                    continue
+                if self._hmi_ui_is_added(it):
+                    try:
+                        menu.remove(it)
+                    except Exception:
+                        pass
+                else:
+                    self._hmi_ui_tag_set(it, "removed")
+                removed += 1
+
+            # Keep menu item XML order aligned with required Setting tab order.
+            # (SettingControl first, SetMod second when present, then remaining order.)
+            try:
+                ordered_items: list[ET.Element] = []
+                by_name_ci: dict[str, ET.Element] = {}
+                for it0 in list(menu):
+                    if not (isinstance(it0.tag, str) and _local_name(it0.tag) == "HMIMenuItem"):
+                        continue
+                    if (it0.attrib.get("ref") or "").strip():
+                        continue
+                    nm0 = ((it0.attrib.get("name") or "").strip() or self._hmi_do_name_from_doref(it0.attrib.get("doRef") or "")).strip()
+                    if nm0:
+                        by_name_ci[nm0.lower()] = it0
+                for nm0 in settings_expected:
+                    it0 = by_name_ci.get((nm0 or "").lower())
+                    if it0 is not None:
+                        ordered_items.append(it0)
+                for it0 in ordered_items:
+                    try:
+                        menu.remove(it0)
+                    except Exception:
+                        pass
+                for it0 in ordered_items:
+                    menu.append(it0)
+            except Exception:
+                pass
+
+            return (added, changed, removed)
+
+        def merge_inputs(menu: ET.Element) -> tuple[int, int, int]:
+            existing_by_name: dict[str, ET.Element] = {}
+            for it in list(menu):
+                if not (isinstance(it.tag, str) and _local_name(it.tag) == "HMIMenuItem"):
+                    continue
+                if (it.attrib.get("ref") or "").strip():
+                    continue
+                do_ref0 = (it.attrib.get("doRef") or "").strip()
+                if do_ref0:
+                    nm = (self._hmi_do_name_from_doref(do_ref0) or "").strip()
+                else:
+                    nm = (it.attrib.get("name") or "").strip()
+                if nm:
+                    existing_by_name[nm] = it
+
+            expected_names = {
+                (self._hmi_do_name_from_doref(dr) or "").strip()
+                for _disp, dr in (inputs_for_hmi or [])
+                if (dr or "").strip()
+            }
+            expected_names = {n for n in expected_names if n}
+
+            added = 0
+            changed = 0
+            removed = 0
+
+            for display_name, full_do in (inputs_for_hmi or []):
+                key = (self._hmi_do_name_from_doref(full_do) or "").strip()
+                if not key:
+                    continue
+                if key in existing_by_name:
+                    it = existing_by_name[key]
+                    did_change = False
+                    if (it.attrib.get("doRef") or "").strip() != (full_do or ""):
+                        it.attrib["doRef"] = full_do
+                        self._hmi_ui_tag_set(it, "changed")
+                        changed += 1
+                        did_change = True
+                    if (it.attrib.get("name") or "").strip() != (display_name or ""):
+                        it.attrib["name"] = (display_name or "").strip()
+                        if not did_change:
+                            self._hmi_ui_tag_set(it, "changed")
+                            changed += 1
+                            did_change = True
+                    if (it.attrib.get("daRef") or "").strip() != ".setSrcRef":
+                        it.attrib["daRef"] = ".setSrcRef"
+                        if not did_change:
+                            self._hmi_ui_tag_set(it, "changed")
+                            changed += 1
+                    continue
+
+                it = ET.SubElement(menu, _q(HMI_CUST_NS, "HMIMenuItem"))
+                it.attrib["name"] = (display_name or "").strip()
+                it.attrib["doRef"] = full_do
+                it.attrib["daRef"] = ".setSrcRef"
+                self._hmi_ui_tag_set(it, "added")
+                added += 1
+
+            for nm, it in existing_by_name.items():
+                if nm in expected_names:
+                    continue
+                if self._hmi_ui_is_added(it):
+                    try:
+                        menu.remove(it)
+                    except Exception:
+                        pass
+                else:
+                    self._hmi_ui_tag_set(it, "removed")
+                removed += 1
+
+            return (added, changed, removed)
 
         added_out = 0
-        for m in out_menus:
-            added_out += merge_outputs(m)
+        changed_out = 0
+        removed_out = 0
+        for m in out_status_menus:
+            nm = (m.attrib.get("name") or "").strip().lower()
+            exp = outputs_raw if nm == manual_outputs_name.lower() else outputs_status
+            a, c, r = merge_outputs(m, exp, allow_da_autofill=(nm != manual_outputs_name.lower()))
+            added_out += a
+            changed_out += c
+            removed_out += r
+
+        for m in out_meas_menus:
+            a, c, r = merge_outputs(m, outputs_meas, allow_da_autofill=True)
+            added_out += a
+            changed_out += c
+            removed_out += r
+
         added_set = 0
+        changed_set = 0
+        removed_set = 0
         for m in set_menus:
-            added_set += merge_settings(m)
+            nm = (m.attrib.get("name") or "").strip().lower()
+            if nm == manual_settings_name.lower():
+                a, c, r = merge_settings(m, manual_settings, preserve_setting_control=False)
+            else:
+                a, c, r = merge_settings(m, settings, preserve_setting_control=True)
+            added_set += a
+            changed_set += c
+            removed_set += r
+
+        added_in = 0
+        changed_in = 0
+        removed_in = 0
+        for m in in_menus:
+            a, c, r = merge_inputs(m)
+            added_in += a
+            changed_in += c
+            removed_in += r
+
+        total_changes = (
+            added_out + changed_out + removed_out
+            + added_set + changed_set + removed_set
+            + added_in + changed_in + removed_in
+        )
+        if total_changes <= 0:
+            # Nothing changed: drop the undo snapshot we captured above.
+            try:
+                if len(self._hmi_undo_stack) > undo_len0:
+                    self._hmi_undo_stack.pop()
+            except Exception:
+                pass
+            self._set_status(f"Refresh: no changes (LnRef={ln_ref})")
+            return
+
+        # Auto-expand scopes after Refresh so newly created menus are visible immediately.
+        try:
+            scope0 = (getattr(self, "_hmi_scope", "ied") or "ied").strip().lower()
+            if scope0 not in {"ied", "iet", "manual"}:
+                scope0 = "ied"
+            for s in ("ied", "manual"):
+                self._hmi_set_scope(s, refresh=False)
+                self._refresh_hmi_views(select_first_menu=False, open_selection_path=False)
+                self._hmi_unfold_all()
+            self._hmi_set_scope(scope0, refresh=False)
+        except Exception:
+            pass
 
         self._refresh_hmi_views(select_first_menu=False)
         self._mark_hmi_unsaved()
         self._set_status(
-            f"Generated from application {os.fspath(app_path.name)} (LnRef={ln_ref}): +{added_out} outputs, +{added_set} settings"
+            f"Refreshed from application {os.fspath(app_path.name)} (LnRef={ln_ref}): "
+            f"+{added_out} outputs, ~{changed_out} outputs, -{removed_out} outputs; "
+            f"+{added_set} settings, ~{changed_set} settings, -{removed_set} settings; "
+            f"+{added_in} inputs, ~{changed_in} inputs, -{removed_in} inputs"
         )
 
     def _open_enum_type_from_path(self, path: Path) -> None:
@@ -10491,14 +17080,18 @@ class MainWindow(tk.Tk):
                 filtered = [v for v in self._all_do_tmpl_files if ok(v)]
 
             cur = (self.var_do_tmpl_selected.get() or "").strip()
-            if cur and cur not in filtered:
-                filtered = [cur] + filtered
 
             max_show = 1200
             shown = filtered[:max_show]
             self.cb_do_tmpl["values"] = shown
             suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
             self.lbl_do_tmpl_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
+            if raw:
+                if shown:
+                    self.var_do_tmpl_selected.set(shown[0])
+                return
+            if shown and cur not in shown:
+                self.var_do_tmpl_selected.set(shown[0])
 
         if getattr(self, "_do_tmpl_apply_filter", None) is None:
             if self.var_do_tmpl_filter is not None:
@@ -11375,14 +17968,18 @@ class MainWindow(tk.Tk):
                 filtered = [v for v in self._all_app_files if ok(v)]
 
             cur = (self.var_app_selected.get() or "").strip()
-            if cur and cur not in filtered:
-                filtered = [cur] + filtered
 
             max_show = 1200
             shown = filtered[:max_show]
             self.cb_app["values"] = shown
             suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
             self.lbl_app_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
+            if raw:
+                if shown:
+                    self.var_app_selected.set(shown[0])
+                return
+            if shown and cur not in shown:
+                self.var_app_selected.set(shown[0])
 
         # Wire filter only once per UI lifetime.
         if getattr(self, "_app_apply_filter", None) is None:
@@ -15330,15 +21927,23 @@ class MainWindow(tk.Tk):
             pass
 
     def _update_app_refresh_button_state(self) -> None:
-        btn = self.btn_app_refresh
-        if btn is None:
-            return
-
         has_app = self._app_root is not None and self._app_funblock is not None
-        try:
-            btn.configure(state=("normal" if has_app else "disabled"))
-        except Exception:
-            pass
+
+        btn_refresh = self.btn_app_refresh
+        if btn_refresh is not None:
+            try:
+                btn_refresh.configure(state=("normal" if has_app else "disabled"))
+            except Exception:
+                pass
+
+        # Creating a new HMI requires a loaded application file (used for the target file name).
+        btn_create_hmi = getattr(self, "btn_app_create_hmi", None)
+        if btn_create_hmi is not None:
+            enabled = has_app and self._app_file_path is not None
+            try:
+                btn_create_hmi.configure(state=("normal" if enabled else "disabled"))
+            except Exception:
+                pass
 
     def _clear_app_refresh_diff_state(self) -> None:
         for k in list(self._app_sync_added_names):
@@ -15920,6 +22525,678 @@ class MainWindow(tk.Tk):
         else:
             self._set_status("Application refresh: no changes")
 
+    def _create_hmi_for_this_afb(self, *, sync_from_app_ui: bool = True) -> None:
+        """Create a new HMI template for the currently open application (AFB)."""
+
+        if self._app_root is None or self._app_funblock is None or self._app_file_path is None:
+            messagebox.showerror("Missing", "Open an application file first.", parent=self)
+            return
+
+        if sync_from_app_ui:
+            # Commit any open inline editor so current app state is consistent.
+            try:
+                self._end_app_input_inline_editor(commit=True)
+                self._end_app_setting_inline_editor(commit=True)
+                self._end_app_output_inline_editor(commit=True)
+                self._end_app_conf_inline_editor(commit=True)
+                self._end_app_control_inline_editor(commit=True)
+            except Exception:
+                pass
+
+            # Keep in-memory Application XML aligned with the current UI state so HMI generation
+            # (and auto-created menu naming) uses the latest unsaved edits.
+            try:
+                self._apply_funblock_fields_to_xml()
+                self._apply_app_input_rows_to_xml()
+                self._apply_simple_app_rows_to_xml(
+                    tag_local="output",
+                    rows=self._app_output_rows,
+                    attr_order=[
+                        "name",
+                        "type",
+                        "desc",
+                        "outPurpose",
+                        "srvRef",
+                        "persist",
+                        "doRef",
+                        "MaxContiguous",
+                        "Overlap",
+                        "faultlog",
+                    ],
+                )
+                self._apply_simple_app_rows_to_xml(
+                    tag_local="setting",
+                    rows=self._app_setting_rows,
+                    attr_order=["name", "type", "desc", "src"],
+                )
+                self._apply_simple_app_rows_to_xml(
+                    tag_local="conf",
+                    rows=self._app_conf_rows,
+                    attr_order=["name", "type", "desc", "src"],
+                )
+                self._apply_simple_app_rows_to_xml(
+                    tag_local="control",
+                    rows=self._app_control_rows,
+                    attr_order=["name", "type", "desc", "src"],
+                )
+            except Exception:
+                pass
+
+        base_dir = self._hmi_template_dir()
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            fname = (Path(self._app_file_path).name or "").strip()
+        except Exception:
+            fname = ""
+        if not fname:
+            messagebox.showerror("Missing", "Application file name is missing.", parent=self)
+            return
+        if not fname.lower().endswith(".xml"):
+            fname = f"{fname}.xml"
+
+        target_path = base_dir / fname
+        if target_path.exists():
+            ok = messagebox.askyesno(
+                "Overwrite?",
+                f"HMI already exists:\n\n{os.fspath(target_path)}\n\nOverwrite?",
+                parent=self,
+            )
+            if not ok:
+                return
+
+        fun_block = self._app_funblock
+
+        # Determine LN instance name for menu naming.
+        ln_inst_name = (fun_block.attrib.get("name") or "").strip()
+        if not ln_inst_name:
+            ln_inst_name = (fun_block.attrib.get("LnRef") or "").strip()
+        if not ln_inst_name:
+            ln_inst_name = (target_path.stem or "").strip() or "LN"
+
+        top_menu_name = f"Menu_Protection_{ln_inst_name}"
+        inputs_menu_name = f"{top_menu_name}_Inputs"
+        outputs_menu_name = f"{top_menu_name}_Outputs"
+        meas_menu_name = f"{top_menu_name}_Meas"
+        settings_menu_name = f"{top_menu_name}_Settings"
+
+        # Peek whether this AFB has outputs/settings (reuse same rules as HMI Refresh).
+        ln_ref = (fun_block.attrib.get("LnRef") or "").strip()
+        ln_ref_raw = ln_ref
+        try:
+            ln_ref_norm = self._hmi_normalize_lnref_for_doref(ln_ref_raw) if ln_ref_raw else ""
+        except Exception:
+            ln_ref_norm = ""
+
+        def _is_true(v: str | None) -> bool:
+            vv = (v or "").strip().lower()
+            return vv in {"true", "1", "yes", "y", "on"}
+
+        def _src_points_to_current_ln_do(src: str, *, ln_ref_raw0: str, ln_ref0: str) -> bool:
+            s = (src or "").strip()
+            if not s:
+                return False
+            if s.startswith("."):
+                return True
+            if ln_ref_raw0 and s.startswith(f"{ln_ref_raw0}."):
+                return True
+            if ln_ref0 and s.startswith(f"{ln_ref0}."):
+                return True
+            return False
+
+        outputs_status: list[tuple[str, str]] = []
+        outputs_meas: list[tuple[str, str]] = []
+        # (display_name, full_do_ref)
+        inputs_for_hmi: list[tuple[str, str]] = []
+        settings: list[str] = []
+        try:
+            seen_input_ln_seq: set[tuple[str, ...]] = set()
+            do_types_by_name: dict[str, str] = {}
+
+            try:
+                inst_path = self._guess_ln_instance_path_from_lnref(ln_ref_raw) if ln_ref_raw else None
+            except Exception:
+                inst_path = None
+            try:
+                if inst_path is not None and inst_path.exists():
+                    ln_type_id, _inst_prefix, _inst_ln_class = self._hmi_peek_ln_instance_ln_attrs(inst_path)
+                    ln_type_id = (ln_type_id or "").strip()
+                    if ln_type_id:
+                        info = None
+                        if getattr(self, "catalog", None) is not None:
+                            for it in (self.catalog.lnode_types or []):
+                                if it.id == ln_type_id:
+                                    info = it
+                                    break
+                        if info is None:
+                            try:
+                                ln_dir = Path(self.iec61850_dir) / "LNodeType"
+                                cand = None
+                                p0 = ln_dir / f"{ln_type_id}.xml"
+                                if p0.is_file():
+                                    cand = p0
+                                else:
+                                    for p in ln_dir.rglob(f"{ln_type_id}.xml"):
+                                        if p.is_file():
+                                            cand = p
+                                            break
+                                if cand is not None:
+                                    tree = ET.parse(cand)
+                                    rr = tree.getroot()
+                                    ln = rr.find(f".//{_q(SCL_NS, 'LNodeType')}")
+                                    ln_class = (ln.attrib.get("lnClass") or "").strip() if ln is not None else ""
+                                    desc = (ln.attrib.get("desc") or "").strip() if ln is not None else ""
+                                    info = LNodeTypeInfo(id=ln_type_id, ln_class=ln_class, desc=desc, file_path=cand)
+                            except Exception:
+                                info = None
+                        if info is not None:
+                            mdl = load_lnode_type(info)
+                            do_types_by_name = {
+                                (d.name or "").strip(): (d.do_type or "").strip()
+                                for d in (mdl.dos or [])
+                                if (d.name or "").strip()
+                            }
+            except Exception:
+                do_types_by_name = {}
+
+            def _extract_inref_purpose(do_ref_text: str) -> str:
+                txt = (do_ref_text or "").strip()
+                if not txt:
+                    return ""
+                lo = txt.lower()
+                key = "inref%"
+                pos = lo.find(key)
+                if pos < 0:
+                    return ""
+                purpose0 = txt[pos + len(key) :]
+                return purpose0.strip()
+
+            def _input_ln_sequence(src_text: str) -> tuple[str, ...]:
+                """Extract ordered LN list from input src.
+
+                Example:
+                "VTBRLN#@InRef%PhVCplx;VTGAPC#@PhVCplx" -> ("VTBRLN#", "VTGAPC#")
+                """
+
+                out: list[str] = []
+                for part in (src_text or "").split(";"):
+                    p = part.strip()
+                    if not p:
+                        continue
+                    ln_name = (p.split("@", 1)[0] or "").strip()
+                    if not ln_name:
+                        continue
+                    out.append(ln_name)
+                return tuple(out)
+
+            for el in list(fun_block):
+                if not isinstance(el.tag, str):
+                    continue
+                local = _local_name(el.tag)
+                if local == "input":
+                    src0 = (el.attrib.get("src") or "").strip()
+                    # Rule: only include inputs with non-empty src.
+                    if not src0:
+                        continue
+                    # Rule: dedupe by ordered LN sequence inside src (name/count/order).
+                    # If LN sequence is identical, only keep the first input.
+                    ln_seq0 = _input_ln_sequence(src0)
+                    if ln_seq0 in seen_input_ln_seq:
+                        continue
+                    seen_input_ln_seq.add(ln_seq0)
+
+                    name0 = (el.attrib.get("name") or "").strip()
+                    do_ref_raw0 = (el.attrib.get("doRef") or "").strip()
+                    purpose0 = _extract_inref_purpose(do_ref_raw0)
+                    if not purpose0:
+                        purpose0 = name0
+                    if not purpose0:
+                        continue
+
+                    if ln_ref:
+                        do_ref0 = f"{ln_ref}.InRef%{purpose0}"
+                    else:
+                        do_ref0 = f"InRef%{purpose0}"
+
+                    display_name = name0 or purpose0
+                    inputs_for_hmi.append((display_name, do_ref0))
+                elif local == "output":
+                    name = (el.attrib.get("name") or "").strip()
+                    do_ref = (el.attrib.get("doRef") or "").strip()
+                    if _is_true(el.attrib.get("faultlog")):
+                        continue
+                    if not do_ref:
+                        continue
+                    try:
+                        out_purpose = (el.attrib.get("outPurpose") or "").strip().lower()
+                    except Exception:
+                        out_purpose = ""
+                    if _is_true(el.attrib.get("confpin")) or _is_true(el.attrib.get("conpin")) or out_purpose == "confpin":
+                        continue
+                    if name:
+                        do_name0 = self._hmi_do_name_from_doref(do_ref)
+                        cdc0 = ""
+                        try:
+                            do_type_id0 = (do_types_by_name.get(do_name0) or "").strip()
+                            if do_type_id0:
+                                cdc0 = (self._hmi_dotype_cdc(do_type_id0) or "").strip().upper()
+                        except Exception:
+                            cdc0 = ""
+
+                        if cdc0 in {"WYE", "DEL", "SEQ", "CMV", "MV"}:
+                            outputs_meas.append((name, do_ref))
+                        else:
+                            # Status/default bucket (includes ACD/ACT/SPS and unknown CDCs).
+                            outputs_status.append((name, do_ref))
+                elif local == "setting":
+                    name = (el.attrib.get("name") or "").strip()
+                    if (el.attrib.get("src") or "").strip().lower() == "confpin":
+                        continue
+                    src0 = (el.attrib.get("src") or "").strip()
+                    if src0 and (not _src_points_to_current_ln_do(src0, ln_ref_raw0=ln_ref_raw, ln_ref0=ln_ref_norm)):
+                        continue
+                    try:
+                        do_from_src = self._hmi_do_name_from_doref(src0)
+                    except Exception:
+                        do_from_src = ""
+                    if not do_from_src or do_from_src.isdigit():
+                        continue
+                    if name:
+                        settings.append(name)
+        except Exception:
+            outputs = []
+            settings = []
+
+        # Ensure some important DOs are present (SetMod/StartMod) like Refresh does.
+        try:
+            inst_path = self._guess_ln_instance_path_from_lnref(ln_ref_raw) if ln_ref_raw else None
+        except Exception:
+            inst_path = None
+        try:
+            if inst_path is not None and inst_path.exists():
+                do_names = self._hmi_parse_ln_instance_do_names(inst_path)
+                have = {s.strip().lower() for s in (settings or []) if (s or "").strip()}
+                for target in ("setmod", "startmod"):
+                    nm0 = next((n for n in do_names if (n or "").strip().lower() == target), "")
+                    if not nm0:
+                        continue
+                    if nm0.strip().lower() not in have:
+                        settings.append(nm0.strip())
+                        have.add(nm0.strip().lower())
+        except Exception:
+            pass
+
+        # Create new in-memory HMI (same file name as application).
+        root = ET.Element(_q(HMI_CUST_NS, "PowerLogicHmiCustomization"))
+        root.attrib[_q(XSI_NS, "schemaLocation")] = f"{HMI_CUST_NS} SE_PowerLogic_HmiCustomization.xsd"
+        root.attrib["desc"] = "yyy"
+        self._hmi_root = root
+        self._hmi_file_path = target_path
+        self._hmi_saved_sig = None
+        try:
+            self._hmi_undo_stack = []
+        except Exception:
+            pass
+
+        menu_top = ET.SubElement(root, _q(HMI_CUST_NS, "HMIMenu"))
+        menu_top.attrib["name"] = top_menu_name
+        menu_top.attrib["hmiMenuDataType"] = "HMI_MENU_DATA_TYPE_TAB"
+        menu_top.attrib["hmiMenuViewType"] = "HMI_MENU_VIEW_TYPE_TABS"
+        menu_top.attrib["langRef"] = "0.0"
+        # hmiSubTreeType intentionally omitted (must be chosen by user before Save).
+
+        has_out = False
+        has_meas = False
+        has_set = False
+        has_in = False
+
+        if outputs_meas:
+            menu_meas = ET.SubElement(root, _q(HMI_CUST_NS, "HMIMenu"))
+            menu_meas.attrib["name"] = meas_menu_name
+            menu_meas.attrib["hmiMenuDataType"] = "HMI_MENU_DATA_TYPE_LIST"
+            menu_meas.attrib["hmiMenuViewType"] = "HMI_MENU_VIEW_TYPE_MEASUREGROUP"
+            menu_meas.attrib["langRef"] = "500.41"
+            has_meas = True
+
+        if outputs_status:
+            menu_out = ET.SubElement(root, _q(HMI_CUST_NS, "HMIMenu"))
+            menu_out.attrib["name"] = outputs_menu_name
+            menu_out.attrib["hmiMenuDataType"] = "HMI_MENU_DATA_TYPE_LIST"
+            menu_out.attrib["hmiMenuViewType"] = "HMI_MENU_VIEW_TYPE_STATUS"
+            menu_out.attrib["langRef"] = "500.38"
+            has_out = True
+
+        if settings:
+            menu_set = ET.SubElement(root, _q(HMI_CUST_NS, "HMIMenu"))
+            menu_set.attrib["name"] = settings_menu_name
+            menu_set.attrib["hmiMenuDataType"] = "HMI_MENU_DATA_TYPE_LIST"
+            menu_set.attrib["hmiMenuViewType"] = "HMI_MENU_VIEW_TYPE_SETTING"
+            menu_set.attrib["langRef"] = "500.39"
+            has_set = True
+
+        if inputs_for_hmi:
+            menu_in = ET.SubElement(root, _q(HMI_CUST_NS, "HMIMenu"))
+            menu_in.attrib["name"] = inputs_menu_name
+            menu_in.attrib["hmiMenuDataType"] = "HMI_MENU_DATA_TYPE_LIST"
+            menu_in.attrib["hmiMenuViewType"] = "HMI_MENU_VIEW_TYPE_INPUT"
+            menu_in.attrib["langRef"] = "500.40"
+            has_in = True
+
+            for input_name, input_do_ref in inputs_for_hmi:
+                it_in = ET.SubElement(menu_in, _q(HMI_CUST_NS, "HMIMenuItem"))
+                it_in.attrib["name"] = input_name
+                it_in.attrib["doRef"] = input_do_ref
+                it_in.attrib["daRef"] = ".setSrcRef"
+
+        # Manual menus for user manual export/use:
+        # - Manual_Protection_Outputs: all outputs (status + meas), DO only
+        # - Manual_Protection_Inputs: same presentation as IED Inputs
+        # - Manual_Protection_Settings: same as IED Settings, but without SettingControl
+        manual_outputs_name = "Manual_Protection_Outputs"
+        manual_inputs_name = "Manual_Protection_Inputs"
+        manual_settings_name = "Manual_Protection_Settings"
+        manual_outputs_all = list(outputs_status or []) + list(outputs_meas or [])
+
+        if manual_outputs_all:
+            menu_m_out = ET.SubElement(root, _q(HMI_CUST_NS, "HMIMenu"))
+            menu_m_out.attrib["name"] = manual_outputs_name
+            for out_name, out_do_ref in manual_outputs_all:
+                do_full = f"{ln_ref}.{out_do_ref}" if (out_do_ref or "").startswith(".") else (out_do_ref or "")
+                if not do_full:
+                    continue
+                it_m_out = ET.SubElement(menu_m_out, _q(HMI_CUST_NS, "HMIMenuItem"))
+                it_m_out.attrib["name"] = (out_name or "").strip() or self._hmi_do_name_from_doref(do_full)
+                it_m_out.attrib["doRef"] = do_full
+
+        if inputs_for_hmi:
+            menu_m_in = ET.SubElement(root, _q(HMI_CUST_NS, "HMIMenu"))
+            menu_m_in.attrib["name"] = manual_inputs_name
+            for input_name, input_do_ref in inputs_for_hmi:
+                it_m_in = ET.SubElement(menu_m_in, _q(HMI_CUST_NS, "HMIMenuItem"))
+                it_m_in.attrib["name"] = input_name
+                it_m_in.attrib["doRef"] = input_do_ref
+                it_m_in.attrib["daRef"] = ".setSrcRef"
+
+        manual_settings = [nm for nm in (settings or []) if (nm or "").strip().lower() != "settingcontrol"]
+        if manual_settings:
+            menu_m_set = ET.SubElement(root, _q(HMI_CUST_NS, "HMIMenu"))
+            menu_m_set.attrib["name"] = manual_settings_name
+            for nm in manual_settings:
+                nm0 = (nm or "").strip()
+                if not nm0:
+                    continue
+                it_m_set = ET.SubElement(menu_m_set, _q(HMI_CUST_NS, "HMIMenuItem"))
+                it_m_set.attrib["name"] = nm0
+                it_m_set.attrib["doRef"] = f"{ln_ref}.{nm0}"
+
+        # IED tab default order: Meas, Output, Setting, Input.
+        if has_meas:
+            it_ref = ET.SubElement(menu_top, _q(HMI_CUST_NS, "HMIMenuItem"))
+            it_ref.attrib["ref"] = meas_menu_name
+        if has_out:
+            it_ref = ET.SubElement(menu_top, _q(HMI_CUST_NS, "HMIMenuItem"))
+            it_ref.attrib["ref"] = outputs_menu_name
+        if has_set:
+            it_ref = ET.SubElement(menu_top, _q(HMI_CUST_NS, "HMIMenuItem"))
+            it_ref.attrib["ref"] = settings_menu_name
+        if has_in:
+            it_ref = ET.SubElement(menu_top, _q(HMI_CUST_NS, "HMIMenuItem"))
+            it_ref.attrib["ref"] = inputs_menu_name
+
+        # Auto-create a default IET menu scaffold when creating HMI from Application.
+        # Naming rules:
+        #  L1: IET_Protection_<ApplicationName>
+        #  L2: <L1>_TAB
+        #  L3: <L1>_SECTIONA.._SECTIONE
+        #  L4: only under _SECTIONA: <L1>_SECTIONA_Setting1
+        # Also add HMIAttr structure (names based on ATeleProt template), but leave values empty.
+        try:
+            app_name = ""
+            if self.instance_editor is not None:
+                app_name = (self.instance_editor.var_app_name.get() or "").strip()
+            if not app_name:
+                app_name = (fun_block.attrib.get("name") or "").strip()
+            if not app_name:
+                app_name = (target_path.stem or "").strip()
+            if not app_name:
+                app_name = "AFB"
+
+            l1 = f"IET_Protection_{app_name}"
+            l2 = f"{l1}_TAB"
+            sections = {k: f"{l1}_SECTION{k}" for k in ("A", "B", "C", "D", "E")}
+            l4 = f"{sections['A']}_Setting1"
+
+            def _mk_menu(name: str, *, dt: str = "", vt: str = "") -> ET.Element:
+                m = ET.SubElement(root, _q(HMI_CUST_NS, "HMIMenu"))
+                m.attrib["name"] = name
+                if dt:
+                    m.attrib["hmiMenuDataType"] = dt
+                if vt:
+                    m.attrib["hmiMenuViewType"] = vt
+                return m
+
+            def _add_attrs(menu_el: ET.Element, names: list[str], *, values_by_name: dict[str, str] | None = None) -> None:
+                values_by_name = values_by_name or {}
+                for nm0 in (names or []):
+                    nm1 = (nm0 or "").strip()
+                    if not nm1:
+                        continue
+                    a = ET.SubElement(menu_el, _q(HMI_CUST_NS, "HMIAttr"))
+                    a.attrib["name"] = nm1
+                    a.attrib["value"] = values_by_name.get(nm1, "")
+
+            # Resolve LN prefix/lnClass from the referenced LN instance (preferred),
+            # falling back to parsing LnRef (prefix + last-4-char lnClass heuristic).
+            inst_prefix = ""
+            inst_ln_class = ""
+            try:
+                lnref_raw = (self._lnref_from_application() or "").strip()
+            except Exception:
+                lnref_raw = ""
+            try:
+                inst_path = self._guess_ln_instance_path_from_lnref(lnref_raw) if lnref_raw else None
+            except Exception:
+                inst_path = None
+            if inst_path is not None and inst_path.exists():
+                try:
+                    _ln_type, inst_prefix, inst_ln_class = self._hmi_peek_ln_instance_ln_attrs(inst_path)
+                except Exception:
+                    inst_prefix, inst_ln_class = "", ""
+            if not (inst_prefix or inst_ln_class):
+                try:
+                    lnref_norm = self._normalize_lnref(lnref_raw)
+                except Exception:
+                    lnref_norm = (lnref_raw or "").strip()
+                try:
+                    guess_class = lnref_norm[-4:] if len(lnref_norm) >= 5 else ""
+                    guess_prefix = lnref_norm[: -4] if guess_class else lnref_norm
+                    inst_prefix = (guess_prefix or "").strip()
+                    inst_ln_class = (guess_class or "").strip()
+                except Exception:
+                    inst_prefix, inst_ln_class = "", ""
+
+            # Common defaults (apply when the HMIAttr exists on that menu).
+            common_attr_defaults: dict[str, str] = {
+                "langRef": "0.0",
+            }
+
+            # Level 1: TOPIC
+            menu_l1 = _mk_menu(l1, dt="IET_MENU_DATA_TYPE_TOPIC")
+            menu_l1.attrib["hmiSubTreeType"] = "IET_MENU_SUBTREE_PROTECTION_APPLICATION"
+            _add_attrs(menu_l1, ["id", "langRef", "label", "description", "chiptext"], values_by_name=common_attr_defaults)
+
+            # Level 2: TAB
+            menu_l2 = _mk_menu(l2, dt="IET_MENU_DATA_TYPE_TAB")
+            it = ET.SubElement(menu_l1, _q(HMI_CUST_NS, "HMIMenuItem"))
+            it.attrib["ref"] = l2
+
+            # Level 3: SECTION (A..E)
+            section_attrs_by_letter: dict[str, list[str]] = {
+                # Based on ep7_datamodel/datamodel/hmi_template/application/ATeleProt.xml
+                "A": [
+                    "id",
+                    "langRef",
+                    "label",
+                    "fc",
+                    "dlabel",
+                    "prefix",
+                    "lnClass",
+                    "inst",
+                    "sectiontype",
+                    "viewtype",
+                    "reboot",
+                    "caeObjectName",
+                    "caeOperationName",
+                ],
+                "B": [
+                    "id",
+                    "langRef",
+                    "label",
+                    "dlabel",
+                    "prefix",
+                    "lnClass",
+                    "inst",
+                    "sectiontype",
+                    "caeObjectName",
+                    "caeOperationName",
+                ],
+                "C": [
+                    "id",
+                    "langRef",
+                    "label",
+                    "dlabel",
+                    "prefix",
+                    "lnClass",
+                    "inst",
+                    "sectiontype",
+                    "caeObjectName",
+                    "caeOperationName",
+                ],
+                "D": [
+                    "id",
+                    "langRef",
+                    "label",
+                    "fc",
+                    "dlabel",
+                    "prefix",
+                    "lnClass",
+                    "inst",
+                    "sectiontype",
+                    "caeObjectName",
+                    "caeOperationName",
+                ],
+                "E": [
+                    "id",
+                    "langRef",
+                    "label",
+                    "dlabel",
+                    "prefix",
+                    "lnClass",
+                    "inst",
+                    "sectiontype",
+                    "reboot",
+                    "caeObjectName",
+                    "caeOperationName",
+                ],
+            }
+
+            # User-specified defaults for IET SECTION menus.
+            section_id_by_letter: dict[str, str] = {"A": "1", "B": "2", "C": "3", "D": "4", "E": "5"}
+            sectiontype_by_letter: dict[str, str] = {
+                "A": "setting-section",
+                "B": "setting-group-section",
+                "C": "setting-section",
+                "D": "setting-section",
+                "E": "setting-matrix",
+            }
+
+            menu_sections: dict[str, ET.Element] = {}
+            for k in ("A", "B", "C", "D", "E"):
+                nm = sections[k]
+                menu_sections[k] = _mk_menu(nm, dt="IET_MENU_DATA_TYPE_SECTION")
+
+                section_defaults: dict[str, str] = dict(common_attr_defaults)
+                section_defaults.update(
+                    {
+                        "id": section_id_by_letter.get(k, ""),
+                        "dlabel": "LD/LN.NamPlt.d",
+                        "prefix": inst_prefix,
+                        "lnClass": inst_ln_class,
+                        "inst": "*",
+                        "sectiontype": sectiontype_by_letter.get(k, ""),
+                        "viewtype": "Routing",
+                        "reboot": "true",
+                        "caeObjectName": "BAYPROTECTION",
+                        "caeOperationName": "editBayProtection",
+                    }
+                )
+                if k in ("A", "D"):
+                    section_defaults["fc"] = "configuration"
+                _add_attrs(menu_sections[k], section_attrs_by_letter.get(k, []), values_by_name=section_defaults)
+                it2 = ET.SubElement(menu_l2, _q(HMI_CUST_NS, "HMIMenuItem"))
+                it2.attrib["ref"] = nm
+
+            # Level 4: SETTING PARAMETERS
+            menu_l4 = _mk_menu(l4, dt="IET_MENU_DATA_TYPE_SETTING_PARAMETERS", vt="IET_MENU_VIEW_TYPE_SETTING_SECTION")
+            setting_defaults: dict[str, str] = dict(common_attr_defaults)
+            setting_defaults["order"] = "1"
+            _add_attrs(menu_l4, ["order", "langRef", "label", "readonly", "IET_HARDLINK_DEFINITION"], values_by_name=setting_defaults)
+            it3 = ET.SubElement(menu_sections["A"], _q(HMI_CUST_NS, "HMIMenuItem"))
+            it3.attrib["ref"] = l4
+        except Exception:
+            pass
+
+        # Switch to HMI tab and show the newly created file.
+        try:
+            if self.notebook is not None and self.tab_hmi is not None:
+                self.notebook.select(self.tab_hmi)
+        except Exception:
+            pass
+
+        self._refresh_hmi_views(select_first_menu=True)
+        self._mark_hmi_unsaved()
+        try:
+            rel = os.fspath(target_path.relative_to(base_dir))
+        except Exception:
+            rel = os.fspath(target_path.name)
+        self._refresh_hmi_search_list(select_rel=rel)
+
+        # Populate outputs/settings items using the same rules as Refresh.
+        try:
+            self._hmi_generate_from_application()
+        except Exception:
+            pass
+
+        # Mark all freshly created content as added so all scopes show green background.
+        try:
+            self._hmi_mark_added_recursive(self._hmi_root)
+            self._refresh_hmi_views(select_first_menu=True, open_selection_path=False)
+        except Exception:
+            pass
+
+        # For newly created HMI from AFB, default to fully expanded trees
+        # in IED/IET/Manual scopes.
+        try:
+            scope0 = (getattr(self, "_hmi_scope", "ied") or "ied").lower()
+            for s in ("ied", "iet", "manual"):
+                self._hmi_set_scope(s, refresh=False)
+                self._refresh_hmi_views(select_first_menu=True, open_selection_path=False)
+                self._hmi_unfold_all()
+        except Exception:
+            pass
+        finally:
+            try:
+                self._hmi_set_scope(scope0, refresh=False)
+            except Exception:
+                pass
+            try:
+                self._update_hmi_tree_action_state()
+                self._hmi_update_fold_button_state()
+            except Exception:
+                pass
+
+        self._set_status(f"Created HMI: {os.fspath(target_path)}")
+
     def _open_application(self) -> None:
         app_dir = self._application_dir()
         initialdir = app_dir if app_dir.exists() else self.workspace_root
@@ -16072,7 +23349,7 @@ class MainWindow(tk.Tk):
         m_file.add_command(label="Save", accelerator="Ctrl+S", command=self._save_shortcut)
         m_file.add_command(label="Save As...", accelerator="Ctrl+Shift+S", command=self._save_as_shortcut)
         m_file.add_separator()
-        m_file.add_command(label="Exit", command=self.destroy)
+        m_file.add_command(label="Exit", command=self._on_exit)
 
         menubar.add_cascade(label="File", menu=m_file)
 
@@ -16088,3 +23365,280 @@ class MainWindow(tk.Tk):
 
     def _set_status(self, text: str) -> None:
         self.status.set(text)
+
+    def _ui_state_path(self) -> Path:
+        # Prefer %APPDATA% on Windows; fallback to user home.
+        try:
+            base = os.getenv("APPDATA")
+            if base:
+                return Path(base) / APP_TITLE / "ui_state.json"
+        except Exception:
+            pass
+        return Path.home() / f".{APP_TITLE.lower()}" / "ui_state.json"
+
+    def _load_ui_state(self) -> dict[str, object]:
+        p = self._ui_state_path()
+        try:
+            if not p.exists():
+                return {}
+            obj = json.loads(p.read_text(encoding="utf-8"))
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            return {}
+
+    def _schedule_save_ui_state(self) -> None:
+        try:
+            if self._ui_state_save_after_id is not None:
+                self.after_cancel(self._ui_state_save_after_id)
+        except Exception:
+            pass
+
+        try:
+            self._ui_state_save_after_id = self.after(200, self._save_ui_state_now)
+        except Exception:
+            self._ui_state_save_after_id = None
+
+    def _save_ui_state_now(self) -> None:
+        self._ui_state_save_after_id = None
+        p = self._ui_state_path()
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            tmp.write_text(json.dumps(self._ui_state, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(p)
+        except Exception:
+            pass
+
+    def _on_exit(self) -> None:
+        try:
+            self._hmi_capture_column_widths()
+        except Exception:
+            pass
+        try:
+            self._save_ui_state_now()
+        except Exception:
+            pass
+
+        try:
+            super().destroy()
+        except Exception:
+            try:
+                tk.Tk.destroy(self)
+            except Exception:
+                pass
+
+    def _hmi_restore_column_widths(self) -> None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+        pref = getattr(self, "_hmi_pref_col_widths", None) or {}
+        if not pref:
+            return
+        try:
+            if "#0" in pref:
+                tv.column("#0", width=int(pref["#0"]))
+            for c in tv["columns"]:
+                if c in pref:
+                    tv.column(c, width=int(pref[c]))
+        except Exception:
+            pass
+
+    def _hmi_capture_column_widths(self) -> None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+        widths: dict[str, int] = {}
+        try:
+            widths["#0"] = int(tv.column("#0").get("width") or 0)
+            for c in tv["columns"]:
+                widths[c] = int(tv.column(c).get("width") or 0)
+        except Exception:
+            return
+        self._hmi_pref_col_widths = {k: v for k, v in widths.items() if v > 0}
+        self._ui_state["hmi_column_widths"] = dict(self._hmi_pref_col_widths)
+        self._schedule_save_ui_state()
+
+    def _hmi_on_tree_mouse_release(self, e: tk.Event) -> None:
+        tv = self._hmi_tv_menus
+        if tv is None:
+            return
+        try:
+            region = tv.identify_region(int(e.x), int(e.y))
+            if region == "separator":
+                self._hmi_capture_column_widths()
+                self._hmi_schedule_column_resize()
+                try:
+                    self.after(140, self._hmi_capture_column_widths)
+                except Exception:
+                    pass
+                return
+
+            # Single-click dropdown editing for DO/DA refs.
+            if region != "cell":
+                return
+            iid = tv.identify_row(int(e.y))
+            if not iid:
+                return
+            col = tv.identify_column(int(e.x))
+
+            def _col_id_from_ident(col0: str) -> str:
+                if col0 == "#0":
+                    return "#0"
+                try:
+                    if not (col0 or "").startswith("#"):
+                        return ""
+                    idx = int(col0[1:]) - 1
+                    cols0 = list(tv["columns"])
+                    if 0 <= idx < len(cols0):
+                        return str(cols0[idx] or "")
+                except Exception:
+                    return ""
+                return ""
+
+            col_id = _col_id_from_ident(col)
+
+            if col_id == "instantiate":
+                # Not instantiate checkbox: only for level-1/2 menus (menu + ref_menu).
+                node = self._hmi_tree_iid_to_node.get(iid)
+                if node is None:
+                    return
+                node_type, _parent_el, el = node
+                tree_kind = (self._hmi_tree_iid_to_kind.get(iid) or "").strip()
+                if node_type != "menu" or el is None:
+                    return
+                if tree_kind not in {"menu", "ref_menu"}:
+                    return
+
+                cur = (el.attrib.get("instantiate") or "").strip().lower()
+                has = cur == "false"
+
+                self._hmi_push_undo()
+                if has:
+                    el.attrib.pop("instantiate", None)
+                else:
+                    el.attrib["instantiate"] = "false"
+
+                self._hmi_ui_tag_set(el, "changed")
+
+                try:
+                    if self._hmi_ui_is_removed(el):
+                        tv.item(iid, tags=("removed",))
+                    elif self._hmi_ui_is_added(el):
+                        tv.item(iid, tags=("added",))
+                    elif self._hmi_ui_is_changed(el):
+                        tv.item(iid, tags=("changed",))
+                    else:
+                        tv.item(iid, tags=())
+                except Exception:
+                    pass
+
+                try:
+                    tv.set(iid, "instantiate", "☑" if (not has) else "☐")
+                except Exception:
+                    pass
+
+                self._mark_hmi_unsaved()
+                try:
+                    self._update_dirty_ui_hmi()
+                except Exception:
+                    pass
+                return
+
+            if col_id == "hideunit":
+                # hideunit checkbox: only on DO rows.
+                node = self._hmi_tree_iid_to_node.get(iid)
+                if node is None:
+                    return
+                kind, _parent_el, el = node
+                if kind != "item" or el is None:
+                    return
+
+                try:
+                    opt = (el.attrib.get("attrOption") or "").strip()
+                except Exception:
+                    opt = ""
+
+                parts = [p for p in re.split(r"[\s,;|]+", opt) if p]
+                has = any(p.strip().lower() == "hideunits" for p in parts)
+
+                self._hmi_push_undo()
+                if has:
+                    parts = [p for p in parts if p.strip().lower() != "hideunits"]
+                else:
+                    parts.append("hideunits")
+
+                delim = " "
+                if "|" in opt:
+                    delim = "|"
+                elif "," in opt:
+                    delim = ","
+                elif ";" in opt:
+                    delim = ";"
+
+                new_opt = delim.join([p for p in parts if p.strip()])
+                if new_opt:
+                    el.attrib["attrOption"] = new_opt
+                else:
+                    el.attrib.pop("attrOption", None)
+
+                self._hmi_ui_tag_set(el, "changed")
+
+                try:
+                    if self._hmi_ui_is_removed(el):
+                        tv.item(iid, tags=("removed",))
+                    elif self._hmi_ui_is_added(el):
+                        tv.item(iid, tags=("added",))
+                    elif self._hmi_ui_is_changed(el):
+                        tv.item(iid, tags=("changed",))
+                    else:
+                        tv.item(iid, tags=())
+                except Exception:
+                    pass
+
+                try:
+                    tv.set(iid, "hideunit", "☑" if (not has) else "☐")
+                except Exception:
+                    pass
+
+                self._mark_hmi_unsaved()
+                try:
+                    self._update_dirty_ui_hmi()
+                except Exception:
+                    pass
+                return
+
+            if col_id not in {"doRef", "daRef"}:
+                return
+
+            field = col_id
+            if (
+                isinstance(getattr(self, "_hmi_edit_cb", None), ttk.Combobox)
+                and getattr(self, "_hmi_edit_cb_iid", None) == iid
+                and getattr(self, "_hmi_edit_cb_col", None) == field
+            ):
+                try:
+                    self._combobox_toggle_posted(self._hmi_edit_cb)  # type: ignore[arg-type]
+                except Exception:
+                    pass
+                return
+
+            node = self._hmi_tree_iid_to_node.get(iid)
+            if node is None:
+                return
+            kind, _parent_el, _el = node
+            if kind == "item":
+                pass
+            elif kind == "data":
+                # Level-4 rows only allow daRef editing.
+                if field != "daRef":
+                    return
+            else:
+                return
+
+            try:
+                tv.selection_set(iid)
+            except Exception:
+                pass
+            self._hmi_begin_cell_edit(iid, col)
+        except Exception:
+            pass

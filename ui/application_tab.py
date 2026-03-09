@@ -43,6 +43,9 @@ class ApplicationTab(ttk.Frame):
         o.btn_app_refresh = ttk.Button(toolbar, text="Refresh", command=o._refresh_application_from_latest_ln_instance)
         o.btn_app_refresh.pack(side="left", padx=(8, 0))
 
+        o.btn_app_create_hmi = ttk.Button(toolbar, text="Create HMI for this AFB", command=o._create_hmi_for_this_afb)
+        o.btn_app_create_hmi.pack(side="left", padx=(8, 0))
+
         row2 = ttk.Frame(self, padding=(10, 8, 10, 0))
         row2.pack(fill="x")
         ttk.Label(row2, text="Search").pack(side="left")
