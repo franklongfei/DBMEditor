@@ -185,13 +185,14 @@ class NewDOTypeDialog(tk.Toplevel):
                 finally:
                     self._id_internal_update = False
 
-            if not self.var_cdc.get().strip() and callable(self._get_base_cdc):
+            # Always sync CDC from selected base DOType so users see it immediately
+            # when switching "Create from" entries.
+            if callable(self._get_base_cdc):
                 try:
                     cdc0 = (self._get_base_cdc(base_id) or "").strip()
                 except Exception:
                     cdc0 = ""
-                if cdc0:
-                    self.var_cdc.set(cdc0)
+                self.var_cdc.set(cdc0)
 
         def apply_filter(*_args) -> None:
             raw = (self.var_filter.get() or "").strip().lower()
@@ -1217,6 +1218,19 @@ class DATable(ttk.Frame):
         if col_index < 0 or col_index >= len(cols):
             return
         col_name = cols[col_index]
+
+        # UX rule: for ENUM DA rows, double-clicking "type" should open
+        # the full Edit dialog instead of inline dropdown editing.
+        try:
+            row = self._row_by_iid(iid)
+            if row is not None:
+                bt = (row.get("bType") or "").strip().upper()
+                if bt == "ENUM" and col_name == "type":
+                    self.edit_selected()
+                    return
+        except Exception:
+            pass
+
         if self._is_dropdown_cell(iid, col_name):
             return
         self._begin_inline_edit(iid, col_name)
@@ -1245,6 +1259,17 @@ class DATable(ttk.Frame):
             if col_index < 0 or col_index >= len(cols):
                 return None
             col_name = cols[col_index]
+
+            # UX rule: enum type is edited from dialog on double-click;
+            # single-click should not open inline dropdown.
+            try:
+                row = self._row_by_iid(iid)
+                if row is not None:
+                    bt = (row.get("bType") or "").strip().upper()
+                    if bt == "ENUM" and col_name == "type":
+                        return None
+            except Exception:
+                pass
 
             if not self._is_dropdown_cell(iid, col_name):
                 return None
@@ -1659,12 +1684,14 @@ class DoTemplateTab(ttk.Frame):
         catalog: TypeCatalog,
         get_btype_options: Callable[[], list[str]] | None = None,
         set_status: Callable[[str], None] | None = None,
+        on_do_type_saved: Callable[[str], None] | None = None,
     ):
         super().__init__(parent)
         self.workspace_root = Path(workspace_root)
         self.catalog = catalog
         self._get_btype_options_cb = get_btype_options
         self._set_status_cb = set_status
+        self._on_do_type_saved_cb = on_do_type_saved
 
         self._type_file_cache: dict[tuple[str, str], Path | None] = {}
 
@@ -2950,6 +2977,14 @@ class DoTemplateTab(ttk.Frame):
         self.refresh_search_list(select_rel=rel)
         self._set_status(f"Saved DO template: {os.fspath(target_path)}")
         self.mark_saved()
+
+        # Notify host so dependent UIs (e.g. LN template DO type dropdown)
+        # can pick up new DOType ids immediately without app restart.
+        try:
+            if self._on_do_type_saved_cb is not None:
+                self._on_do_type_saved_cb(do_id)
+        except Exception:
+            pass
 
     def save_do_template_as(self) -> None:
         cur_id = (self._do_tmpl_id.get() or "").strip()

@@ -128,7 +128,7 @@ class HmiTab(ttk.Frame):
                     "hmiSubTreeType": ("hmiSubTreeType", 140, "w"),
                     "doRef": ("doRef", 200, "w"),
                     "daRef": ("daRef", 110, "w"),
-                    "hideunit": ("hideunit", 70, "center"),
+                    "hideunit": ("In PU value", 90, "center"),
                 }
                 for c in columns:
                     h, w, anchor = cfg.get(c, (c, 110, "w"))
