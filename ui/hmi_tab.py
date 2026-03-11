@@ -43,6 +43,22 @@ class HmiTab(ttk.Frame):
         o.var_hmi_selected = tk.StringVar(value="")
         o.cb_hmi = ttk.Combobox(row2, textvariable=o.var_hmi_selected, values=[], width=66)
         o.cb_hmi.pack(side="left", padx=(10, 0))
+
+        def _open_search_dropdown(_event: tk.Event | None = None) -> None:
+            try:
+                o.cb_hmi.focus_set()
+            except Exception:
+                pass
+            try:
+                o.cb_hmi.after_idle(lambda: o.cb_hmi.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            o.cb_hmi.bind("<Button-1>", _open_search_dropdown, add="+")
+        except Exception:
+            pass
+
         ttk.Button(row2, text="Load", command=o._open_hmi_from_search).pack(side="left", padx=(8, 0))
 
         o.lbl_hmi_match = ttk.Label(row2, text="")

@@ -22,6 +22,35 @@ except ModuleNotFoundError as e:
     from ui.common import SCL_NS, deepcopy_et_element, find_type_file, local_name, qname, scan_xml_relpaths
 
 
+def _sort_filter_matches(raw: str, values: list[str]) -> list[str]:
+    q = (raw or "").strip().lower()
+    vals = list(values or [])
+    if not q:
+        return vals
+
+    def rank(item: tuple[int, str]) -> tuple[int, int]:
+        idx, v = item
+        text = (v or "").strip().lower()
+        stem = Path(text).stem.lower() if text else ""
+        if text == q:
+            pri = 0
+        elif stem == q:
+            pri = 1
+        elif text == f"{q}.xml":
+            pri = 2
+        elif stem.startswith(q):
+            pri = 3
+        elif q in stem:
+            pri = 4
+        elif text.startswith(q):
+            pri = 5
+        else:
+            pri = 6
+        return (pri, idx)
+
+    return [v for _i, v in sorted(enumerate(vals), key=rank)]
+
+
 class _EnumTypeSaveAsDialog(tk.Toplevel):
     def __init__(self, parent: tk.Misc, *, initial_id: str = ""):
         super().__init__(parent)
@@ -284,6 +313,15 @@ class EnumValTable(ttk.Frame):
         except Exception:
             pass
         self._saved_sigs = self._snapshot_sigs()
+        self.refresh()
+
+    def mark_all_rows_added(self) -> None:
+        for r in (self.rows or []):
+            try:
+                r[self._UI_ADDED] = "1"
+                r.pop(self._UI_DELETED, None)
+            except Exception:
+                pass
         self.refresh()
 
     def commit_any_edit(self) -> None:
@@ -697,6 +735,23 @@ class NewEnumTypeDialog(tk.Toplevel):
         cb_base.grid(row=1, column=1, sticky="we", padx=(10, 0), pady=(0, 4))
         ttk.Label(frm, text="").grid(row=1, column=0)
 
+        def _open_base_dropdown(_event: tk.Event | None = None) -> None:
+            # Allow opening the dropdown by clicking anywhere on the combobox,
+            # not only on the arrow button.
+            try:
+                cb_base.focus_set()
+            except Exception:
+                pass
+            try:
+                cb_base.after_idle(lambda: cb_base.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            cb_base.bind("<Button-1>", _open_base_dropdown, add="+")
+        except Exception:
+            pass
+
         ttk.Label(frm, text="File name").grid(row=2, column=0, sticky="w", pady=4)
         self.var_id = tk.StringVar(value="")
         ent_id = ttk.Entry(frm, textvariable=self.var_id, width=64)
@@ -759,21 +814,26 @@ class NewEnumTypeDialog(tk.Toplevel):
                     return all(t in lv for t in tokens)
 
                 filtered = [x for x in base_values if ok(x)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_base.get() or "").strip()
             cb_base["values"] = filtered[:1500]
             if raw and filtered:
                 if cur != filtered[0]:
                     self.var_base.set(filtered[0])
-            elif (not raw) and filtered and (cur not in filtered):
-                self.var_base.set(filtered[0])
+            elif (not raw) and cur and (cur not in filtered):
+                self.var_base.set("")
 
         self.var_base.trace_add("write", prefill)
         self.var_filter.trace_add("write", apply_filter)
         apply_filter()
         prefill()
 
-        ent_id.focus_set()
+        try:
+            ent_filter.focus_set()
+            ent_filter.select_range(0, tk.END)
+        except Exception:
+            pass
 
     def _ok(self) -> None:
         new_id = (self.var_id.get() or "").strip()
@@ -903,6 +963,22 @@ class EnumTab(ttk.Frame):
 
         self.cb_enum = ttk.Combobox(row2, textvariable=self.var_enum_selected, values=[], width=66)
         self.cb_enum.pack(side="left", padx=(10, 0))
+
+        def _open_search_dropdown(_event: tk.Event | None = None) -> None:
+            try:
+                self.cb_enum.focus_set()
+            except Exception:
+                pass
+            try:
+                self.cb_enum.after_idle(lambda: self.cb_enum.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            self.cb_enum.bind("<Button-1>", _open_search_dropdown, add="+")
+        except Exception:
+            pass
+
         ttk.Button(row2, text="Load", command=self.open_enum_type_from_search).pack(side="left", padx=(8, 0))
 
         self.lbl_enum_match = ttk.Label(row2, text="")
@@ -1011,6 +1087,7 @@ class EnumTab(ttk.Frame):
                     return all(t in lv for t in tokens)
 
                 filtered = [v for v in self._all_enum_files if ok(v)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_enum_selected.get() or "").strip()
 
@@ -1020,8 +1097,8 @@ class EnumTab(ttk.Frame):
             if raw and filtered:
                 if cur != filtered[0]:
                     self.var_enum_selected.set(filtered[0])
-            elif (not raw) and filtered and (cur not in filtered):
-                self.var_enum_selected.set(filtered[0])
+            elif (not raw) and cur and (cur not in filtered):
+                self.var_enum_selected.set("")
             suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
             self.lbl_enum_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
 
@@ -1067,6 +1144,11 @@ class EnumTab(ttk.Frame):
             self._enum_file_path = None
             try:
                 self.var_enum_selected.set("")
+            except Exception:
+                pass
+            try:
+                if self._enum_table is not None:
+                    self._enum_table.mark_all_rows_added()
             except Exception:
                 pass
         else:

@@ -40,6 +40,35 @@ except ModuleNotFoundError as e:
     )
 
 
+def _sort_filter_matches(raw: str, values: list[str]) -> list[str]:
+    q = (raw or "").strip().lower()
+    vals = list(values or [])
+    if not q:
+        return vals
+
+    def rank(item: tuple[int, str]) -> tuple[int, int]:
+        idx, v = item
+        text = (v or "").strip().lower()
+        stem = Path(text).stem.lower() if text else ""
+        if text == q:
+            pri = 0
+        elif stem == q:
+            pri = 1
+        elif text == f"{q}.xml":
+            pri = 2
+        elif stem.startswith(q):
+            pri = 3
+        elif q in stem:
+            pri = 4
+        elif text.startswith(q):
+            pri = 5
+        else:
+            pri = 6
+        return (pri, idx)
+
+    return [v for _i, v in sorted(enumerate(vals), key=rank)]
+
+
 __all__ = ['LNodeTypeEditor']
 
 
@@ -109,6 +138,7 @@ class DOEditDialog(tk.Toplevel):
                     return all(t in lv for t in tokens)
 
                 filtered = [v for v in self._all_do_types if ok(v)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = self.var_type.get().strip()
             max_show = 1500
@@ -117,8 +147,8 @@ class DOEditDialog(tk.Toplevel):
             if raw and filtered:
                 if cur != filtered[0]:
                     self.var_type.set(filtered[0])
-            elif (not raw) and filtered and (cur not in filtered):
-                self.var_type.set(filtered[0])
+            elif (not raw) and cur and (cur not in filtered):
+                self.var_type.set("")
             suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
             self.lbl_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
 
@@ -474,6 +504,16 @@ class DOTable(ttk.Frame):
         except Exception:
             pass
         self._saved_sig_by_name = self._snapshot_sig_by_name()
+        self.refresh()
+
+    def mark_all_rows_added(self) -> None:
+        for x in (self.rows or []):
+            try:
+                setattr(x, self._UI_ADDED, True)
+                if hasattr(x, self._UI_DELETED):
+                    delattr(x, self._UI_DELETED)
+            except Exception:
+                pass
         self.refresh()
 
     def edit_selected(self) -> None:
@@ -1176,6 +1216,16 @@ class PrivateTable(ttk.Frame):
         self._saved_sigs = self._snapshot_sigs()
         self.refresh()
 
+    def mark_all_rows_added(self) -> None:
+        for x in (self.rows or []):
+            try:
+                setattr(x, self._UI_ADDED, True)
+                if hasattr(x, self._UI_DELETED):
+                    delattr(x, self._UI_DELETED)
+            except Exception:
+                pass
+        self.refresh()
+
     def set_rows(self, rows: list[PrivateItem]) -> None:
         # Loading rows resets UI-only state.
         self.rows = [PrivateItem(attrib=dict(x.attrib), inner_xml=x.inner_xml) for x in (rows or [])]
@@ -1604,6 +1654,21 @@ class NewTemplateDialog(tk.Toplevel):
         cb_base.grid(row=1, column=1, sticky="we", padx=(10, 0), pady=(0, 4))
         ttk.Label(frm, text="").grid(row=1, column=0)
 
+        def _open_base_dropdown(_event: tk.Event | None = None) -> None:
+            try:
+                cb_base.focus_set()
+            except Exception:
+                pass
+            try:
+                cb_base.after_idle(lambda: cb_base.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            cb_base.bind("<Button-1>", _open_base_dropdown, add="+")
+        except Exception:
+            pass
+
         ttk.Label(frm, text="File name").grid(row=2, column=0, sticky="w", pady=4)
         self.var_id = tk.StringVar(value="")
         ent_id = ttk.Entry(frm, textvariable=self.var_id, width=64)
@@ -1643,14 +1708,14 @@ class NewTemplateDialog(tk.Toplevel):
         self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
 
         def unique_copy_name(base: str) -> str:
-            # User requested suffix '_cpoy' (typo kept as-is).
+            # Keep generated IDs consistent with other copy dialogs.
             existing = {x.id for x in self._lnode_infos}
-            candidate = f"{base}_cpoy"
+            candidate = f"{base}_copy"
             if candidate not in existing:
                 return candidate
             i = 2
             while True:
-                candidate = f"{base}_cpoy{i}"
+                candidate = f"{base}_copy{i}"
                 if candidate not in existing:
                     return candidate
                 i += 1
@@ -1691,21 +1756,22 @@ class NewTemplateDialog(tk.Toplevel):
                     return all(t in lv for t in tokens)
 
                 filtered = [x for x in base_values if ok(x)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_base.get() or "").strip()
             cb_base["values"] = filtered[:1500]
             if raw and filtered:
                 if cur != filtered[0]:
                     self.var_base.set(filtered[0])
-            elif (not raw) and filtered and (cur not in filtered):
-                self.var_base.set(filtered[0])
+            elif (not raw) and cur and (cur not in filtered):
+                self.var_base.set("")
 
         self.var_base.trace_add("write", prefill)
         self.var_filter.trace_add("write", apply_filter)
         apply_filter()
         prefill()
 
-        ent_id.focus_set()
+        ent_filter.focus_set()
 
     def _ok(self) -> None:
         new_id = self.var_id.get().strip()
@@ -2644,6 +2710,22 @@ class LNodeTypeEditor(ttk.Frame):
             width=66,
         )
         self.cb.pack(side="left", padx=(10, 0))
+
+        def _open_search_dropdown(_event: tk.Event | None = None) -> None:
+            try:
+                self.cb.focus_set()
+            except Exception:
+                pass
+            try:
+                self.cb.after_idle(lambda: self.cb.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            self.cb.bind("<Button-1>", _open_search_dropdown, add="+")
+        except Exception:
+            pass
+
         ttk.Button(row2, text="Load", command=self.load_selected).pack(side="left", padx=(8, 0))
 
         self.lbl_ln_match = ttk.Label(row2, text="")
@@ -2742,6 +2824,8 @@ class LNodeTypeEditor(ttk.Frame):
                 filtered_infos = [i for i in self._all_lnode_infos if ok(i)]
 
             filtered_ids = [i.id for i in filtered_infos]
+            if raw:
+                filtered_ids = _sort_filter_matches(raw, filtered_ids)
 
             cur = self.var_selected.get().strip()
             max_show = 1200
@@ -2750,8 +2834,8 @@ class LNodeTypeEditor(ttk.Frame):
             if raw and filtered_ids:
                 if cur != filtered_ids[0]:
                     self.var_selected.set(filtered_ids[0])
-            elif (not raw) and filtered_ids and (cur not in filtered_ids):
-                self.var_selected.set(filtered_ids[0])
+            elif (not raw) and cur and (cur not in filtered_ids):
+                self.var_selected.set("")
             suffix = "" if len(filtered_ids) <= max_show else f" (showing first {max_show})"
             self.lbl_ln_match.configure(text=f"{len(filtered_ids)} match{'' if len(filtered_ids)==1 else 'es'}{suffix}")
 
@@ -3059,13 +3143,6 @@ class LNodeTypeEditor(ttk.Frame):
         desc = res.get("desc", "").strip()
 
         target_path = self.iec61850_dir / "LNodeType" / f"{new_id}.xml"
-        if target_path.exists():
-            if not messagebox.askyesno(
-                "Overwrite?",
-                f"Template already exists:\n{os.fspath(target_path)}\n\nOverwrite it?",
-                parent=self,
-            ):
-                return
 
         if base_id and base_id != "(Blank)":
             base_info = self._get_info(base_id)
@@ -3104,26 +3181,6 @@ class LNodeTypeEditor(ttk.Frame):
         info = LNodeTypeInfo(id=new_id, ln_class=ln_class, desc=desc, file_path=target_path)
         self.model = LNodeTypeModel(info=info, lnode_attrib=attrib, dos=dos, privates=privs)
 
-        try:
-            save_lnode_type(self.model, make_backup=False, target_path=target_path)
-        except Exception as e:
-            messagebox.showerror("Create failed", str(e), parent=self)
-            return
-
-        # Update catalog so it becomes selectable
-        existing = next((x for x in self.catalog.lnode_types if x.id == new_id), None)
-        if existing is None:
-            self.catalog.lnode_types.append(info)
-        else:
-            self.catalog.lnode_types = [info if x.id == new_id else x for x in self.catalog.lnode_types]
-        self.catalog.lnode_types.sort(key=lambda x: (x.ln_class, x.id))
-        self._all_lnode_infos = list(self.catalog.lnode_types)
-        self._all_lnode_ids = [x.id for x in self._all_lnode_infos]
-        try:
-            self._apply_ln_filter()
-        except Exception:
-            self.cb["values"] = self._all_lnode_ids
-
         # Load into UI
         self.var_selected.set(new_id)
         self._in_load = True
@@ -3144,15 +3201,24 @@ class LNodeTypeEditor(ttk.Frame):
             pass
         self._refresh_all_rules_view()
 
-        self._saved_sig_full = self._signature_full(dos=self.model.dos, privates=self.model.privates)
-        self.dirty = False
+        try:
+            self.table.mark_all_rows_added()
+        except Exception:
+            pass
+        try:
+            self.private_table.mark_all_rows_added()
+        except Exception:
+            pass
+
+        self._saved_sig_full = None
+        self.dirty = True
         self._update_save_button()
         self._update_create_instance_button()
         meta = f"lnClass={info.ln_class}  file={os.fspath(info.file_path)}"
         if info.desc:
             meta = meta + f"  desc={info.desc}"
         self.lbl_meta.configure(text=meta)
-        self._flash_saved("Created")
+        self._set_status("New LN template created (unsaved)")
 
     def _signature_full(self, *, dos: list[DOItem], privates: list[PrivateItem]) -> tuple:
         sig_dos = tuple(

@@ -55,6 +55,41 @@ _MANAGED_PRIV_TYPES: tuple[str, ...] = (
 )
 
 
+def _local_name(tag: str) -> str:
+    if isinstance(tag, str) and tag.startswith("{"):
+        return tag.split("}", 1)[1]
+    return tag
+
+
+def _sort_filter_matches(raw: str, values: list[str]) -> list[str]:
+    q = (raw or "").strip().lower()
+    vals = list(values or [])
+    if not q:
+        return vals
+
+    def rank(item: tuple[int, str]) -> tuple[int, int]:
+        idx, v = item
+        text = (v or "").strip().lower()
+        stem = Path(text).stem.lower() if text else ""
+        if text == q:
+            pri = 0
+        elif stem == q:
+            pri = 1
+        elif text == f"{q}.xml":
+            pri = 2
+        elif stem.startswith(q):
+            pri = 3
+        elif q in stem:
+            pri = 4
+        elif text.startswith(q):
+            pri = 5
+        else:
+            pri = 6
+        return (pri, idx)
+
+    return [v for _i, v in sorted(enumerate(vals), key=rank)]
+
+
 def _sanitize_filename_stem(stem: str) -> str:
     s = (stem or "").strip()
     if not s:
@@ -82,6 +117,29 @@ def _suggest_application_filename(prefix: str, ln_class: str) -> str:
     stem = f"A{(prefix or '').strip()}{(ln_class or '').strip()}"
     stem = _sanitize_filename_stem(stem)
     return f"{stem}.xml" if stem else ""
+
+
+def _peek_ln_prefix_and_class(path: Path) -> tuple[str, str]:
+    """Read prefix/lnClass from the first LN element in an instance file."""
+    try:
+        root = ET.parse(path).getroot()
+    except Exception:
+        return ("", "")
+
+    ln_el: ET.Element | None = None
+    if _local_name(root.tag) == "LN":
+        ln_el = root
+    else:
+        for el in root.iter():
+            if _local_name(el.tag) == "LN":
+                ln_el = el
+                break
+    if ln_el is None:
+        return ("", "")
+
+    prefix = (ln_el.attrib.get("prefix") or "").strip()
+    ln_class = (ln_el.attrib.get("lnClass") or "").strip()
+    return (prefix, ln_class)
 
 
 def _pick_unique_path(path: Path) -> Path:
@@ -207,6 +265,21 @@ class _CreateFromTemplateDialog(tk.Toplevel):
         self.cb_template.grid(row=1, column=1, sticky="we", pady=(0, 4))
         ttk.Label(frm, text="").grid(row=1, column=0)  # spacer
 
+        def _open_template_dropdown(_event: tk.Event | None = None) -> None:
+            try:
+                self.cb_template.focus_set()
+            except Exception:
+                pass
+            try:
+                self.cb_template.after_idle(lambda: self.cb_template.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            self.cb_template.bind("<Button-1>", _open_template_dropdown, add="+")
+        except Exception:
+            pass
+
         ttk.Label(frm, text="prefix").grid(row=2, column=0, sticky="w", pady=4)
         ttk.Entry(frm, textvariable=self.var_prefix, width=26).grid(row=2, column=1, sticky="w", pady=4)
 
@@ -241,13 +314,15 @@ class _CreateFromTemplateDialog(tk.Toplevel):
                 filtered = [x for x in self._templates if ok(x)]
 
             ids = [x.id for x in filtered]
+            if raw:
+                ids = _sort_filter_matches(raw, ids)
             cur = (self.var_template.get() or "").strip()
             self.cb_template["values"] = ids[:1500]
             if raw and ids:
                 if cur != ids[0]:
                     self.var_template.set(ids[0])
-            elif (not raw) and ids and (cur not in ids):
-                self.var_template.set(ids[0])
+            elif (not raw) and cur and (cur not in ids):
+                self.var_template.set("")
 
         def sync_filename(*_args) -> None:
             tid = (self.var_template.get() or "").strip()
@@ -314,6 +389,7 @@ class _CopyInstanceDialog(tk.Toplevel):
         parent: tk.Misc,
         *,
         instance_relpaths: list[str],
+        lndm_dir: Path,
         suggested_filename: str = "",
     ):
         super().__init__(parent)
@@ -323,8 +399,10 @@ class _CopyInstanceDialog(tk.Toplevel):
         self.grab_set()
 
         self._relpaths = list(instance_relpaths)
+        self._lndm_dir = Path(lndm_dir)
         self._source_values = [_BLANK_SOURCE_OPTION] + self._relpaths
         self._result: dict[str, str] | None = None
+        self._source_ln_cache: dict[str, tuple[str, str]] = {}
 
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
@@ -344,14 +422,61 @@ class _CopyInstanceDialog(tk.Toplevel):
         cb.grid(row=1, column=1, sticky="we", pady=(0, 4))
         ttk.Label(frm, text="").grid(row=1, column=0)
 
-        ttk.Label(frm, text="File name").grid(row=2, column=0, sticky="w", pady=4)
+        def _open_src_dropdown(_event: tk.Event | None = None) -> None:
+            try:
+                cb.focus_set()
+            except Exception:
+                pass
+            try:
+                cb.after_idle(lambda: cb.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            cb.bind("<Button-1>", _open_src_dropdown, add="+")
+        except Exception:
+            pass
+
+        ttk.Label(frm, text="prefix").grid(row=2, column=0, sticky="w", pady=4)
+        self.var_prefix = tk.StringVar(value="")
+        ttk.Entry(frm, textvariable=self.var_prefix, width=36).grid(row=2, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="LN class").grid(row=3, column=0, sticky="w", pady=4)
+        self.var_ln_class = tk.StringVar(value="")
+        ttk.Entry(frm, textvariable=self.var_ln_class, width=36).grid(row=3, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="File name").grid(row=4, column=0, sticky="w", pady=4)
         self.var_filename = tk.StringVar(value=(suggested_filename or ""))
-        ttk.Entry(frm, textvariable=self.var_filename, width=36).grid(row=2, column=1, sticky="w", pady=4)
+        ttk.Label(frm, textvariable=self.var_filename).grid(row=4, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="(Auto: prefix + LN class)", foreground="#666").grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(2, 0)
+        )
 
         btns = ttk.Frame(frm)
-        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="Copy", command=self._ok).pack(side="right", padx=(0, 8))
+
+        def peek_source_ln(src_rel: str) -> tuple[str, str]:
+            if not src_rel or src_rel == _BLANK_SOURCE_OPTION:
+                return ("", "")
+            cached = self._source_ln_cache.get(src_rel)
+            if cached is not None:
+                return cached
+            path = self._lndm_dir / src_rel
+            vals = _peek_ln_prefix_and_class(path)
+            self._source_ln_cache[src_rel] = vals
+            return vals
+
+        def sync_from_source(*_args) -> None:
+            src_rel = (self.var_src.get() or "").strip()
+            _prefix, ln_class = peek_source_ln(src_rel)
+            self.var_ln_class.set(ln_class)
+
+        def sync_filename(*_args) -> None:
+            filename = _suggest_instance_filename(self.var_prefix.get(), self.var_ln_class.get())
+            self.var_filename.set(filename)
 
         def apply_filter(*_args) -> None:
             raw = (self.var_filter.get() or "").strip().lower()
@@ -365,21 +490,28 @@ class _CopyInstanceDialog(tk.Toplevel):
                     return all(t in lv for t in tokens)
 
                 filtered = [x for x in self._source_values if ok(x)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_src.get() or "").strip()
             cb["values"] = filtered[:2000]
             if raw and filtered:
                 if cur != filtered[0]:
                     self.var_src.set(filtered[0])
-            elif (not raw) and filtered and (cur not in filtered):
-                self.var_src.set(filtered[0])
+            elif (not raw) and cur and (cur not in filtered):
+                self.var_src.set("")
 
         self.var_filter.trace_add("write", apply_filter)
+        self.var_src.trace_add("write", sync_from_source)
+        self.var_prefix.trace_add("write", sync_filename)
+        self.var_ln_class.trace_add("write", sync_filename)
         apply_filter()
+        sync_from_source()
+        sync_filename()
 
         self.bind("<Escape>", lambda _e: self._cancel())
         self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
         cb.bind("<Return>", lambda _e: self._ok())
+        ent_filter.focus_set()
 
     def _ok(self) -> None:
         src = (self.var_src.get() or "").strip()
@@ -389,16 +521,19 @@ class _CopyInstanceDialog(tk.Toplevel):
         if (src != _BLANK_SOURCE_OPTION) and (src not in self._relpaths):
             messagebox.showerror("Invalid", "Source instance not found", parent=self)
             return
-        filename = (self.var_filename.get() or "").strip()
+        filename = _suggest_instance_filename(self.var_prefix.get(), self.var_ln_class.get())
         if not filename:
-            messagebox.showerror("Missing", "File name is required", parent=self)
+            messagebox.showerror("Missing", "prefix + LN class must produce a valid file name", parent=self)
             return
-        if "." not in filename:
-            filename = filename + ".xml"
         if any(ch in filename for ch in _INVALID_FILENAME_CHARS):
             messagebox.showerror("Invalid", "File name contains invalid characters", parent=self)
             return
-        self._result = {"src": src, "filename": filename}
+        self._result = {
+            "src": src,
+            "filename": filename,
+            "prefix": (self.var_prefix.get() or "").strip(),
+            "lnClass": (self.var_ln_class.get() or "").strip(),
+        }
         self.destroy()
 
     def _cancel(self) -> None:
@@ -454,6 +589,7 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._lang_rows_filtered: list[_LangRow] = []
         self._priv_rows: list[_PrivRow] = []
         self._saved_sig: str | None = None
+        self._force_dirty: bool = False
         # Per-table snapshots for row-level highlighting (changed vs last saved).
         self._saved_value_sig_by_path: dict[str, str] | None = None
         self._saved_lang_sig_by_path: dict[str, str] | None = None
@@ -595,6 +731,22 @@ class LNInstanceEditorFrame(ttk.Frame):
             width=66,
         )
         self.cb_instance.pack(side="left", padx=(10, 0))
+
+        def _open_search_dropdown(_event: tk.Event | None = None) -> None:
+            try:
+                self.cb_instance.focus_set()
+            except Exception:
+                pass
+            try:
+                self.cb_instance.after_idle(lambda: self.cb_instance.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            self.cb_instance.bind("<Button-1>", _open_search_dropdown, add="+")
+        except Exception:
+            pass
+
         self.cb_instance.bind("<Return>", lambda _e: self.load_selected_instance())
         _bind_undo(self.cb_instance)
         ttk.Button(row2, text="Load", command=self.load_selected_instance).pack(side="left", padx=(8, 0))
@@ -764,6 +916,11 @@ class LNInstanceEditorFrame(ttk.Frame):
         except Exception:
             pass
 
+        try:
+            self.tree_lang.tag_configure("added", background="honeydew2")
+        except Exception:
+            pass
+
         lvsb = ttk.Scrollbar(langbox, orient="vertical", command=self.tree_lang.yview)
         lhsb = ttk.Scrollbar(langbox, orient="horizontal", command=self.tree_lang.xview)
         self.tree_lang.configure(yscrollcommand=lvsb.set, xscrollcommand=lhsb.set)
@@ -860,6 +1017,7 @@ class LNInstanceEditorFrame(ttk.Frame):
                     return all(t in lv for t in tokens)
 
                 filtered = [p for p in self._all_instance_relpaths if ok(p)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_instance_selected.get() or "").strip()
 
@@ -869,8 +1027,8 @@ class LNInstanceEditorFrame(ttk.Frame):
             if raw and filtered:
                 if cur != filtered[0]:
                     self.var_instance_selected.set(filtered[0])
-            elif (not raw) and filtered and (cur not in filtered):
-                self.var_instance_selected.set(filtered[0])
+            elif (not raw) and cur and (cur not in filtered):
+                self.var_instance_selected.set("")
             suffix = "" if len(filtered) <= max_show else f" (showing first {max_show})"
             self.lbl_instance_match.configure(text=f"{len(filtered)} match{'' if len(filtered)==1 else 'es'}{suffix}")
 
@@ -1137,13 +1295,15 @@ class LNInstanceEditorFrame(ttk.Frame):
                 inst=res.get("inst", "0"),
                 ln_desc=res.get("desc", ""),
             )
-            save_ln_instance_document(doc, target_path=target_path, make_backup=False)
         except Exception as e:
             messagebox.showerror("Create failed", str(e), parent=self)
             return
 
-        self.refresh_instance_list()
-        self.load_file(target_path)
+        self._load_doc_into_ui(doc, target_path, status_text=f"New (unsaved): {os.fspath(target_path)}")
+        self._mark_all_rows_added_for_new_doc()
+        self._force_dirty = True
+        self._saved_sig = None
+        self._update_dirty_ui()
 
     def create_instance_with_template_model(self, model) -> None:
         # Called from LN template page: template is already loaded.
@@ -1187,13 +1347,15 @@ class LNInstanceEditorFrame(ttk.Frame):
                 inst=res.get("inst", "0"),
                 ln_desc=res.get("desc", ""),
             )
-            save_ln_instance_document(doc, target_path=target_path, make_backup=False)
         except Exception as e:
             messagebox.showerror("Create failed", str(e), parent=self)
             return
 
-        self.refresh_instance_list()
-        self.load_file(target_path)
+        self._load_doc_into_ui(doc, target_path, status_text=f"New (unsaved): {os.fspath(target_path)}")
+        self._mark_all_rows_added_for_new_doc()
+        self._force_dirty = True
+        self._saved_sig = None
+        self._update_dirty_ui()
 
     def copy_existing_instance_dialog(self) -> None:
         self.refresh_instance_list()
@@ -1201,7 +1363,12 @@ class LNInstanceEditorFrame(ttk.Frame):
         if self.doc is not None:
             suggested = _sanitize_filename_stem(self.doc.file_path.stem + "_copy") + self.doc.file_path.suffix
 
-        dlg = _CopyInstanceDialog(self.winfo_toplevel(), instance_relpaths=self._all_instance_relpaths, suggested_filename=suggested)
+        dlg = _CopyInstanceDialog(
+            self.winfo_toplevel(),
+            instance_relpaths=self._all_instance_relpaths,
+            lndm_dir=self.lndm_dir,
+            suggested_filename=suggested,
+        )
         res = dlg.show()
         if not res:
             return
@@ -1210,7 +1377,6 @@ class LNInstanceEditorFrame(ttk.Frame):
         target_path = _pick_unique_path(target_path)
 
         try:
-            target_path.parent.mkdir(parents=True, exist_ok=True)
             if res["src"] == _BLANK_SOURCE_OPTION:
                 ns = "http://www.iec.ch/61850/2003/SCL"
 
@@ -1223,16 +1389,29 @@ class LNInstanceEditorFrame(ttk.Frame):
                 ln.attrib["inst"] = "0"
                 tree = ET.ElementTree(ln)
                 doc = LNInstanceDocument(file_path=target_path, tree=tree, ns=ns, ln_elements=[ln])
-                save_ln_instance_document(doc, target_path=target_path, make_backup=False)
             else:
                 src_path = self.lndm_dir / res["src"]
-                target_path.write_bytes(src_path.read_bytes())
+                doc = load_ln_instance_document(src_path)
+                doc.file_path = target_path
+
+            # Apply dialog header values so the main UI reflects user's prefix/LN class.
+            update_ln_header(
+                doc,
+                0,
+                lnClass=(res.get("lnClass") or ""),
+                inst=None,
+                prefix=(res.get("prefix") or ""),
+                lnType=None,
+            )
         except Exception as e:
             messagebox.showerror("Copy failed", str(e), parent=self)
             return
 
-        self.refresh_instance_list()
-        self.load_file(target_path)
+        self._load_doc_into_ui(doc, target_path, status_text=f"New (unsaved): {os.fspath(target_path)}")
+        self._mark_all_rows_added_for_new_doc()
+        self._force_dirty = True
+        self._saved_sig = None
+        self._update_dirty_ui()
 
     def open_dialog(self, *, initialdir: Path | None = None) -> None:
         path = filedialog.askopenfilename(
@@ -1396,7 +1575,19 @@ class LNInstanceEditorFrame(ttk.Frame):
             # Never block opening; worst case is fewer placeholders shown.
             pass
 
+        self._load_doc_into_ui(doc, path, status_text=f"Loaded: {os.fspath(path)}")
+
+    def _load_doc_into_ui(self, doc: LNInstanceDocument, path: Path, *, status_text: str) -> None:
+        # New/copy flows can load an in-memory document without going through load_file();
+        # reset template-derived caches to avoid stale rows from a previously opened file.
+        self._tpl_default_values = {}
+        self._tpl_default_langref_ids = {}
+        self._tpl_value_order_index = {}
+        self._tpl_lang_order_index = {}
+        self._tpl_doi_names = []
+
         self.doc = doc
+        self.doc.file_path = Path(path)
         self._undo_stack = []
         self._undoing = False
         self.var_path.set(os.fspath(path))
@@ -1407,12 +1598,13 @@ class LNInstanceEditorFrame(ttk.Frame):
         # document (and the UI may appear not to update). Clear _saved_sig to disable
         # is_dirty() writeback until after the UI is populated.
         self._saved_sig = None
+        self._force_dirty = False
 
         # Always edit the first LN element found.
         self._current_ln_index = 0
         if len(doc.ln_elements) > 1:
             self._set_status(
-                f"Loaded: {os.fspath(path)} (warning: {len(doc.ln_elements)} LN elements found; editing the first one)"
+                f"{status_text} (warning: {len(doc.ln_elements)} LN elements found; editing the first one)"
             )
 
         self._load_current_ln_into_ui()
@@ -1424,7 +1616,7 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._update_doc_dependent_ui()
         self._update_dirty_ui()
         if self.status.get().strip() == "":
-            self._set_status(f"Loaded: {os.fspath(path)}")
+            self._set_status(status_text)
 
         # Keep selector in sync if under lndm_dir
         try:
@@ -1736,6 +1928,15 @@ class LNInstanceEditorFrame(ttk.Frame):
             return True
         return self._lang_row_sig(ref) != saved
 
+    def _lang_row_change_kind(self, ref: LangRefRef) -> str:
+        """Return 'same' | 'changed' | 'added' relative to the last saved baseline."""
+        if self._saved_lang_sig_by_path is None:
+            return "same"
+        saved = self._saved_lang_sig_by_path.get(ref.path)
+        if saved is None:
+            return "added"
+        return "changed" if (self._lang_row_sig(ref) != saved) else "same"
+
     def _priv_row_is_changed(self, iid: str, row: _PrivRow) -> bool:
         if self._saved_priv_sigs is None:
             return False
@@ -1829,7 +2030,9 @@ class LNInstanceEditorFrame(ttk.Frame):
         if not hasattr(self, "tree_lang"):
             return
         for iid, ref in list(self._lang_iid_to_ref.items()):
-            self._set_item_tag(self.tree_lang, iid, "changed", self._lang_row_is_changed(ref))
+            kind = self._lang_row_change_kind(ref)
+            self._set_item_tag(self.tree_lang, iid, "added", kind == "added")
+            self._set_item_tag(self.tree_lang, iid, "changed", kind == "changed")
 
     def _reapply_changed_tags_priv(self) -> None:
         if not hasattr(self, "tree_priv"):
@@ -1869,6 +2072,15 @@ class LNInstanceEditorFrame(ttk.Frame):
         except Exception:
             self._saved_priv_sigs = None
 
+        self._reapply_changed_tags_values()
+        self._reapply_changed_tags_lang()
+        self._render_priv_tree()
+
+    def _mark_all_rows_added_for_new_doc(self) -> None:
+        """Use an empty baseline so current rows are rendered as newly added."""
+        self._saved_value_sig_by_path = {}
+        self._saved_lang_sig_by_path = {}
+        self._saved_priv_sigs = []
         self._reapply_changed_tags_values()
         self._reapply_changed_tags_lang()
         self._render_priv_tree()
@@ -3886,7 +4098,11 @@ class LNInstanceEditorFrame(ttk.Frame):
         )
 
     def is_dirty(self) -> bool:
-        if not self.doc or self._saved_sig is None:
+        if not self.doc:
+            return False
+        if self._force_dirty:
+            return True
+        if self._saved_sig is None:
             return False
         # Ensure doc reflects header edits
         self._apply_header_to_doc()
@@ -4003,6 +4219,7 @@ class LNInstanceEditorFrame(ttk.Frame):
             messagebox.showerror("Save failed", str(e), parent=self)
             return
         self._saved_sig = compute_signature(self.doc)
+        self._force_dirty = False
         self.mark_saved()
         self._update_dirty_ui()
         self._set_status(f"Saved: {os.fspath(self.doc.file_path)}")
@@ -4039,6 +4256,7 @@ class LNInstanceEditorFrame(ttk.Frame):
         self.doc.file_path = target_path
         self.var_path.set(os.fspath(target_path))
         self._saved_sig = compute_signature(self.doc)
+        self._force_dirty = False
         self.mark_saved()
         self._update_dirty_ui()
         self._set_status(f"Saved As: {os.fspath(target_path)}")

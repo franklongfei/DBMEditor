@@ -44,6 +44,22 @@ class AfgTab(ttk.Frame):
         o.var_afg_selected = tk.StringVar(value="")
         o.cb_afg = ttk.Combobox(row2, textvariable=o.var_afg_selected, values=[], width=66)
         o.cb_afg.pack(side="left", padx=(10, 0))
+
+        def _open_search_dropdown(_event: tk.Event | None = None) -> None:
+            try:
+                o.cb_afg.focus_set()
+            except Exception:
+                pass
+            try:
+                o.cb_afg.after_idle(lambda: o.cb_afg.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            o.cb_afg.bind("<Button-1>", _open_search_dropdown, add="+")
+        except Exception:
+            pass
+
         ttk.Button(row2, text="Load", command=o._open_afg_from_search).pack(side="left", padx=(8, 0))
 
         o.lbl_afg_match = ttk.Label(row2, text="")

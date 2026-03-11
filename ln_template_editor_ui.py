@@ -61,6 +61,35 @@ def _deepcopy_et_element(el: ET.Element) -> ET.Element:
     return ET.fromstring(ET.tostring(el, encoding="unicode"))
 
 
+def _sort_filter_matches(raw: str, values: list[str]) -> list[str]:
+    q = (raw or "").strip().lower()
+    vals = list(values or [])
+    if not q:
+        return vals
+
+    def rank(item: tuple[int, str]) -> tuple[int, int]:
+        idx, v = item
+        text = (v or "").strip().lower()
+        stem = Path(text).stem.lower() if text else ""
+        if text == q:
+            pri = 0
+        elif stem == q:
+            pri = 1
+        elif text == f"{q}.xml":
+            pri = 2
+        elif stem.startswith(q):
+            pri = 3
+        elif q in stem:
+            pri = 4
+        elif text.startswith(q):
+            pri = 5
+        else:
+            pri = 6
+        return (pri, idx)
+
+    return [v for _i, v in sorted(enumerate(vals), key=rank)]
+
+
 def _clone_et_element_with_id_map(el: ET.Element) -> tuple[ET.Element, dict[int, int]]:
     """Clone an ElementTree element while producing an id(old)->id(new) mapping.
 
@@ -309,6 +338,21 @@ class _AfgNewDialog(tk.Toplevel):
         self.cb_source.grid(row=1, column=1, sticky="we", padx=(8, 0), pady=(6, 0))
         ttk.Label(frm, text="").grid(row=1, column=0)
 
+        def _open_source_dropdown(_event: tk.Event | None = None) -> None:
+            try:
+                self.cb_source.focus_set()
+            except Exception:
+                pass
+            try:
+                self.cb_source.after_idle(lambda: self.cb_source.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            self.cb_source.bind("<Button-1>", _open_source_dropdown, add="+")
+        except Exception:
+            pass
+
         ttk.Label(frm, text="File name").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.var_name = tk.StringVar(value=initial_name)
         ent_name = ttk.Entry(frm, textvariable=self.var_name, width=48)
@@ -343,6 +387,7 @@ class _AfgNewDialog(tk.Toplevel):
                     return all(t in lv for t in tokens)
 
                 filtered = [x for x in self._source_values if ok(x)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_source.get() or "").strip()
             self.cb_source["values"] = filtered[:2000]
@@ -350,8 +395,8 @@ class _AfgNewDialog(tk.Toplevel):
                 if filtered:
                     self.var_source.set(filtered[0])
                 return
-            if filtered and cur not in filtered:
-                self.var_source.set(filtered[0])
+            if cur and cur not in filtered:
+                self.var_source.set("")
 
         def on_source_change(*_args) -> None:
             src_rel = (self.var_source.get() or "").strip()
@@ -2253,6 +2298,7 @@ class _PickFromListDialog(tk.Toplevel):
                     return all(t in lv for t in tokens)
 
                 filtered = [x for x in self._items_all if ok(x)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_value.get() or "").strip()
             self.cb["values"] = filtered[:2000]
@@ -2260,8 +2306,8 @@ class _PickFromListDialog(tk.Toplevel):
                 if filtered:
                     self.var_value.set(filtered[0])
                 return
-            if filtered and cur not in filtered:
-                self.var_value.set(filtered[0])
+            if cur and cur not in filtered:
+                self.var_value.set("")
 
         self.var_filter.trace_add("write", apply_filter)
         apply_filter()
@@ -2474,6 +2520,21 @@ class _CreateFromLnInstanceDialog(tk.Toplevel):
         self.cb_ln.grid(row=1, column=1, sticky="we", pady=(0, 8))
         ttk.Label(frm, text="").grid(row=1, column=0)
 
+        def _open_ln_dropdown(_event: tk.Event | None = None) -> None:
+            try:
+                self.cb_ln.focus_set()
+            except Exception:
+                pass
+            try:
+                self.cb_ln.after_idle(lambda: self.cb_ln.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            self.cb_ln.bind("<Button-1>", _open_ln_dropdown, add="+")
+        except Exception:
+            pass
+
         self.var_name = tk.StringVar(value="")
         self.var_class = tk.StringVar(value="")
         self.var_seq = tk.StringVar(value="50")
@@ -2512,6 +2573,7 @@ class _CreateFromLnInstanceDialog(tk.Toplevel):
                     return all(t in lv for t in tokens)
 
                 filtered = [x for x in self._items_all if ok(x)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_ln.get() or "").strip()
             self.cb_ln["values"] = filtered[:2000]
@@ -2519,8 +2581,8 @@ class _CreateFromLnInstanceDialog(tk.Toplevel):
                 if filtered:
                     self.var_ln.set(filtered[0])
                 return
-            if filtered and cur not in filtered:
-                self.var_ln.set(filtered[0])
+            if cur and cur not in filtered:
+                self.var_ln.set("")
 
         def on_select(*_args) -> None:
             self._apply_autofill_from_selected_ln()
@@ -2608,6 +2670,596 @@ class _CreateFromLnInstanceDialog(tk.Toplevel):
         return self._result
 
 
+class _ManualSettingSrcDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        lndm_dir: Path,
+        ln_relpaths: list[str],
+        resolve_ln: Callable[[str], tuple[str, list[str]]],
+        initial_result: str = "",
+    ):
+        super().__init__(parent)
+        self.title("Manual input")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._lndm_dir = Path(lndm_dir)
+        self._ln_relpaths_all = list(ln_relpaths or [])
+        self._resolve_ln = resolve_ln
+        self._result: str | None = None
+        self._last_auto_result = (initial_result or "")
+        self._result_user_edited = False
+        self._result_syncing = False
+        self._do_names_all: list[str] = []
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        self.var_scope = tk.StringVar(value="bay")
+        self.var_ln_filter = tk.StringVar(value="")
+        self.var_ln = tk.StringVar(value="")
+        self.var_do_filter = tk.StringVar(value="")
+        self.var_do = tk.StringVar(value="")
+        self.var_result = tk.StringVar(value=(initial_result or ""))
+
+        ttk.Label(frm, text="Scope").grid(row=0, column=0, sticky="w", pady=4)
+        cb_scope = ttk.Combobox(frm, textvariable=self.var_scope, values=("bay", "proxy"), state="readonly", width=20)
+        cb_scope.grid(row=0, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="LN instance filter").grid(row=1, column=0, sticky="w", pady=4)
+        ent_filter = ttk.Entry(frm, textvariable=self.var_ln_filter, width=56)
+        ent_filter.grid(row=1, column=1, sticky="we", pady=4)
+
+        self.cb_ln = ttk.Combobox(frm, textvariable=self.var_ln, values=self._ln_relpaths_all, width=56)
+        self.cb_ln.grid(row=2, column=1, sticky="we", pady=4)
+
+        ttk.Label(frm, text="DO filter").grid(row=3, column=0, sticky="w", pady=4)
+        ent_do_filter = ttk.Entry(frm, textvariable=self.var_do_filter, width=56)
+        ent_do_filter.grid(row=3, column=1, sticky="we", pady=4)
+
+        self.cb_do = ttk.Combobox(frm, textvariable=self.var_do, values=(), state="readonly", width=56)
+        self.cb_do.grid(row=4, column=1, sticky="we", pady=4)
+
+        ttk.Label(frm, text="Result").grid(row=5, column=0, sticky="w", pady=4)
+        ent_result = ttk.Entry(frm, textvariable=self.var_result, width=56)
+        ent_result.grid(row=5, column=1, sticky="we", pady=4)
+
+        def mark_result_edited(_event: tk.Event | None = None) -> None:
+            if not self._result_syncing:
+                self._result_user_edited = True
+
+        hint = f"Source: {os.fspath(self._lndm_dir)}"
+        ttk.Label(frm, text=hint).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        def apply_ln_filter(*_args) -> None:
+            raw = (self.var_ln_filter.get() or "").strip().lower()
+            if not raw:
+                filtered = list(self._ln_relpaths_all)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    lv = (v or "").lower()
+                    return all(t in lv for t in tokens)
+
+                filtered = [x for x in self._ln_relpaths_all if ok(x)]
+                filtered = _sort_filter_matches(raw, filtered)
+
+            cur = (self.var_ln.get() or "").strip()
+            self.cb_ln["values"] = filtered[:2000]
+            if raw:
+                if filtered:
+                    self.var_ln.set(filtered[0])
+                return
+            if cur and cur not in filtered:
+                self.var_ln.set("")
+
+        def refresh_do_values(*_args) -> None:
+            rel = (self.var_ln.get() or "").strip()
+            if not rel:
+                self._do_names_all = []
+                self.cb_do["values"] = ()
+                self.var_do.set("")
+                self._update_result_auto()
+                return
+            ln_ref, do_names = self._resolve_ln(rel)
+            self._do_names_all = list(do_names or [])
+            vals = list(self._do_names_all)
+            cur_do = (self.var_do.get() or "").strip()
+            self.cb_do["values"] = vals
+            if vals:
+                if cur_do not in vals:
+                    self.var_do.set(vals[0])
+            else:
+                self.var_do.set("")
+            apply_do_filter()
+            self._update_result_auto(ln_ref=ln_ref)
+
+        def apply_do_filter(*_args) -> None:
+            raw = (self.var_do_filter.get() or "").strip().lower()
+            if not raw:
+                filtered = list(self._do_names_all)
+            else:
+                tokens = [t for t in raw.split() if t]
+
+                def ok(v: str) -> bool:
+                    lv = (v or "").lower()
+                    return all(t in lv for t in tokens)
+
+                filtered = [x for x in self._do_names_all if ok(x)]
+                filtered = _sort_filter_matches(raw, filtered)
+
+            cur = (self.var_do.get() or "").strip()
+            self.cb_do["values"] = filtered[:2000]
+            if raw:
+                if filtered:
+                    self.var_do.set(filtered[0])
+                else:
+                    self.var_do.set("")
+                return
+            if cur and cur not in filtered:
+                self.var_do.set("")
+
+        self.var_ln_filter.trace_add("write", apply_ln_filter)
+        self.var_ln.trace_add("write", refresh_do_values)
+        self.var_do_filter.trace_add("write", apply_do_filter)
+        self.var_scope.trace_add("write", lambda *_: self._update_result_auto())
+        self.var_do.trace_add("write", lambda *_: self._update_result_auto())
+
+        def open_dropdown(cb: ttk.Combobox) -> None:
+            try:
+                cb.focus_set()
+            except Exception:
+                pass
+            try:
+                cb.after_idle(lambda: cb.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            self.cb_ln.bind("<Button-1>", lambda _e: open_dropdown(self.cb_ln), add="+")
+        except Exception:
+            pass
+        try:
+            self.cb_do.bind("<Button-1>", lambda _e: open_dropdown(self.cb_do), add="+")
+        except Exception:
+            pass
+        ent_result.bind("<KeyPress>", mark_result_edited, add="+")
+
+        self.cb_do.bind("<Return>", lambda _e: self._ok())
+        ent_result.bind("<Return>", lambda _e: self._ok())
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
+
+        apply_ln_filter()
+        refresh_do_values()
+        self._apply_initial_src(initial_result)
+        ent_filter.focus_set()
+
+    def _parse_src(self, raw: str) -> tuple[str, str, str]:
+        """Parse src like 'bay.CommonPDIS#.StartMod' -> (scope, ln_ref, do_name)."""
+        s = (raw or "").strip()
+        if not s:
+            return ("", "", "")
+        m = re.match(r"^(bay|proxy)\.(.+)$", s, flags=re.IGNORECASE)
+        if not m:
+            return ("", "", "")
+        scope = (m.group(1) or "").lower()
+        rest = (m.group(2) or "").strip()
+        if "#." not in rest:
+            return (scope, "", "")
+        left, right = rest.split("#.", 1)
+        ln_ref = f"{left.strip()}#" if left.strip() else ""
+        do_name = (right or "").strip().lstrip(".")
+        return (scope, ln_ref, do_name)
+
+    def _find_ln_rel_by_lnref(self, ln_ref: str) -> str:
+        target = (ln_ref or "").strip().lower()
+        if not target:
+            return ""
+        for rel in self._ln_relpaths_all:
+            try:
+                ref, _dos = self._resolve_ln(rel)
+            except Exception:
+                continue
+            if (ref or "").strip().lower() == target:
+                return rel
+        return ""
+
+    def _apply_initial_src(self, initial_result: str) -> None:
+        src0 = (initial_result or "").strip()
+        if not src0:
+            return
+        scope, ln_ref, do_name = self._parse_src(src0)
+        if scope in {"bay", "proxy"}:
+            self.var_scope.set(scope)
+        if ln_ref:
+            rel = self._find_ln_rel_by_lnref(ln_ref)
+            if rel:
+                self.var_ln.set(rel)
+        if do_name:
+            vals = list(self.cb_do["values"])
+            if do_name in vals:
+                self.var_do.set(do_name)
+
+        # Keep user-visible original src text and stay in auto mode until user types.
+        self._result_syncing = True
+        self.var_result.set(src0)
+        self._result_syncing = False
+        self._last_auto_result = src0
+        self._result_user_edited = False
+
+    def _build_auto_result(self, ln_ref: str = "") -> str:
+        scope = (self.var_scope.get() or "").strip() or "bay"
+        rel = (self.var_ln.get() or "").strip()
+        do_name = (self.var_do.get() or "").strip().lstrip(".")
+        if not ln_ref and rel:
+            ln_ref, _ = self._resolve_ln(rel)
+        ln_ref = (ln_ref or "").strip()
+        if not ln_ref or not do_name:
+            return ""
+        return f"{scope}.{ln_ref}.{do_name}"
+
+    def _update_result_auto(self, *, ln_ref: str = "") -> None:
+        auto = self._build_auto_result(ln_ref=ln_ref)
+        if not self._result_user_edited:
+            self._result_syncing = True
+            self.var_result.set(auto)
+            self._result_syncing = False
+        self._last_auto_result = auto
+
+    def _ok(self) -> None:
+        out = (self.var_result.get() or "").strip()
+        if not out:
+            messagebox.showerror("Missing", "Result is required", parent=self)
+            return
+        self._result = out
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> str | None:
+        self.wait_window(self)
+        return self._result
+
+
+class _ManualInputSrcDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        ln_options: list[str],
+        do_values_for_ln: Callable[[str], list[str]],
+        initial_result: str = "",
+    ):
+        super().__init__(parent)
+        self.title("Edit hardlink")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+
+        self._ln_options = list(ln_options or [])
+        self._do_values_for_ln = do_values_for_ln
+        self._rows: list[dict[str, object]] = []
+        self._result: str | None = None
+        self._result_user_edited = False
+        self._result_syncing = False
+        self._last_auto_result = (initial_result or "")
+        self._syncing_rows = False
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        frm.columnconfigure(1, weight=1)
+
+        top = ttk.Frame(frm)
+        top.grid(row=0, column=0, columnspan=2, sticky="we", pady=(0, 6))
+
+        ttk.Label(top, text="Src num").grid(row=0, column=0, sticky="w")
+        self.var_src_num = tk.StringVar(value="1")
+        ent_num = ttk.Entry(top, textvariable=self.var_src_num, width=8)
+        ent_num.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Button(top, text="+", width=3, command=self._add_remote).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Button(top, text="-", width=3, command=self._remove_remote).grid(row=0, column=3, sticky="w", padx=(4, 0))
+
+        self.rows_box = ttk.Frame(frm)
+        self.rows_box.grid(row=1, column=0, columnspan=2, sticky="we")
+        self.rows_box.columnconfigure(0, weight=1)
+
+        ttk.Label(frm, text="Result").grid(row=2, column=0, sticky="w", pady=(8, 4))
+        self.var_result = tk.StringVar(value=(initial_result or ""))
+        ent_result = ttk.Entry(frm, textvariable=self.var_result, width=84)
+        ent_result.grid(row=2, column=1, sticky="we", pady=(8, 4))
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
+
+        def mark_result_edited(_event: tk.Event | None = None) -> None:
+            if not self._result_syncing:
+                self._result_user_edited = True
+
+        ent_result.bind("<KeyPress>", mark_result_edited, add="+")
+        ent_result.bind("<Return>", lambda _e: self._ok())
+        ent_num.bind("<Return>", lambda _e: self._apply_src_num_from_var())
+        ent_num.bind("<FocusOut>", lambda _e: self._apply_src_num_from_var())
+        self.bind("<Escape>", lambda _e: self._cancel())
+
+        self._apply_initial_result(initial_result)
+
+    def _parse_part(self, part: str) -> tuple[str, str, str]:
+        txt = (part or "").strip()
+        if not txt:
+            return ("", "", "")
+        m = re.match(r"^([^#;]+)#(?:(\d+))?@(.+)$", txt)
+        if not m:
+            return ("", "", "")
+        ln = (m.group(1) or "").strip()
+        inst = (m.group(2) or "").strip()
+        do_name = (m.group(3) or "").strip()
+        return (ln, inst, do_name)
+
+    def _apply_initial_result(self, initial_result: str) -> None:
+        parts = [p.strip() for p in (initial_result or "").split(";") if p.strip()]
+        if not parts:
+            self._set_src_num(1)
+            return
+        self._set_src_num(len(parts))
+        self._syncing_rows = True
+        for i, p in enumerate(parts):
+            if i >= len(self._rows):
+                break
+            ln, inst, do_name = self._parse_part(p)
+            row = self._rows[i]
+            var_ln = row["var_ln"]
+            var_inst = row["var_inst"]
+            var_do = row["var_do"]
+            assert isinstance(var_ln, tk.StringVar)
+            assert isinstance(var_inst, tk.StringVar)
+            assert isinstance(var_do, tk.StringVar)
+            if ln:
+                var_ln.set(ln)
+            if inst:
+                var_inst.set(inst)
+            self._refresh_do_values(i)
+            if do_name:
+                var_do.set(do_name)
+        self._syncing_rows = False
+        self._set_result_auto((initial_result or "").strip())
+
+    def _set_result_auto(self, text: str) -> None:
+        self._result_syncing = True
+        self.var_result.set(text)
+        self._result_syncing = False
+        self._last_auto_result = text
+        self._result_user_edited = False
+
+    def _add_remote(self) -> None:
+        n = self._safe_src_num(default=1)
+        self._set_src_num(n + 1)
+
+    def _remove_remote(self) -> None:
+        n = self._safe_src_num(default=1)
+        self._set_src_num(max(1, n - 1))
+
+    def _safe_src_num(self, default: int = 1) -> int:
+        try:
+            n = int((self.var_src_num.get() or "").strip())
+        except Exception:
+            return default
+        return max(1, n)
+
+    def _apply_src_num_from_var(self) -> None:
+        self._set_src_num(self._safe_src_num(default=len(self._rows) or 1))
+
+    def _set_src_num(self, n: int) -> None:
+        n = max(1, int(n))
+        self.var_src_num.set(str(n))
+        while len(self._rows) < n:
+            self._create_row(len(self._rows))
+        while len(self._rows) > n:
+            row = self._rows.pop()
+            box = row.get("box")
+            if isinstance(box, ttk.Frame):
+                try:
+                    box.destroy()
+                except Exception:
+                    pass
+        self._regrid_rows()
+        self._update_result_auto()
+
+    def _regrid_rows(self) -> None:
+        for i, row in enumerate(self._rows):
+            box = row.get("box")
+            if isinstance(box, ttk.Frame):
+                box.grid(row=i, column=0, sticky="we", pady=(2, 2))
+
+    def _create_row(self, idx: int) -> None:
+        box = ttk.Frame(self.rows_box)
+        box.columnconfigure(2, weight=2)
+        box.columnconfigure(3, weight=2)
+        box.columnconfigure(7, weight=2)
+        box.columnconfigure(8, weight=2)
+
+        var_ln_q = tk.StringVar(value="")
+        var_ln = tk.StringVar(value="")
+        var_inst = tk.StringVar(value="")
+        var_do_q = tk.StringVar(value="")
+        var_do = tk.StringVar(value="")
+
+        ttk.Label(box, text=f"Input {idx + 1}").grid(row=0, column=0, sticky="w", padx=(0, 8))
+
+        ttk.Label(box, text="LN").grid(row=0, column=1, sticky="w")
+        ent_ln_q = ttk.Entry(box, textvariable=var_ln_q, width=16)
+        ent_ln_q.grid(row=0, column=2, sticky="we", padx=(4, 4))
+
+        cb_ln = ttk.Combobox(box, textvariable=var_ln, values=self._ln_options, width=20, state="normal")
+        cb_ln.grid(row=0, column=3, sticky="we", padx=(0, 8))
+
+        ttk.Label(box, text="Instance Num").grid(row=0, column=4, sticky="w")
+        ent_inst = ttk.Entry(box, textvariable=var_inst, width=8)
+        ent_inst.grid(row=0, column=5, sticky="w", padx=(4, 8))
+
+        ttk.Label(box, text="DO").grid(row=0, column=6, sticky="w")
+        ent_do_q = ttk.Entry(box, textvariable=var_do_q, width=16)
+        ent_do_q.grid(row=0, column=7, sticky="we", padx=(4, 4))
+
+        cb_do = ttk.Combobox(box, textvariable=var_do, values=(), width=20, state="normal")
+        cb_do.grid(row=0, column=8, sticky="we")
+
+        row: dict[str, object] = {
+            "box": box,
+            "var_ln_q": var_ln_q,
+            "var_ln": var_ln,
+            "var_inst": var_inst,
+            "var_do_q": var_do_q,
+            "var_do": var_do,
+            "cb_ln": cb_ln,
+            "cb_do": cb_do,
+            "ln_all": list(self._ln_options),
+            "do_all": [],
+        }
+
+        def filter_ln(_e=None) -> None:
+            q = (var_ln_q.get() or "").strip().lower()
+            ln_all = row.get("ln_all") or []
+            assert isinstance(ln_all, list)
+            if not q:
+                vals = list(ln_all)
+            else:
+                vals = _sort_filter_matches(q, [v for v in ln_all if q in v.lower()])
+            cb_ln.configure(values=vals[:2000])
+            cur = (var_ln.get() or "").strip()
+            if q:
+                if vals:
+                    var_ln.set(vals[0])
+                else:
+                    var_ln.set("")
+            elif cur and cur not in vals:
+                var_ln.set("")
+
+        def filter_do(_e=None) -> None:
+            do_all = row.get("do_all") or []
+            assert isinstance(do_all, list)
+            q = (var_do_q.get() or "").strip().lower()
+            if not q:
+                vals = list(do_all)
+            else:
+                vals = _sort_filter_matches(q, [v for v in do_all if q in v.lower()])
+            cb_do.configure(values=vals[:2000])
+            cur = (var_do.get() or "").strip()
+            if q:
+                if vals:
+                    var_do.set(vals[0])
+                else:
+                    var_do.set("")
+            elif cur and cur not in vals:
+                var_do.set("")
+
+        ent_ln_q.bind("<KeyRelease>", filter_ln)
+        ent_do_q.bind("<KeyRelease>", filter_do)
+        cb_ln.bind("<Button-1>", lambda _e: self._combobox_post_widget(cb_ln), add="+")
+        cb_do.bind("<Button-1>", lambda _e: self._combobox_post_widget(cb_do), add="+")
+
+        var_ln.trace_add("write", lambda *_: self._on_ln_changed(idx))
+        var_inst.trace_add("write", lambda *_: self._update_result_auto())
+        var_do.trace_add("write", lambda *_: self._update_result_auto())
+
+        self._rows.append(row)
+        self._refresh_do_values(idx)
+        filter_ln()
+
+    def _combobox_post_widget(self, cb: ttk.Combobox) -> None:
+        try:
+            cb.focus_set()
+        except Exception:
+            pass
+        try:
+            cb.after_idle(lambda: cb.event_generate("<Down>"))
+        except Exception:
+            pass
+
+    def _on_ln_changed(self, idx: int) -> None:
+        if self._syncing_rows:
+            return
+        self._refresh_do_values(idx)
+        self._update_result_auto()
+
+    def _refresh_do_values(self, idx: int) -> None:
+        if idx < 0 or idx >= len(self._rows):
+            return
+        row = self._rows[idx]
+        var_ln = row.get("var_ln")
+        var_do = row.get("var_do")
+        cb_do = row.get("cb_do")
+        if not isinstance(var_ln, tk.StringVar) or not isinstance(var_do, tk.StringVar) or not isinstance(cb_do, ttk.Combobox):
+            return
+
+        ln = (var_ln.get() or "").strip()
+        vals = self._do_values_for_ln(ln) if ln else []
+        row["do_all"] = list(vals)
+        cb_do.configure(values=vals[:2000])
+        cur = (var_do.get() or "").strip()
+        if vals and cur not in vals:
+            var_do.set(vals[0])
+        elif not vals:
+            var_do.set("")
+
+    def _build_result(self) -> str:
+        parts: list[str] = []
+        for row in self._rows:
+            var_ln = row.get("var_ln")
+            var_inst = row.get("var_inst")
+            var_do = row.get("var_do")
+            if not isinstance(var_ln, tk.StringVar) or not isinstance(var_inst, tk.StringVar) or not isinstance(var_do, tk.StringVar):
+                continue
+            ln = (var_ln.get() or "").strip().rstrip("#")
+            inst = (var_inst.get() or "").strip()
+            do_name = (var_do.get() or "").strip().lstrip("@")
+            if not ln or not do_name:
+                continue
+            if inst:
+                parts.append(f"{ln}#{inst}@{do_name}")
+            else:
+                parts.append(f"{ln}#@{do_name}")
+        return ";".join(parts)
+
+    def _update_result_auto(self) -> None:
+        auto = self._build_result()
+        if not self._result_user_edited:
+            self._result_syncing = True
+            self.var_result.set(auto)
+            self._result_syncing = False
+        self._last_auto_result = auto
+
+    def _ok(self) -> None:
+        out = (self.var_result.get() or "").strip()
+        if not out:
+            messagebox.showerror("Missing", "Result is required", parent=self)
+            return
+        self._result = out
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def show(self) -> str | None:
+        self.wait_window(self)
+        return self._result
+
+
 class _CopyApplicationDialog(tk.Toplevel):
     def __init__(
         self,
@@ -2650,6 +3302,21 @@ class _CopyApplicationDialog(tk.Toplevel):
         self.cb_src.grid(row=1, column=1, sticky="we", pady=(0, 8))
         ttk.Label(frm, text="").grid(row=1, column=0)
 
+        def _open_src_dropdown(_event: tk.Event | None = None) -> None:
+            try:
+                self.cb_src.focus_set()
+            except Exception:
+                pass
+            try:
+                self.cb_src.after_idle(lambda: self.cb_src.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            self.cb_src.bind("<Button-1>", _open_src_dropdown, add="+")
+        except Exception:
+            pass
+
         ttk.Label(frm, text="File name").grid(row=2, column=0, sticky="w", pady=4)
         self.var_new = tk.StringVar(value="")
         ent_new = ttk.Entry(frm, textvariable=self.var_new, width=56)
@@ -2675,6 +3342,7 @@ class _CopyApplicationDialog(tk.Toplevel):
                     return all(t in lv for t in tokens)
 
                 filtered = [x for x in self._items_all if ok(x)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_src.get() or "").strip()
             self.cb_src["values"] = filtered[:2000]
@@ -2682,8 +3350,8 @@ class _CopyApplicationDialog(tk.Toplevel):
                 if filtered:
                     self.var_src.set(filtered[0])
                 return
-            if filtered and cur not in filtered:
-                self.var_src.set(filtered[0])
+            if cur and cur not in filtered:
+                self.var_src.set("")
 
         def on_src_change(*_args) -> None:
             src = (self.var_src.get() or "").strip()
@@ -2709,8 +3377,7 @@ class _CopyApplicationDialog(tk.Toplevel):
         self.bind("<Escape>", lambda _e: self._cancel())
         self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
 
-        ent_new.focus_set()
-        ent_new.selection_range(0, tk.END)
+        ent_filter.focus_set()
 
     def _ok(self) -> None:
         src = (self.var_src.get() or "").strip()
@@ -2785,6 +3452,21 @@ class _CopyHmiDialog(tk.Toplevel):
         cb.grid(row=1, column=1, sticky="we", pady=(0, 4))
         ttk.Label(frm, text="").grid(row=1, column=0)
 
+        def _open_src_dropdown(_event: tk.Event | None = None) -> None:
+            try:
+                cb.focus_set()
+            except Exception:
+                pass
+            try:
+                cb.after_idle(lambda: cb.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            cb.bind("<Button-1>", _open_src_dropdown, add="+")
+        except Exception:
+            pass
+
         ttk.Label(frm, text="File name").grid(row=2, column=0, sticky="w", pady=4)
         self.var_filename = tk.StringVar(value=(suggested_filename or ""))
         ttk.Entry(frm, textvariable=self.var_filename, width=36).grid(row=2, column=1, sticky="w", pady=4)
@@ -2806,6 +3488,7 @@ class _CopyHmiDialog(tk.Toplevel):
                     return all(t in lv for t in tokens)
 
                 filtered = [x for x in self._source_values if ok(x)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_src.get() or "").strip()
             cb["values"] = filtered[:2000]
@@ -2813,8 +3496,8 @@ class _CopyHmiDialog(tk.Toplevel):
                 if filtered:
                     self.var_src.set(filtered[0])
                 return
-            if filtered and cur not in filtered:
-                self.var_src.set(filtered[0])
+            if cur and cur not in filtered:
+                self.var_src.set("")
 
         self.var_filter.trace_add("write", apply_filter)
         apply_filter()
@@ -2822,6 +3505,7 @@ class _CopyHmiDialog(tk.Toplevel):
         self.bind("<Escape>", lambda _e: self._cancel())
         self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
         cb.bind("<Return>", lambda _e: self._ok())
+        ent_filter.focus_set()
 
     def _ok(self) -> None:
         src = (self.var_src.get() or "").strip()
@@ -2878,10 +3562,25 @@ class _CreateHmiFromApplicationDialog(tk.Toplevel):
         ent_filter = ttk.Entry(filter_row, textvariable=self.var_filter)
         ent_filter.grid(row=0, column=1, sticky="we", padx=(8, 0))
 
-        self.var_app = tk.StringVar(value=(self._app_relpaths[0] if self._app_relpaths else ""))
+        self.var_app = tk.StringVar(value="")
         self.cb_app = ttk.Combobox(frm, textvariable=self.var_app, values=self._app_relpaths, width=84)
         self.cb_app.grid(row=1, column=1, sticky="we", pady=(0, 8))
         ttk.Label(frm, text="").grid(row=1, column=0)
+
+        def _open_app_dropdown(_event: tk.Event | None = None) -> None:
+            try:
+                self.cb_app.focus_set()
+            except Exception:
+                pass
+            try:
+                self.cb_app.after_idle(lambda: self.cb_app.event_generate("<Down>"))
+            except Exception:
+                pass
+
+        try:
+            self.cb_app.bind("<Button-1>", _open_app_dropdown, add="+")
+        except Exception:
+            pass
 
         btns = ttk.Frame(frm)
         btns.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
@@ -2900,6 +3599,7 @@ class _CreateHmiFromApplicationDialog(tk.Toplevel):
                     return all(t in lv for t in tokens)
 
                 filtered = [x for x in self._app_relpaths if ok(x)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_app.get() or "").strip()
             self.cb_app["values"] = filtered[:2000]
@@ -2911,8 +3611,8 @@ class _CreateHmiFromApplicationDialog(tk.Toplevel):
                 return
 
             # No filter: keep current if valid, otherwise default to first item.
-            if filtered and cur not in filtered:
-                self.var_app.set(filtered[0])
+            if cur and cur not in filtered:
+                self.var_app.set("")
 
         self.var_filter.trace_add("write", apply_filter)
         apply_filter()
@@ -2997,6 +3697,7 @@ class _SelectParentMenuDialog(tk.Toplevel):
                     return all(t in vv for t in tokens)
 
                 filtered = [v for v in self._parent_names if ok(v)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_parent.get() or "").strip()
             values = base + filtered
@@ -3375,6 +4076,7 @@ class DOEditDialog(tk.Toplevel):
                     return all(t in lv for t in tokens)
 
                 filtered = [v for v in self._all_do_types if ok(v)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             # Keep current value available even if it doesn't match filter
             cur = self.var_type.get().strip()
@@ -3389,8 +4091,8 @@ class DOEditDialog(tk.Toplevel):
                 if shown:
                     self.var_type.set(shown[0])
                 return
-            if shown and cur not in shown:
-                self.var_type.set(shown[0])
+            if cur and cur not in shown:
+                self.var_type.set("")
 
         self.var_filter.trace_add("write", apply_filter)
         apply_filter()
@@ -3691,6 +4393,7 @@ class DAEditDialog(tk.Toplevel):
                     return all(t in lv for t in tokens)
 
                 filtered = [v for v in self._all_enum_ids if ok(v)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_type.get() or "").strip()
 
@@ -3709,8 +4412,8 @@ class DAEditDialog(tk.Toplevel):
                 if shown:
                     self.var_type.set(shown[0])
                 return
-            if shown and cur not in shown:
-                self.var_type.set(shown[0])
+            if cur and cur not in shown:
+                self.var_type.set("")
 
         def update_val_widget() -> None:
             bt_enum = is_enum()
@@ -5082,6 +5785,7 @@ class MainWindow(tk.Tk):
         self._app_clipboard: dict[str, dict[str, str]] = {}
         self._app_ctx_table: str | None = None
         self._app_ctx_menu: tk.Menu | None = None
+        self._app_ctx_col: str | None = None
 
         # Application undo (Ctrl+Z): snapshot of ALL app tables (+ refresh diff state)
         # to support multi-table ops and refresh rollback.
@@ -7380,6 +8084,7 @@ class MainWindow(tk.Tk):
                     return all(t in lv for t in tokens)
 
                 filtered = [v for v in self._all_enum_files if ok(v)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_enum_selected.get() or "").strip()
 
@@ -7392,8 +8097,8 @@ class MainWindow(tk.Tk):
                 if shown:
                     self.var_enum_selected.set(shown[0])
                 return
-            if shown and cur not in shown:
-                self.var_enum_selected.set(shown[0])
+            if cur and cur not in shown:
+                self.var_enum_selected.set("")
 
         if getattr(self, "_enum_apply_filter", None) is None:
             if self.var_enum_filter is not None:
@@ -7429,6 +8134,7 @@ class MainWindow(tk.Tk):
                     return all(t in lv for t in tokens)
 
                 filtered = [v for v in self._all_afg_files if ok(v)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_afg_selected.get() or "").strip()
 
@@ -7441,8 +8147,8 @@ class MainWindow(tk.Tk):
                 if shown:
                     self.var_afg_selected.set(shown[0])
                 return
-            if shown and cur not in shown:
-                self.var_afg_selected.set(shown[0])
+            if cur and cur not in shown:
+                self.var_afg_selected.set("")
 
         if getattr(self, "_afg_apply_filter", None) is None:
             if self.var_afg_filter is not None:
@@ -8733,6 +9439,31 @@ class MainWindow(tk.Tk):
         self._select_afg_in_element(el)
         self._afg_end_undo_capture(cap)
 
+    def _afg_in_edit_hardlink_from_context(self) -> None:
+        el = self._afg_selected_in()
+        if el is None:
+            return
+
+        try:
+            self._end_afg_in_inline_editor(commit=True)
+        except Exception:
+            pass
+
+        chosen = self._open_manual_input_src_dialog(initial_value=(el.attrib.get("src") or ""))
+        if chosen is None:
+            return
+
+        final = (chosen or "").strip()
+        if (el.attrib.get("src") or "") == final:
+            return
+
+        cap = self._afg_begin_undo_capture()
+        el.attrib["src"] = final
+        self._normalize_afg_pin_ids_and_arrows()
+        self._refresh_afg_io_tables()
+        self._select_afg_in_element(el)
+        self._afg_end_undo_capture(cap)
+
     def _afg_in_copy(self) -> None:
         el = self._afg_selected_in()
         if el is None:
@@ -9984,6 +10715,7 @@ class MainWindow(tk.Tk):
             m.add_command(label="Add", command=self._afg_in_add)
             m.add_command(label="Insert", command=self._afg_in_insert)
             m.add_command(label="Edit", command=self._afg_in_edit)
+            m.add_command(label="Edit hardlink", command=self._afg_in_edit_hardlink_from_context)
             m.add_separator()
             m.add_command(label="Copy", command=self._afg_in_copy)
             m.add_command(label="Cut", command=self._afg_in_cut)
@@ -10746,6 +11478,7 @@ class MainWindow(tk.Tk):
                     return all(t in lv for t in tokens)
 
                 filtered = [v for v in self._all_hmi_files if ok(v)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_hmi_selected.get() or "").strip()
 
@@ -10758,8 +11491,8 @@ class MainWindow(tk.Tk):
                 if shown:
                     self.var_hmi_selected.set(shown[0])
                 return
-            if shown and cur not in shown:
-                self.var_hmi_selected.set(shown[0])
+            if cur and cur not in shown:
+                self.var_hmi_selected.set("")
 
         if getattr(self, "_hmi_apply_filter", None) is None:
             if self.var_hmi_filter is not None:
@@ -17738,6 +18471,7 @@ class MainWindow(tk.Tk):
                     return all(t in lv for t in tokens)
 
                 filtered = [v for v in self._all_do_tmpl_files if ok(v)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_do_tmpl_selected.get() or "").strip()
 
@@ -17750,8 +18484,8 @@ class MainWindow(tk.Tk):
                 if shown:
                     self.var_do_tmpl_selected.set(shown[0])
                 return
-            if shown and cur not in shown:
-                self.var_do_tmpl_selected.set(shown[0])
+            if cur and cur not in shown:
+                self.var_do_tmpl_selected.set("")
 
         if getattr(self, "_do_tmpl_apply_filter", None) is None:
             if self.var_do_tmpl_filter is not None:
@@ -18626,6 +19360,7 @@ class MainWindow(tk.Tk):
                     return all(t in lv for t in tokens)
 
                 filtered = [v for v in self._all_app_files if ok(v)]
+                filtered = _sort_filter_matches(raw, filtered)
 
             cur = (self.var_app_selected.get() or "").strip()
 
@@ -18638,8 +19373,8 @@ class MainWindow(tk.Tk):
                 if shown:
                     self.var_app_selected.set(shown[0])
                 return
-            if shown and cur not in shown:
-                self.var_app_selected.set(shown[0])
+            if cur and cur not in shown:
+                self.var_app_selected.set("")
 
         # Wire filter only once per UI lifetime.
         if getattr(self, "_app_apply_filter", None) is None:
@@ -19814,8 +20549,8 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
-        # If we're already editing this type cell, toggle dropdown open/close.
-        if col == "#2":
+        # Type/doRef columns: single click toggles dropdown open/close.
+        if col in {"#2", "#4"}:
             if (
                 isinstance(self._app_input_inline, ttk.Combobox)
                 and self._app_input_inline_iid == row_iid
@@ -19826,9 +20561,11 @@ class MainWindow(tk.Tk):
 
             # Not editing yet: single click should open the dropdown.
             try:
-                tv.after_idle(lambda: self._begin_app_input_inline_edit(row_iid, col, mode="type_click"))
+                mode = "type_click" if col == "#2" else "doref_click"
+                tv.after_idle(lambda _mode=mode: self._begin_app_input_inline_edit(row_iid, col, mode=_mode))
             except Exception:
-                self._begin_app_input_inline_edit(row_iid, col, mode="type_click")
+                mode = "type_click" if col == "#2" else "doref_click"
+                self._begin_app_input_inline_edit(row_iid, col, mode=mode)
             return "break"
 
         # Checkbox columns
@@ -19899,8 +20636,8 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
-        # type column: single click toggles dropdown
-        if col == "#2":
+        # type/src columns: single click toggles dropdown
+        if col in {"#2", "#3"}:
             if (
                 isinstance(self._app_setting_inline, ttk.Combobox)
                 and self._app_setting_inline_iid == row_iid
@@ -19909,9 +20646,11 @@ class MainWindow(tk.Tk):
                 self._combobox_toggle_posted(self._app_setting_inline)
                 return "break"
             try:
-                tv.after_idle(lambda: self._begin_app_setting_inline_edit(row_iid, col, mode="type_click"))
+                mode = "type_click" if col == "#2" else "src_click"
+                tv.after_idle(lambda _mode=mode: self._begin_app_setting_inline_edit(row_iid, col, mode=_mode))
             except Exception:
-                self._begin_app_setting_inline_edit(row_iid, col, mode="type_click")
+                mode = "type_click" if col == "#2" else "src_click"
+                self._begin_app_setting_inline_edit(row_iid, col, mode=mode)
             return "break"
 
         # other columns: single click selects only; double click edits.
@@ -19934,8 +20673,8 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
-        # Double click edits: name/src/desc as text; type as typing mode.
-        if col in {"#1", "#3", "#4"}:
+        # Double click edits: name/desc as text; type/src as typing mode.
+        if col in {"#1", "#4"}:
             try:
                 tv.after_idle(lambda: self._begin_app_setting_inline_edit(row_iid, col, mode="text"))
             except Exception:
@@ -19945,6 +20684,11 @@ class MainWindow(tk.Tk):
                 tv.after_idle(lambda: self._begin_app_setting_inline_edit(row_iid, col, mode="type_input"))
             except Exception:
                 self._begin_app_setting_inline_edit(row_iid, col, mode="type_input")
+        elif col == "#3":
+            try:
+                tv.after_idle(lambda: self._begin_app_setting_inline_edit(row_iid, col, mode="src_input"))
+            except Exception:
+                self._begin_app_setting_inline_edit(row_iid, col, mode="src_input")
         return "break"
 
     def _on_app_output_click(self, event: tk.Event) -> str | None:
@@ -19970,10 +20714,12 @@ class MainWindow(tk.Tk):
             persist_col = f"#{cols.index('persist') + 1}"
             fault_col = f"#{cols.index('faultlog') + 1}"
             type_col = f"#{cols.index('type') + 1}"
+            doref_col = f"#{cols.index('doRef') + 1}"
         except Exception:
             persist_col = "#6"
             fault_col = "#7"
             type_col = "#2"
+            doref_col = "#4"
 
         if col in {persist_col, fault_col}:
             try:
@@ -19999,7 +20745,7 @@ class MainWindow(tk.Tk):
                 pass
             return "break"
 
-        if col == type_col:
+        if col in {type_col, doref_col}:
             try:
                 idx0 = int(row_iid)
                 if 0 <= idx0 < len(self._app_output_rows) and bool(self._app_output_rows[idx0].get("__ui_deleted")):
@@ -20014,9 +20760,11 @@ class MainWindow(tk.Tk):
                 self._combobox_toggle_posted(self._app_output_inline)
                 return "break"
             try:
-                tv.after_idle(lambda: self._begin_app_output_inline_edit(row_iid, col, mode="type_click"))
+                mode = "type_click" if col == type_col else "doref_click"
+                tv.after_idle(lambda _mode=mode: self._begin_app_output_inline_edit(row_iid, col, mode=_mode))
             except Exception:
-                self._begin_app_output_inline_edit(row_iid, col, mode="type_click")
+                mode = "type_click" if col == type_col else "doref_click"
+                self._begin_app_output_inline_edit(row_iid, col, mode=mode)
             return "break"
 
         return None
@@ -20139,7 +20887,7 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
-        if col == "#2":
+        if col in {"#2", "#3"}:
             if (
                 isinstance(self._app_control_inline, ttk.Combobox)
                 and self._app_control_inline_iid == row_iid
@@ -20148,9 +20896,11 @@ class MainWindow(tk.Tk):
                 self._combobox_toggle_posted(self._app_control_inline)
                 return "break"
             try:
-                tv.after_idle(lambda: self._begin_app_control_inline_edit(row_iid, col, mode="type_click"))
+                mode = "type_click" if col == "#2" else "src_click"
+                tv.after_idle(lambda _mode=mode: self._begin_app_control_inline_edit(row_iid, col, mode=_mode))
             except Exception:
-                self._begin_app_control_inline_edit(row_iid, col, mode="type_click")
+                mode = "type_click" if col == "#2" else "src_click"
+                self._begin_app_control_inline_edit(row_iid, col, mode=mode)
             return "break"
 
         return None
@@ -20172,7 +20922,7 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
-        if col in {"#1", "#3", "#4"}:
+        if col in {"#1", "#4"}:
             try:
                 tv.after_idle(lambda: self._begin_app_control_inline_edit(row_iid, col, mode="text"))
             except Exception:
@@ -20182,6 +20932,11 @@ class MainWindow(tk.Tk):
                 tv.after_idle(lambda: self._begin_app_control_inline_edit(row_iid, col, mode="type_input"))
             except Exception:
                 self._begin_app_control_inline_edit(row_iid, col, mode="type_input")
+        elif col == "#3":
+            try:
+                tv.after_idle(lambda: self._begin_app_control_inline_edit(row_iid, col, mode="src_input"))
+            except Exception:
+                self._begin_app_control_inline_edit(row_iid, col, mode="src_input")
         return "break"
 
     def _combobox_is_posted(self, cb: ttk.Combobox) -> bool:
@@ -20255,6 +21010,7 @@ class MainWindow(tk.Tk):
         tv = self._app_table_tv(table)
         if tv is None:
             return
+        col = tv.identify_column(event.x)
         iid = tv.identify_row(event.y)
         if iid:
             try:
@@ -20273,6 +21029,7 @@ class MainWindow(tk.Tk):
             pass
 
         self._app_ctx_table = table
+        self._app_ctx_col = col
 
         m.add_command(label="Add", command=lambda: self._app_table_add(self._app_ctx_table or ""))
         m.add_command(label="Insert", command=lambda: self._app_table_insert(self._app_ctx_table or ""))
@@ -20280,11 +21037,14 @@ class MainWindow(tk.Tk):
 
         if table == "input":
             m.add_command(label="Add shared setting", command=self._app_add_shared_setting_from_input)
+            m.add_command(label="Edit hardlink", command=self._app_input_manual_input_from_context)
 
         if table == "setting":
             m.add_command(label="Convert to conf", command=self._app_convert_setting_to_conf)
+            m.add_command(label="Manual input src", command=self._app_setting_manual_input_from_context)
         elif table == "conf":
             m.add_command(label="Convert to setting", command=self._app_convert_conf_to_setting)
+            m.add_command(label="Manual input src", command=self._app_conf_manual_input_from_context)
 
         m.add_separator()
         m.add_command(label="Copy", command=lambda: self._app_table_copy(self._app_ctx_table or ""))
@@ -20334,14 +21094,26 @@ class MainWindow(tk.Tk):
                 m.entryconfigure("Convert to conf", state=("normal" if (has_sel and (not is_deleted)) else "disabled"))
             except Exception:
                 pass
+            try:
+                m.entryconfigure("Manual input src", state=("normal" if (has_sel and (not is_deleted)) else "disabled"))
+            except Exception:
+                pass
         if table == "conf":
             try:
                 m.entryconfigure("Convert to setting", state=("normal" if (has_sel and (not is_deleted)) else "disabled"))
             except Exception:
                 pass
+            try:
+                m.entryconfigure("Manual input src", state=("normal" if (has_sel and (not is_deleted)) else "disabled"))
+            except Exception:
+                pass
         if table == "input":
             try:
                 m.entryconfigure("Add shared setting", state=("normal" if can_add_shared else "disabled"))
+            except Exception:
+                pass
+            try:
+                m.entryconfigure("Edit hardlink", state=("normal" if (has_sel and (not is_deleted)) else "disabled"))
             except Exception:
                 pass
         try:
@@ -20444,6 +21216,78 @@ class MainWindow(tk.Tk):
             except Exception:
                 pass
 
+    def _app_input_manual_input_from_context(self) -> None:
+        iid = self._selected_app_input_iid()
+        if iid is None:
+            return
+        row = self._app_input_iid_to_row.get(iid)
+        if row is None or bool(row.get("__ui_deleted")):
+            return
+
+        chosen = self._open_manual_input_src_dialog(initial_value=(row.get("src") or ""))
+        if chosen is None:
+            return
+
+        final = (chosen or "").strip()
+        if (row.get("src") or "") == final:
+            return
+
+        self._app_push_undo()
+        row["src"] = final
+        self._update_app_input_tv_row(iid)
+        try:
+            self._on_app_view_changed()
+        except Exception:
+            pass
+
+    def _app_setting_manual_input_from_context(self) -> None:
+        idx = self._app_table_selected_index("setting")
+        if idx is None or idx < 0 or idx >= len(self._app_setting_rows):
+            return
+        row = self._app_setting_rows[idx]
+        if bool(row.get("__ui_deleted")):
+            return
+
+        chosen = self._open_manual_setting_src_dialog(initial_value=(row.get("src") or ""))
+        if chosen is None:
+            return
+
+        final = (chosen or "").strip()
+        if (row.get("src") or "") == final:
+            return
+
+        self._app_push_undo()
+        row["src"] = final
+        self._update_simple_app_tv_row("setting", str(idx))
+        try:
+            self._on_app_view_changed()
+        except Exception:
+            pass
+
+    def _app_conf_manual_input_from_context(self) -> None:
+        idx = self._app_table_selected_index("conf")
+        if idx is None or idx < 0 or idx >= len(self._app_conf_rows):
+            return
+        row = self._app_conf_rows[idx]
+        if bool(row.get("__ui_deleted")):
+            return
+
+        chosen = self._open_manual_setting_src_dialog(initial_value=(row.get("src") or ""))
+        if chosen is None:
+            return
+
+        final = (chosen or "").strip()
+        if (row.get("src") or "") == final:
+            return
+
+        self._app_push_undo()
+        row["src"] = final
+        self._update_simple_app_tv_row("conf", str(idx))
+        try:
+            self._on_app_view_changed()
+        except Exception:
+            pass
+
     def _app_convert_setting_to_conf(self) -> None:
         idx = self._app_table_selected_index("setting")
         if idx is None or idx < 0 or idx >= len(self._app_setting_rows):
@@ -20492,7 +21336,11 @@ class MainWindow(tk.Tk):
         row.pop("__ui_deleted", None)
         row["__ui_added"] = "1"
         name = (row.get("name") or "").strip()
-        row["src"] = f".{name}" if name else ""
+        src0 = (row.get("src") or "").strip()
+        sec = src0.rsplit(".", 1)[-1].strip() if src0 else ""
+        # Keep existing src when the section token is non-numeric (for example RotPh).
+        if (not sec) or sec.isdigit():
+            row["src"] = f".{name}" if name else ""
 
         setting_rows = list(self._app_setting_rows)
         setting_rows.append(row)
@@ -20524,6 +21372,17 @@ class MainWindow(tk.Tk):
             "conf": self._app_conf_rows,
             "control": self._app_control_rows,
         }.get(table, [])
+
+    def _mark_all_application_rows_added(self) -> None:
+        for table in ("input", "setting", "output", "conf", "control"):
+            src_rows = self._app_table_rows(table)
+            rows: list[dict[str, str]] = []
+            for row in src_rows:
+                rr = dict(row)
+                if not bool(rr.get("__ui_deleted")):
+                    rr["__ui_added"] = "1"
+                rows.append(rr)
+            self._app_table_set_rows(table, rows)
 
     def _app_table_set_rows(self, table: str, rows: list[dict[str, str]]) -> None:
         if table == "input":
@@ -21120,6 +21979,30 @@ class MainWindow(tk.Tk):
                     cb.selection_range(0, tk.END)
                 except Exception:
                     pass
+        elif key == "doRef":
+            all_values = self._app_input_doref_values(value)
+            cb = ttk.Combobox(tv, values=all_values, width=max(10, int(w / 7)), state="normal")
+            cb.set(value)
+
+            def commit_and_close(_e=None) -> None:
+                self._end_app_input_inline_editor(commit=True)
+
+            cb.bind("<<ComboboxSelected>>", commit_and_close)
+            cb.bind("<Return>", commit_and_close)
+            cb.bind("<Escape>", lambda _e: self._end_app_input_inline_editor(commit=False))
+            cb.bind("<FocusOut>", lambda _e: self._end_app_input_inline_editor(commit=True))
+            cb.bind("<Control-z>", lambda _e: (self._app_undo(), "break")[1])
+            cb.bind("<Control-Z>", lambda _e: (self._app_undo(), "break")[1])
+            cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+
+            cb.place(x=x, y=y, width=w, height=h)
+            cb.focus_set()
+            self._app_input_inline = cb
+
+            try:
+                tv.after_idle(lambda: self._combobox_post(cb))
+            except Exception:
+                self._combobox_post(cb)
         else:
             ent = ttk.Entry(tv)
             ent.insert(0, value)
@@ -21251,6 +22134,38 @@ class MainWindow(tk.Tk):
                     self._combobox_post(cb)
 
             if mode == "type_input":
+                try:
+                    cb.focus_set()
+                    cb.icursor(tk.END)
+                    cb.selection_range(0, tk.END)
+                except Exception:
+                    pass
+        elif key == "src":
+            all_values = self._app_setting_src_values(value)
+            cb = ttk.Combobox(tv, values=all_values, width=max(10, int(w / 7)), state="normal")
+            cb.set(value)
+
+            def commit_and_close(_e=None) -> None:
+                self._end_app_setting_inline_editor(commit=True)
+
+            cb.bind("<<ComboboxSelected>>", commit_and_close)
+            cb.bind("<Return>", commit_and_close)
+            cb.bind("<Escape>", lambda _e: self._end_app_setting_inline_editor(commit=False))
+            cb.bind("<FocusOut>", lambda _e: self._end_app_setting_inline_editor(commit=True))
+            cb.bind("<Control-z>", lambda _e: (self._app_undo(), "break")[1])
+            cb.bind("<Control-Z>", lambda _e: (self._app_undo(), "break")[1])
+            cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+
+            cb.place(x=x, y=y, width=w, height=h)
+            cb.focus_set()
+            self._app_setting_inline = cb
+
+            try:
+                tv.after_idle(lambda: self._combobox_post(cb))
+            except Exception:
+                self._combobox_post(cb)
+
+            if mode == "src_input":
                 try:
                     cb.focus_set()
                     cb.icursor(tk.END)
@@ -21395,6 +22310,30 @@ class MainWindow(tk.Tk):
                     cb.selection_range(0, tk.END)
                 except Exception:
                     pass
+        elif key == "doRef":
+            all_values = self._app_output_doref_values(value)
+            cb = ttk.Combobox(tv, values=all_values, width=max(10, int(w / 7)), state="normal")
+            cb.set(value)
+
+            def commit_and_close(_e=None) -> None:
+                self._end_app_output_inline_editor(commit=True)
+
+            cb.bind("<<ComboboxSelected>>", commit_and_close)
+            cb.bind("<Return>", commit_and_close)
+            cb.bind("<Escape>", lambda _e: self._end_app_output_inline_editor(commit=False))
+            cb.bind("<FocusOut>", lambda _e: self._end_app_output_inline_editor(commit=True))
+            cb.bind("<Control-z>", lambda _e: (self._app_undo(), "break")[1])
+            cb.bind("<Control-Z>", lambda _e: (self._app_undo(), "break")[1])
+            cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+
+            cb.place(x=x, y=y, width=w, height=h)
+            cb.focus_set()
+            self._app_output_inline = cb
+
+            try:
+                tv.after_idle(lambda: self._combobox_post(cb))
+            except Exception:
+                self._combobox_post(cb)
         else:
             ent = ttk.Entry(tv)
             ent.insert(0, value)
@@ -21655,6 +22594,36 @@ class MainWindow(tk.Tk):
                     cb.selection_range(0, tk.END)
                 except Exception:
                     pass
+        elif key == "src":
+            all_values = self._app_control_src_values(value)
+            cb = ttk.Combobox(tv, values=all_values, width=max(10, int(w / 7)), state="normal")
+            cb.set(value)
+
+            def commit_and_close(_e=None) -> None:
+                self._end_app_control_inline_editor(commit=True)
+
+            cb.bind("<<ComboboxSelected>>", commit_and_close)
+            cb.bind("<Return>", commit_and_close)
+            cb.bind("<Escape>", lambda _e: self._end_app_control_inline_editor(commit=False))
+            cb.bind("<FocusOut>", lambda _e: self._end_app_control_inline_editor(commit=True))
+            cb.bind("<Control-z>", lambda _e: (self._app_undo(), "break")[1])
+            cb.bind("<Control-Z>", lambda _e: (self._app_undo(), "break")[1])
+            cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+
+            cb.place(x=x, y=y, width=w, height=h)
+            cb.focus_set()
+            self._app_control_inline = cb
+            try:
+                tv.after_idle(lambda: self._combobox_post(cb))
+            except Exception:
+                self._combobox_post(cb)
+
+            if mode == "src_input":
+                try:
+                    cb.icursor(tk.END)
+                    cb.selection_range(0, tk.END)
+                except Exception:
+                    pass
         else:
             ent = ttk.Entry(tv)
             ent.insert(0, value)
@@ -21743,7 +22712,7 @@ class MainWindow(tk.Tk):
                 if len(pick) == 1:
                     new_value = pick[0]
 
-        final_value = new_value.strip() if key in {"name", "type"} else new_value
+        final_value = new_value.strip() if key in {"name", "type", "src"} else new_value
         if (row.get(key) or "") == final_value:
             try:
                 w.destroy()
@@ -21840,7 +22809,7 @@ class MainWindow(tk.Tk):
                 if len(pick) == 1:
                     new_value = pick[0]
 
-        final_value = new_value.strip() if key in {"name", "type"} else new_value
+        final_value = new_value.strip() if key in {"name", "type", "src"} else new_value
         if (row.get(key) or "") == final_value:
             try:
                 w.destroy()
@@ -22409,6 +23378,7 @@ class MainWindow(tk.Tk):
             self._app_table_set_rows("setting", setting_rows)
             self._app_table_set_rows("conf", [])
             self._app_table_set_rows("control", control_rows)
+            self._mark_all_application_rows_added()
         finally:
             self._app_loading = False
 
@@ -22447,26 +23417,24 @@ class MainWindow(tk.Tk):
         src = app_dir / res["src_rel"]
         dst = app_dir / res["new_name"]
 
-        if dst.exists():
-            if not messagebox.askyesno("Overwrite?", f"File exists:\n\n{os.fspath(dst)}\n\nOverwrite?", parent=self):
-                return
-        try:
-            dst.write_bytes(src.read_bytes())
-        except Exception as e:
-            messagebox.showerror("Copy failed", str(e), parent=self)
-            return
-
+        # New copied application stays in-memory until user clicks Save.
         self._app_input_types_cache = None
         self._app_setting_types_cache = None
         self._app_output_types_cache = None
         self._app_conf_types_cache = None
         self._app_control_types_cache = None
-        self._open_application_from_path(dst)
+
+        self._open_application_from_path(src)
+        self._app_file_path = dst
         try:
-            rel = os.fspath(dst.relative_to(app_dir))
+            self._mark_application_unsaved()
         except Exception:
-            rel = os.fspath(dst.name)
-        self._refresh_application_search_list(select_rel=rel)
+            pass
+        try:
+            self.var_app_selected.set("")
+        except Exception:
+            pass
+        self._set_status(f"New application copied (unsaved): {os.fspath(dst)}")
 
     def _local_name(self, tag: str) -> str:
         if tag.startswith("{"):
@@ -22813,6 +23781,415 @@ class MainWindow(tk.Tk):
             purpose_raw = read_val(find_dai(doi, "purpose"))
             purpose_clean = self._sanitize_purpose(purpose_raw)
             out.append({"doi_name": doi_name, "seq": seq, "purpose_raw": purpose_raw, "purpose_clean": purpose_clean})
+        return out
+
+    def _app_input_doref_values(self, include_value: str = "") -> list[str]:
+        """Build doRef choices for Application input rows from current LN InRef entries."""
+        ln_el: ET.Element | None = None
+        try:
+            ln_el = self._current_ln_instance_element()
+        except Exception:
+            ln_el = None
+
+        # Fallback to resolving LN from Application LnRef when LN instance editor is not open.
+        if ln_el is None:
+            try:
+                lnref = self._lnref_from_application()
+                lnref_norm = self._normalize_lnref(lnref)
+                ln_path = self._guess_ln_instance_path_from_lnref(lnref)
+                if ln_path is not None and ln_path.exists():
+                    doc = load_ln_instance_document(Path(ln_path))
+                    ln_el = self._pick_ln_element_for_lnref(doc, lnref_norm)
+            except Exception:
+                ln_el = None
+
+        values: list[str] = [""]
+        if ln_el is None:
+            inc = (include_value or "").strip()
+            if inc and inc not in values:
+                values.append(inc)
+            return values
+
+        try:
+            inrefs = self._extract_inrefs_from_ln_element(ln_el)
+        except Exception:
+            inrefs = []
+
+        # Keep source order from LN; add only valid .InRef%purpose values.
+        seen: set[str] = set(values)
+        for it in inrefs:
+            purpose = (it.get("purpose_clean") or "").strip()
+            if not purpose:
+                continue
+            doref = f".InRef%{purpose}"
+            if doref in seen:
+                continue
+            values.append(doref)
+            seen.add(doref)
+
+        inc = (include_value or "").strip()
+        if inc and inc not in seen:
+            values.append(inc)
+        return values
+
+    def _app_output_doref_values(self, include_value: str = "") -> list[str]:
+        """Build doRef choices for Application output rows from LN DOIs except InRef* entries."""
+        ln_el: ET.Element | None = None
+        try:
+            ln_el = self._current_ln_instance_element()
+        except Exception:
+            ln_el = None
+
+        if ln_el is None:
+            try:
+                lnref = self._lnref_from_application()
+                lnref_norm = self._normalize_lnref(lnref)
+                ln_path = self._guess_ln_instance_path_from_lnref(lnref)
+                if ln_path is not None and ln_path.exists():
+                    doc = load_ln_instance_document(Path(ln_path))
+                    ln_el = self._pick_ln_element_for_lnref(doc, lnref_norm)
+            except Exception:
+                ln_el = None
+
+        values: list[str] = [""]
+        if ln_el is None:
+            inc = (include_value or "").strip()
+            if inc and inc not in values:
+                values.append(inc)
+            return values
+
+        setting_do_names = self._ln_setting_do_names(ln_el)
+
+        seen: set[str] = set(values)
+        for doi in list(ln_el):
+            if not isinstance(doi.tag, str) or _local_name(doi.tag) != "DOI":
+                continue
+            doi_name = (doi.attrib.get("name") or "").strip()
+            if not doi_name or doi_name.startswith("InRef"):
+                continue
+            if doi_name in setting_do_names:
+                continue
+            doref = f".{doi_name}"
+            if doref in seen:
+                continue
+            values.append(doref)
+            seen.add(doref)
+
+        inc = (include_value or "").strip()
+        if inc and inc not in seen:
+            values.append(inc)
+        return values
+
+    def _ln_setting_do_names(self, ln_el: ET.Element | None) -> set[str]:
+        """Return DO names in an LN whose DOType behaves like Application settings (SP/SE)."""
+        if ln_el is None:
+            return set()
+
+        ln_type_id = (ln_el.attrib.get("lnType") or "").strip()
+        if not ln_type_id:
+            return set()
+
+        ln_dir = self.workspace_root / "ep7_datamodel" / "datamodel" / "iec61850" / "LNodeType"
+        ln_path = self._find_type_file(kind_dir=ln_dir, type_id=ln_type_id)
+        if ln_path is None:
+            return set()
+
+        try:
+            root = ET.parse(ln_path).getroot()
+        except Exception:
+            return set()
+
+        ns = ""
+        if isinstance(root.tag, str) and root.tag.startswith("{"):
+            ns = root.tag.split("}", 1)[0][1:]
+
+        def q(tag: str) -> str:
+            return f"{{{ns}}}{tag}" if ns else tag
+
+        ln_type_el = root.find(f".//{q('LNodeType')}")
+        if ln_type_el is None:
+            return set()
+
+        out: set[str] = set()
+        for do in ln_type_el.findall(q("DO")):
+            do_name = (do.attrib.get("name") or "").strip()
+            do_type = (do.attrib.get("type") or "").strip()
+            if not do_name or not do_type:
+                continue
+            if self._do_type_setting_entries(do_type):
+                out.add(do_name)
+        return out
+
+    def _app_setting_src_values(self, include_value: str = "") -> list[str]:
+        """Build src choices for Application setting rows from LN setting-type DOs only."""
+        ln_el: ET.Element | None = None
+        try:
+            ln_el = self._current_ln_instance_element()
+        except Exception:
+            ln_el = None
+
+        if ln_el is None:
+            try:
+                lnref = self._lnref_from_application()
+                lnref_norm = self._normalize_lnref(lnref)
+                ln_path = self._guess_ln_instance_path_from_lnref(lnref)
+                if ln_path is not None and ln_path.exists():
+                    doc = load_ln_instance_document(Path(ln_path))
+                    ln_el = self._pick_ln_element_for_lnref(doc, lnref_norm)
+            except Exception:
+                ln_el = None
+
+        values: list[str] = [""]
+        if ln_el is None:
+            inc = (include_value or "").strip()
+            if inc and inc not in values:
+                values.append(inc)
+            return values
+
+        setting_do_names = self._ln_setting_do_names(ln_el)
+        seen: set[str] = set(values)
+        for doi in list(ln_el):
+            if not isinstance(doi.tag, str) or _local_name(doi.tag) != "DOI":
+                continue
+            doi_name = (doi.attrib.get("name") or "").strip()
+            if doi_name.lower().startswith("inref"):
+                continue
+            if not doi_name or doi_name not in setting_do_names:
+                continue
+            src = f".{doi_name}"
+            if src in seen:
+                continue
+            values.append(src)
+            seen.add(src)
+
+        inc = (include_value or "").strip()
+        if inc and inc not in seen:
+            values.append(inc)
+        return values
+
+    def _manual_input_src_catalog(self) -> dict[str, list[str]]:
+        """Build LN -> DO list catalog for input src manual editor."""
+        cache = getattr(self, "_manual_input_src_catalog_cache", None)
+        if isinstance(cache, dict) and cache:
+            return dict(cache)
+
+        def _read_dai_val(doi_el: ET.Element, dai_name: str) -> str:
+            want = (dai_name or "").strip()
+            if not want:
+                return ""
+            for ch in list(doi_el):
+                if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "DAI"):
+                    continue
+                if (ch.attrib.get("name") or "").strip() != want:
+                    continue
+                for vv in list(ch):
+                    if isinstance(vv.tag, str) and _local_name(vv.tag) == "Val":
+                        return (vv.text or "").strip()
+            return ""
+
+        out: dict[str, list[str]] = {}
+        lndm_dir = self._lndm_dir()
+        rels = self._scan_xml_relpaths(lndm_dir)
+        for rel in rels:
+            p = lndm_dir / rel
+            try:
+                doc = load_ln_instance_document(p)
+                ln = doc.ln_elements[0] if getattr(doc, "ln_elements", None) else None
+            except Exception:
+                ln = None
+            if ln is None:
+                continue
+            ln_name = (((ln.attrib.get("prefix") or "") + (ln.attrib.get("lnClass") or "")).strip())
+            if not ln_name:
+                continue
+            do_vals = out.setdefault(ln_name, [])
+            seen = set(do_vals)
+            for doi in list(ln):
+                if not isinstance(doi.tag, str) or _local_name(doi.tag) != "DOI":
+                    continue
+                nm = (doi.attrib.get("name") or "").strip()
+                if not nm:
+                    continue
+
+                # Show InRef as InRef%<purpose> when purpose exists, so the
+                # hardlink DO list matches app/afg doRef conventions.
+                if re.match(r"^InRef\d+$", nm, flags=re.IGNORECASE):
+                    purpose_raw = _read_dai_val(doi, "purpose")
+                    purpose = self._sanitize_purpose(purpose_raw)
+                    if purpose:
+                        nm = f"InRef%{purpose}"
+
+                if nm in seen:
+                    continue
+                do_vals.append(nm)
+                seen.add(nm)
+
+        setattr(self, "_manual_input_src_catalog_cache", dict(out))
+        return out
+
+    def _open_manual_input_src_dialog(self, *, initial_value: str = "") -> str | None:
+        catalog = self._manual_input_src_catalog()
+        ln_options = sorted(catalog.keys(), key=lambda s: s.lower())
+
+        def do_vals_for_ln(ln_name: str) -> list[str]:
+            return list(catalog.get((ln_name or "").strip(), []))
+
+        dlg = _ManualInputSrcDialog(
+            self,
+            ln_options=ln_options,
+            do_values_for_ln=do_vals_for_ln,
+            initial_result=initial_value,
+        )
+        return dlg.show()
+
+    def _ln_control_do_names(self, ln_el: ET.Element | None) -> set[str]:
+        """Return DO names in an LN whose DOType is a supported control CDC."""
+        if ln_el is None:
+            return set()
+
+        ln_type_id = (ln_el.attrib.get("lnType") or "").strip()
+        if not ln_type_id:
+            return set()
+
+        ln_dir = self.workspace_root / "ep7_datamodel" / "datamodel" / "iec61850" / "LNodeType"
+        ln_path = self._find_type_file(kind_dir=ln_dir, type_id=ln_type_id)
+        if ln_path is None:
+            return set()
+
+        try:
+            root = ET.parse(ln_path).getroot()
+        except Exception:
+            return set()
+
+        ns = ""
+        if isinstance(root.tag, str) and root.tag.startswith("{"):
+            ns = root.tag.split("}", 1)[0][1:]
+
+        def q(tag: str) -> str:
+            return f"{{{ns}}}{tag}" if ns else tag
+
+        ln_type_el = root.find(f".//{q('LNodeType')}")
+        if ln_type_el is None:
+            return set()
+
+        out: set[str] = set()
+        for do in ln_type_el.findall(q("DO")):
+            do_name = (do.attrib.get("name") or "").strip()
+            do_type = (do.attrib.get("type") or "").strip()
+            if not do_name or not do_type:
+                continue
+            cdc = self._do_type_cdc(do_type)
+            if self._control_type_from_cdc(cdc):
+                out.add(do_name)
+        return out
+
+    def _app_control_src_values(self, include_value: str = "") -> list[str]:
+        """Build src choices for Application control rows from control-type DOs."""
+        ln_el: ET.Element | None = None
+        try:
+            ln_el = self._current_ln_instance_element()
+        except Exception:
+            ln_el = None
+
+        if ln_el is None:
+            try:
+                lnref = self._lnref_from_application()
+                lnref_norm = self._normalize_lnref(lnref)
+                ln_path = self._guess_ln_instance_path_from_lnref(lnref)
+                if ln_path is not None and ln_path.exists():
+                    doc = load_ln_instance_document(Path(ln_path))
+                    ln_el = self._pick_ln_element_for_lnref(doc, lnref_norm)
+            except Exception:
+                ln_el = None
+
+        values: list[str] = [""]
+        if ln_el is None:
+            inc = (include_value or "").strip()
+            if inc and inc not in values:
+                values.append(inc)
+            return values
+
+        control_do_names = self._ln_control_do_names(ln_el)
+        seen: set[str] = set(values)
+        for doi in list(ln_el):
+            if not isinstance(doi.tag, str) or _local_name(doi.tag) != "DOI":
+                continue
+            doi_name = (doi.attrib.get("name") or "").strip()
+            if not doi_name or doi_name.lower().startswith("inref"):
+                continue
+            if doi_name not in control_do_names:
+                continue
+            src = f".{doi_name}"
+            if src in seen:
+                continue
+            values.append(src)
+            seen.add(src)
+
+        inc = (include_value or "").strip()
+        if inc and inc not in seen:
+            values.append(inc)
+        return values
+
+    def _open_manual_setting_src_dialog(self, *, initial_value: str = "") -> str | None:
+        lndm_dir = self._lndm_dir()
+        rels = self._scan_xml_relpaths(lndm_dir)
+        dlg = _ManualSettingSrcDialog(
+            self,
+            lndm_dir=lndm_dir,
+            ln_relpaths=rels,
+            resolve_ln=self._resolve_ln_instance_for_manual_src,
+            initial_result=initial_value,
+        )
+        return dlg.show()
+
+    def _resolve_ln_instance_for_manual_src(self, ln_rel: str) -> tuple[str, list[str]]:
+        rel = (ln_rel or "").strip()
+        if not rel:
+            return ("", [])
+
+        cache = getattr(self, "_manual_src_ln_cache", None)
+        if cache is None:
+            cache = {}
+            setattr(self, "_manual_src_ln_cache", cache)
+        if rel in cache:
+            return cache[rel]
+
+        path = self._lndm_dir() / rel
+        ln_ref = ""
+        do_names: list[str] = []
+        try:
+            doc = load_ln_instance_document(path)
+            ln = doc.ln_elements[0] if getattr(doc, "ln_elements", None) else None
+            if ln is not None:
+                prefix = (ln.attrib.get("prefix") or "").strip()
+                ln_class = (ln.attrib.get("lnClass") or "").strip()
+                if prefix or ln_class:
+                    ln_ref = f"{prefix}{ln_class}#"
+                else:
+                    ln_ref = f"{Path(rel).stem}#"
+
+                for doi in list(ln):
+                    if not isinstance(doi.tag, str) or _local_name(doi.tag) != "DOI":
+                        continue
+                    nm = (doi.attrib.get("name") or "").strip()
+                    if not nm or nm.lower().startswith("inref"):
+                        continue
+                    do_names.append(nm)
+        except Exception:
+            ln_ref = f"{Path(rel).stem}#"
+            do_names = []
+
+        # Keep source order, remove duplicates.
+        uniq: list[str] = []
+        seen: set[str] = set()
+        for nm in do_names:
+            if nm in seen:
+                continue
+            seen.add(nm)
+            uniq.append(nm)
+
+        out = (ln_ref, uniq)
+        cache[rel] = out
         return out
 
     def _app_sync_reconcile(
