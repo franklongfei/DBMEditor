@@ -225,6 +225,7 @@ class _CreateFromTemplateDialog(tk.Toplevel):
         parent: tk.Misc,
         *,
         templates: list[LNodeTypeInfo],
+        get_template_preview: Callable[[str], str] | None = None,
         initial_template_id: str = "",
         initial_prefix: str = "",
         initial_inst: str = "0",
@@ -239,6 +240,8 @@ class _CreateFromTemplateDialog(tk.Toplevel):
         self._templates = list(templates)
         self._template_by_id = {t.id: t for t in self._templates}
         self._all_ids = [t.id for t in self._templates]
+        self._get_template_preview = get_template_preview
+        self._preview_after_id: str | None = None
 
         self._result: dict[str, str] | None = None
 
@@ -295,8 +298,29 @@ class _CreateFromTemplateDialog(tk.Toplevel):
         self.lbl_hint = ttk.Label(frm, text="(Auto: prefix + lnClass)", foreground="#666")
         self.lbl_hint.grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
+        preview_box = ttk.Frame(frm)
+        preview_box.grid(row=7, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        ttk.Label(preview_box, text="Template preview").pack(anchor="w")
+
+        preview_inner = ttk.Frame(preview_box)
+        preview_inner.pack(fill="both", expand=True, pady=(6, 0))
+        preview_inner.columnconfigure(0, weight=1)
+        preview_inner.rowconfigure(0, weight=1)
+
+        self.txt_preview = tk.Text(preview_inner, height=12, wrap="none")
+        y = ttk.Scrollbar(preview_inner, orient="vertical", command=self.txt_preview.yview)
+        self.txt_preview.configure(yscrollcommand=y.set)
+        self.txt_preview.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        try:
+            self.txt_preview.configure(state="disabled")
+        except Exception:
+            pass
+
+        frm.rowconfigure(7, weight=1)
+
         btns = ttk.Frame(frm)
-        btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=8, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="Create", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -332,16 +356,64 @@ class _CreateFromTemplateDialog(tk.Toplevel):
             suggested = _suggest_instance_filename(self.var_prefix.get(), info.ln_class)
             self.var_suggested_filename.set(suggested)
 
+        def schedule_preview_update(*_args) -> None:
+            if getattr(self, "txt_preview", None) is None:
+                return
+            if self._preview_after_id is not None:
+                try:
+                    self.after_cancel(self._preview_after_id)
+                except Exception:
+                    pass
+                self._preview_after_id = None
+            try:
+                self._preview_after_id = self.after(80, self._update_preview)
+            except Exception:
+                self._preview_after_id = None
+
         self.var_filter.trace_add("write", apply_filter)
         self.var_template.trace_add("write", sync_filename)
+        self.var_template.trace_add("write", schedule_preview_update)
         self.var_prefix.trace_add("write", sync_filename)
         apply_filter()
         sync_filename()
+        self._update_preview()
 
         self.cb_template.bind("<Return>", lambda _e: self._ok())
         self.bind("<Escape>", lambda _e: self._cancel())
         self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
         ent_filter.focus_set()
+
+    def _update_preview(self) -> None:
+        get_preview = getattr(self, "_get_template_preview", None)
+        txt = getattr(self, "txt_preview", None)
+        if txt is None:
+            return
+
+        template_id = (self.var_template.get() or "").strip()
+        if not callable(get_preview) or not template_id:
+            preview = ""
+        else:
+            try:
+                preview = str(get_preview(template_id) or "")
+            except Exception as e:
+                preview = f"(Failed to load preview: {e})"
+
+        if callable(get_preview) and template_id and not preview.strip():
+            preview = "(Template not found)"
+
+        try:
+            txt.configure(state="normal")
+        except Exception:
+            pass
+        try:
+            txt.delete("1.0", "end")
+            if preview:
+                txt.insert("1.0", preview)
+        finally:
+            try:
+                txt.configure(state="disabled")
+            except Exception:
+                pass
 
     def _ok(self) -> None:
         tid = (self.var_template.get() or "").strip()
@@ -390,6 +462,7 @@ class _CopyInstanceDialog(tk.Toplevel):
         *,
         instance_relpaths: list[str],
         lndm_dir: Path,
+        get_source_preview: Callable[[str], str] | None = None,
         suggested_filename: str = "",
     ):
         super().__init__(parent)
@@ -403,6 +476,8 @@ class _CopyInstanceDialog(tk.Toplevel):
         self._source_values = [_BLANK_SOURCE_OPTION] + self._relpaths
         self._result: dict[str, str] | None = None
         self._source_ln_cache: dict[str, tuple[str, str]] = {}
+        self._get_source_preview = get_source_preview
+        self._preview_after_id: str | None = None
 
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
@@ -453,8 +528,29 @@ class _CopyInstanceDialog(tk.Toplevel):
             row=5, column=0, columnspan=2, sticky="w", pady=(2, 0)
         )
 
+        preview_box = ttk.Frame(frm)
+        preview_box.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        ttk.Label(preview_box, text="Source preview").pack(anchor="w")
+
+        preview_inner = ttk.Frame(preview_box)
+        preview_inner.pack(fill="both", expand=True, pady=(6, 0))
+        preview_inner.columnconfigure(0, weight=1)
+        preview_inner.rowconfigure(0, weight=1)
+
+        self.txt_preview = tk.Text(preview_inner, height=12, wrap="none")
+        y = ttk.Scrollbar(preview_inner, orient="vertical", command=self.txt_preview.yview)
+        self.txt_preview.configure(yscrollcommand=y.set)
+        self.txt_preview.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        try:
+            self.txt_preview.configure(state="disabled")
+        except Exception:
+            pass
+
+        frm.rowconfigure(6, weight=1)
+
         btns = ttk.Frame(frm)
-        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="Copy", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -477,6 +573,20 @@ class _CopyInstanceDialog(tk.Toplevel):
         def sync_filename(*_args) -> None:
             filename = _suggest_instance_filename(self.var_prefix.get(), self.var_ln_class.get())
             self.var_filename.set(filename)
+
+        def schedule_preview_update(*_args) -> None:
+            if getattr(self, "txt_preview", None) is None:
+                return
+            if self._preview_after_id is not None:
+                try:
+                    self.after_cancel(self._preview_after_id)
+                except Exception:
+                    pass
+                self._preview_after_id = None
+            try:
+                self._preview_after_id = self.after(80, self._update_preview)
+            except Exception:
+                self._preview_after_id = None
 
         def apply_filter(*_args) -> None:
             raw = (self.var_filter.get() or "").strip().lower()
@@ -502,16 +612,50 @@ class _CopyInstanceDialog(tk.Toplevel):
 
         self.var_filter.trace_add("write", apply_filter)
         self.var_src.trace_add("write", sync_from_source)
+        self.var_src.trace_add("write", schedule_preview_update)
         self.var_prefix.trace_add("write", sync_filename)
         self.var_ln_class.trace_add("write", sync_filename)
         apply_filter()
         sync_from_source()
         sync_filename()
+        self._update_preview()
 
         self.bind("<Escape>", lambda _e: self._cancel())
         self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
         cb.bind("<Return>", lambda _e: self._ok())
         ent_filter.focus_set()
+
+    def _update_preview(self) -> None:
+        get_preview = getattr(self, "_get_source_preview", None)
+        txt = getattr(self, "txt_preview", None)
+        if txt is None:
+            return
+
+        src = (self.var_src.get() or "").strip()
+        if not callable(get_preview) or not src or src == _BLANK_SOURCE_OPTION:
+            preview = ""
+        else:
+            try:
+                preview = str(get_preview(src) or "")
+            except Exception as e:
+                preview = f"(Failed to load preview: {e})"
+
+        if callable(get_preview) and src and src != _BLANK_SOURCE_OPTION and not preview.strip():
+            preview = "(Source instance not found)"
+
+        try:
+            txt.configure(state="normal")
+        except Exception:
+            pass
+        try:
+            txt.delete("1.0", "end")
+            if preview:
+                txt.insert("1.0", preview)
+        finally:
+            try:
+                txt.configure(state="disabled")
+            except Exception:
+                pass
 
     def _ok(self) -> None:
         src = (self.var_src.get() or "").strip()
@@ -1256,6 +1400,107 @@ class LNInstanceEditorFrame(ttk.Frame):
             raise FileNotFoundError(f"IEC61850 folder not found: {iec61850_dir}")
         self._type_catalog = scan_type_catalog(iec61850_dir)
 
+    def _template_preview_text(self, template_id: str) -> str:
+        template_id = (template_id or "").strip()
+        if not template_id:
+            return ""
+        try:
+            self._ensure_type_catalog()
+        except Exception:
+            return ""
+        templates = list(getattr(self._type_catalog, "lnode_types", []) or [])
+        info = next((x for x in templates if (x.id or "").strip() == template_id), None)
+        if info is None:
+            return ""
+        try:
+            root = ET.parse(info.file_path).getroot()
+        except Exception:
+            return ""
+
+        ln_el = None
+        for el in root.iter():
+            if isinstance(el.tag, str) and _local_name(el.tag) == "LNodeType":
+                if (el.attrib.get("id") or "").strip() == template_id:
+                    ln_el = el
+                    break
+        if ln_el is None:
+            return ""
+        return self._format_xml_preview(ln_el)
+
+    def _instance_preview_text(self, src_rel: str) -> str:
+        src_rel = (src_rel or "").strip()
+        if not src_rel or src_rel == _BLANK_SOURCE_OPTION:
+            return ""
+        p = self.lndm_dir / src_rel
+        if not p.exists():
+            return ""
+        try:
+            root = ET.parse(p).getroot()
+        except Exception:
+            return ""
+        if _local_name(root.tag) == "LN":
+            return self._format_xml_preview(root)
+        ln_el = None
+        for el in root.iter():
+            if isinstance(el.tag, str) and _local_name(el.tag) == "LN":
+                ln_el = el
+                break
+        if ln_el is None:
+            return self._format_xml_preview(root)
+        return self._format_xml_preview(ln_el)
+
+    def _format_xml_preview(self, element: ET.Element, *, max_lines: int = 400) -> str:
+        def strip_ns(tag: str) -> str:
+            if not isinstance(tag, str):
+                return str(tag)
+            if "}" in tag:
+                return tag.split("}", 1)[1]
+            return tag
+
+        def fmt_attrs(attrib: dict) -> str:
+            if not attrib:
+                return ""
+            parts: list[str] = []
+            for k in sorted(attrib.keys()):
+                v = attrib.get(k)
+                if v is None:
+                    continue
+                parts.append(f'{k}="{v}"')
+            return (" " + " ".join(parts)) if parts else ""
+
+        lines: list[str] = []
+
+        def render(el: ET.Element, level: int = 0) -> None:
+            if len(lines) >= max_lines:
+                return
+            tag = strip_ns(el.tag)
+            attrs = fmt_attrs(getattr(el, "attrib", {}) or {})
+            children = list(el)
+            text = (el.text or "").strip()
+            indent = "  " * level
+
+            if not children and not text:
+                lines.append(f"{indent}<{tag}{attrs} />")
+                return
+
+            if not children and text:
+                lines.append(f"{indent}<{tag}{attrs}>{text}</{tag}>")
+                return
+
+            lines.append(f"{indent}<{tag}{attrs}>")
+            if text:
+                lines.append(f"{indent}  {text}")
+            for ch in children:
+                if len(lines) >= max_lines:
+                    break
+                render(ch, level + 1)
+            lines.append(f"{indent}</{tag}>")
+
+        render(element)
+        if len(lines) >= max_lines:
+            lines = lines[: max_lines - 1] + ["...(truncated)..."]
+        return "\n".join(lines) + "\n"
+
     def create_instance_from_template_dialog(self, *, template_id: str = "") -> None:
         try:
             self._ensure_type_catalog()
@@ -1268,7 +1513,12 @@ class LNInstanceEditorFrame(ttk.Frame):
             messagebox.showerror("Missing", "No LNodeType templates found in catalog.", parent=self)
             return
 
-        dlg = _CreateFromTemplateDialog(self.winfo_toplevel(), templates=templates, initial_template_id=template_id)
+        dlg = _CreateFromTemplateDialog(
+            self.winfo_toplevel(),
+            templates=templates,
+            get_template_preview=self._template_preview_text,
+            initial_template_id=template_id,
+        )
         res = dlg.show()
         if not res:
             return
@@ -1322,7 +1572,12 @@ class LNInstanceEditorFrame(ttk.Frame):
             return
 
         templates = [info]
-        dlg = _CreateFromTemplateDialog(self.winfo_toplevel(), templates=templates, initial_template_id=tid)
+        dlg = _CreateFromTemplateDialog(
+            self.winfo_toplevel(),
+            templates=templates,
+            get_template_preview=self._template_preview_text,
+            initial_template_id=tid,
+        )
         # Disable template selection UI (fixed)
         try:
             dlg.cb_template.configure(state="disabled")
@@ -1367,6 +1622,7 @@ class LNInstanceEditorFrame(ttk.Frame):
             self.winfo_toplevel(),
             instance_relpaths=self._all_instance_relpaths,
             lndm_dir=self.lndm_dir,
+            get_source_preview=self._instance_preview_text,
             suggested_filename=suggested,
         )
         res = dlg.show()

@@ -702,7 +702,13 @@ class EnumValTable(ttk.Frame):
 
 
 class NewEnumTypeDialog(tk.Toplevel):
-    def __init__(self, parent: tk.Misc, *, enum_type_ids: list[str]):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        enum_type_ids: list[str],
+        get_enum_type_preview: Callable[[str], str] | None = None,
+    ):
         super().__init__(parent)
         self.title("New EnumType")
         self.resizable(False, False)
@@ -711,6 +717,8 @@ class NewEnumTypeDialog(tk.Toplevel):
 
         self._result: dict[str, str] | None = None
         self._enum_type_ids = list(enum_type_ids or [])
+        self._get_enum_type_preview = get_enum_type_preview
+        self._preview_after_id: str | None = None
 
         self._id_internal_update = False
         self._id_user_modified = False
@@ -767,8 +775,29 @@ class NewEnumTypeDialog(tk.Toplevel):
         hint = ttk.Label(frm, text="Tip: If you pick an existing EnumType, EnumVal + LangRef will be copied, then id updated.")
         hint.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
+        preview_box = ttk.Frame(frm)
+        preview_box.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        ttk.Label(preview_box, text="EnumType template preview").pack(anchor="w")
+
+        preview_inner = ttk.Frame(preview_box)
+        preview_inner.pack(fill="both", expand=True, pady=(6, 0))
+        preview_inner.columnconfigure(0, weight=1)
+        preview_inner.rowconfigure(0, weight=1)
+
+        self.txt_preview = tk.Text(preview_inner, height=12, wrap="none")
+        y = ttk.Scrollbar(preview_inner, orient="vertical", command=self.txt_preview.yview)
+        self.txt_preview.configure(yscrollcommand=y.set)
+        self.txt_preview.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        try:
+            self.txt_preview.configure(state="disabled")
+        except Exception:
+            pass
+
+        frm.rowconfigure(4, weight=1)
+
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="Create", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -802,6 +831,20 @@ class NewEnumTypeDialog(tk.Toplevel):
                 finally:
                     self._id_internal_update = False
 
+        def schedule_preview_update(*_args) -> None:
+            if getattr(self, "txt_preview", None) is None:
+                return
+            if self._preview_after_id is not None:
+                try:
+                    self.after_cancel(self._preview_after_id)
+                except Exception:
+                    pass
+                self._preview_after_id = None
+            try:
+                self._preview_after_id = self.after(80, self._update_preview)
+            except Exception:
+                self._preview_after_id = None
+
         def apply_filter(*_args) -> None:
             raw = (self.var_filter.get() or "").strip().lower()
             if not raw:
@@ -825,15 +868,52 @@ class NewEnumTypeDialog(tk.Toplevel):
                 self.var_base.set("")
 
         self.var_base.trace_add("write", prefill)
+        self.var_base.trace_add("write", schedule_preview_update)
         self.var_filter.trace_add("write", apply_filter)
         apply_filter()
         prefill()
+        self._update_preview()
 
         try:
             ent_filter.focus_set()
             ent_filter.select_range(0, tk.END)
         except Exception:
             pass
+
+    def _update_preview(self) -> None:
+        get_preview = getattr(self, "_get_enum_type_preview", None)
+        txt = getattr(self, "txt_preview", None)
+        if txt is None:
+            return
+
+        enum_type = (self.var_base.get() or "").strip()
+
+        if enum_type == "(Blank)" or not enum_type:
+            preview = ""
+        elif not callable(get_preview):
+            preview = ""
+        else:
+            try:
+                preview = str(get_preview(enum_type) or "")
+            except Exception as e:
+                preview = f"(Failed to load preview: {e})"
+
+        if callable(get_preview) and enum_type and enum_type != "(Blank)" and not preview.strip():
+            preview = "(EnumType not found)"
+
+        try:
+            txt.configure(state="normal")
+        except Exception:
+            pass
+        try:
+            txt.delete("1.0", "end")
+            if preview:
+                txt.insert("1.0", preview)
+        finally:
+            try:
+                txt.configure(state="disabled")
+            except Exception:
+                pass
 
     def _ok(self) -> None:
         new_id = (self.var_id.get() or "").strip()
@@ -1127,7 +1207,11 @@ class EnumTab(ttk.Frame):
         if self._enum_table is None:
             return
         enum_ids = list(self.catalog.enum_types or [])
-        dlg = NewEnumTypeDialog(self, enum_type_ids=enum_ids)
+        dlg = NewEnumTypeDialog(
+            self,
+            enum_type_ids=enum_ids,
+            get_enum_type_preview=self._enum_type_preview_text,
+        )
         res = dlg.show()
         if not res:
             return
@@ -1307,6 +1391,89 @@ class EnumTab(ttk.Frame):
 
         self.mark_saved()
         self._set_status(f"Opened EnumType: {os.fspath(path)}")
+
+    def _enum_type_preview_text(self, enum_type_id: str) -> str:
+        enum_type_id = (enum_type_id or "").strip()
+        if not enum_type_id:
+            return ""
+
+        enum_dir = self._enum_type_dir()
+        p = find_type_file(kind_dir=enum_dir, type_id=enum_type_id, cache=self._type_file_cache)
+        if p is None:
+            return ""
+
+        try:
+            root = ET.parse(p).getroot()
+        except Exception:
+            return ""
+
+        ns = ""
+        if isinstance(root.tag, str) and root.tag.startswith("{"):
+            ns = root.tag.split("}", 1)[0][1:]
+
+        def q(tag: str) -> str:
+            return f"{{{ns}}}{tag}" if ns else tag
+
+        enum_el = None
+        for cand in root.findall(f".//{q('EnumType')}"):
+            if (cand.attrib.get("id") or "").strip() == enum_type_id:
+                enum_el = cand
+                break
+        if enum_el is None:
+            return ""
+
+        def strip_ns(tag: str) -> str:
+            if not isinstance(tag, str):
+                return str(tag)
+            if "}" in tag:
+                return tag.split("}", 1)[1]
+            return tag
+
+        def fmt_attrs(attrib: dict) -> str:
+            if not attrib:
+                return ""
+            parts: list[str] = []
+            for k in sorted(attrib.keys()):
+                v = attrib.get(k)
+                if v is None:
+                    continue
+                parts.append(f'{k}="{v}"')
+            return (" " + " ".join(parts)) if parts else ""
+
+        max_lines = 400
+        lines: list[str] = []
+
+        def render(el: ET.Element, level: int = 0) -> None:
+            if len(lines) >= max_lines:
+                return
+            tag = strip_ns(el.tag)
+            attrs = fmt_attrs(getattr(el, "attrib", {}) or {})
+            children = list(el)
+            text = (el.text or "").strip()
+            indent = "  " * level
+
+            if not children and not text:
+                lines.append(f"{indent}<{tag}{attrs} />")
+                return
+
+            if not children and text:
+                lines.append(f"{indent}<{tag}{attrs}>{text}</{tag}>")
+                return
+
+            lines.append(f"{indent}<{tag}{attrs}>")
+            if text:
+                lines.append(f"{indent}  {text}")
+            for ch in children:
+                if len(lines) >= max_lines:
+                    break
+                render(ch, level + 1)
+            lines.append(f"{indent}</{tag}>")
+
+        render(enum_el, 0)
+        if len(lines) >= max_lines:
+            lines = lines[: max_lines - 1] + ["...(truncated)..."]
+
+        return "\n".join(lines) + "\n"
 
     def save_enum_type(self) -> None:
         if self._enum_table is None:

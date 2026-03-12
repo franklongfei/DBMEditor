@@ -90,6 +90,59 @@ def _sort_filter_matches(raw: str, values: list[str]) -> list[str]:
     return [v for _i, v in sorted(enumerate(vals), key=rank)]
 
 
+def _format_xml_preview(el: ET.Element, *, max_lines: int = 400) -> str:
+    def strip_ns(tag: str) -> str:
+        if not isinstance(tag, str):
+            return str(tag)
+        if "}" in tag:
+            return tag.split("}", 1)[1]
+        return tag
+
+    def fmt_attrs(attrib: dict) -> str:
+        if not attrib:
+            return ""
+        parts: list[str] = []
+        for k in sorted(attrib.keys()):
+            v = attrib.get(k)
+            if v is None:
+                continue
+            parts.append(f'{k}="{v}"')
+        return (" " + " ".join(parts)) if parts else ""
+
+    lines: list[str] = []
+
+    def render(node: ET.Element, level: int = 0) -> None:
+        if len(lines) >= max_lines:
+            return
+        tag = strip_ns(node.tag)
+        attrs = fmt_attrs(getattr(node, "attrib", {}) or {})
+        children = list(node)
+        text = (node.text or "").strip()
+        indent = "  " * level
+
+        if not children and not text:
+            lines.append(f"{indent}<{tag}{attrs} />")
+            return
+
+        if not children and text:
+            lines.append(f"{indent}<{tag}{attrs}>{text}</{tag}>")
+            return
+
+        lines.append(f"{indent}<{tag}{attrs}>")
+        if text:
+            lines.append(f"{indent}  {text}")
+        for ch in children:
+            if len(lines) >= max_lines:
+                break
+            render(ch, level + 1)
+        lines.append(f"{indent}</{tag}>")
+
+    render(el, 0)
+    if len(lines) >= max_lines:
+        lines = lines[: max_lines - 1] + ["...(truncated)..."]
+    return "\n".join(lines) + "\n"
+
+
 def _clone_et_element_with_id_map(el: ET.Element) -> tuple[ET.Element, dict[int, int]]:
     """Clone an ElementTree element while producing an id(old)->id(new) mapping.
 
@@ -302,6 +355,7 @@ class _AfgNewDialog(tk.Toplevel):
         *,
         source_relpaths: list[str] | None = None,
         source_base_dir: Path | None = None,
+        get_source_preview: Callable[[str], str] | None = None,
         initial_name: str = "",
         initial_proxy: str = "",
         initial_chapter: str = "",
@@ -316,6 +370,8 @@ class _AfgNewDialog(tk.Toplevel):
         self._result: dict[str, str] | None = None
         self._source_relpaths = list(source_relpaths or [])
         self._source_base_dir = Path(source_base_dir) if source_base_dir is not None else None
+        self._get_source_preview = get_source_preview
+        self._preview_after_id: str | None = None
         self._source_blank = "(Blank)"
         self._source_values = [self._source_blank] + self._source_relpaths
 
@@ -370,8 +426,29 @@ class _AfgNewDialog(tk.Toplevel):
         self.var_topic = tk.StringVar(value=initial_topic)
         ttk.Entry(frm, textvariable=self.var_topic, width=48).grid(row=5, column=1, sticky="we", padx=(8, 0), pady=(8, 0))
 
+        preview_box = ttk.Frame(frm)
+        preview_box.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        ttk.Label(preview_box, text="Source preview").pack(anchor="w")
+
+        preview_inner = ttk.Frame(preview_box)
+        preview_inner.pack(fill="both", expand=True, pady=(6, 0))
+        preview_inner.columnconfigure(0, weight=1)
+        preview_inner.rowconfigure(0, weight=1)
+
+        self.txt_preview = tk.Text(preview_inner, height=12, wrap="none")
+        y = ttk.Scrollbar(preview_inner, orient="vertical", command=self.txt_preview.yview)
+        self.txt_preview.configure(yscrollcommand=y.set)
+        self.txt_preview.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        try:
+            self.txt_preview.configure(state="disabled")
+        except Exception:
+            pass
+
+        frm.rowconfigure(6, weight=1)
+
         btns = ttk.Frame(frm)
-        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -419,9 +496,25 @@ class _AfgNewDialog(tk.Toplevel):
             except Exception:
                 pass
 
+        def schedule_preview_update(*_args) -> None:
+            if getattr(self, "txt_preview", None) is None:
+                return
+            if self._preview_after_id is not None:
+                try:
+                    self.after_cancel(self._preview_after_id)
+                except Exception:
+                    pass
+                self._preview_after_id = None
+            try:
+                self._preview_after_id = self.after(80, self._update_preview)
+            except Exception:
+                self._preview_after_id = None
+
         self.var_source_filter.trace_add("write", apply_source_filter)
         self.var_source.trace_add("write", on_source_change)
+        self.var_source.trace_add("write", schedule_preview_update)
         apply_source_filter()
+        self._update_preview()
 
         self.bind("<Escape>", lambda _e: self._cancel())
         self.bind("<Return>", lambda _e: self._ok())
@@ -432,6 +525,38 @@ class _AfgNewDialog(tk.Toplevel):
             ent_name.select_range(0, tk.END)
         except Exception:
             pass
+
+    def _update_preview(self) -> None:
+        get_preview = getattr(self, "_get_source_preview", None)
+        txt = getattr(self, "txt_preview", None)
+        if txt is None:
+            return
+
+        src = (self.var_source.get() or "").strip()
+        if not callable(get_preview) or not src or src == self._source_blank:
+            preview = ""
+        else:
+            try:
+                preview = str(get_preview(src) or "")
+            except Exception as e:
+                preview = f"(Failed to load preview: {e})"
+
+        if callable(get_preview) and src and src != self._source_blank and not preview.strip():
+            preview = "(Source not found)"
+
+        try:
+            txt.configure(state="normal")
+        except Exception:
+            pass
+        try:
+            txt.delete("1.0", "end")
+            if preview:
+                txt.insert("1.0", preview)
+        finally:
+            try:
+                txt.configure(state="disabled")
+            except Exception:
+                pass
 
     def _ok(self) -> None:
         name = (self.var_name.get() or "").strip()
@@ -2485,7 +2610,14 @@ class _FunBlockDialog(tk.Toplevel):
 
 
 class _CreateFromLnInstanceDialog(tk.Toplevel):
-    def __init__(self, parent: tk.Misc, *, lndm_dir: Path, items: list[str]):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        lndm_dir: Path,
+        items: list[str],
+        get_ln_preview: Callable[[str], str] | None = None,
+    ):
         super().__init__(parent)
         self.title("Create from LN instance")
         self.resizable(False, False)
@@ -2494,6 +2626,8 @@ class _CreateFromLnInstanceDialog(tk.Toplevel):
 
         self._lndm_dir = Path(lndm_dir)
         self._items_all = list(items)
+        self._get_ln_preview = get_ln_preview
+        self._preview_after_id: str | None = None
         self._result: dict[str, str] | None = None
 
         self._last_auto_name = ""
@@ -2556,8 +2690,29 @@ class _CreateFromLnInstanceDialog(tk.Toplevel):
         ttk.Label(frm, text="desc").grid(row=6, column=0, sticky="w", pady=4)
         ttk.Entry(frm, textvariable=self.var_desc, width=56).grid(row=6, column=1, sticky="we", pady=4)
 
+        preview_box = ttk.Frame(frm)
+        preview_box.grid(row=7, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        ttk.Label(preview_box, text="LN instance preview").pack(anchor="w")
+
+        preview_inner = ttk.Frame(preview_box)
+        preview_inner.pack(fill="both", expand=True, pady=(6, 0))
+        preview_inner.columnconfigure(0, weight=1)
+        preview_inner.rowconfigure(0, weight=1)
+
+        self.txt_preview = tk.Text(preview_inner, height=12, wrap="none")
+        y = ttk.Scrollbar(preview_inner, orient="vertical", command=self.txt_preview.yview)
+        self.txt_preview.configure(yscrollcommand=y.set)
+        self.txt_preview.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        try:
+            self.txt_preview.configure(state="disabled")
+        except Exception:
+            pass
+
+        frm.rowconfigure(7, weight=1)
+
         btns = ttk.Frame(frm)
-        btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=8, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -2587,9 +2742,25 @@ class _CreateFromLnInstanceDialog(tk.Toplevel):
         def on_select(*_args) -> None:
             self._apply_autofill_from_selected_ln()
 
+        def schedule_preview_update(*_args) -> None:
+            if getattr(self, "txt_preview", None) is None:
+                return
+            if self._preview_after_id is not None:
+                try:
+                    self.after_cancel(self._preview_after_id)
+                except Exception:
+                    pass
+                self._preview_after_id = None
+            try:
+                self._preview_after_id = self.after(80, self._update_preview)
+            except Exception:
+                self._preview_after_id = None
+
         self.var_filter.trace_add("write", apply_filter)
         self.var_ln.trace_add("write", on_select)
+        self.var_ln.trace_add("write", schedule_preview_update)
         apply_filter()
+        self._update_preview()
 
         self.cb_ln.bind("<Return>", lambda _e: self._ok())
         self.bind("<Escape>", lambda _e: self._cancel())
@@ -2597,6 +2768,38 @@ class _CreateFromLnInstanceDialog(tk.Toplevel):
         ent_filter.focus_set()
 
         # No default selection: only autofill after user selects an LN instance.
+
+    def _update_preview(self) -> None:
+        get_preview = getattr(self, "_get_ln_preview", None)
+        txt = getattr(self, "txt_preview", None)
+        if txt is None:
+            return
+
+        rel = (self.var_ln.get() or "").strip()
+        if not callable(get_preview) or not rel:
+            preview = ""
+        else:
+            try:
+                preview = str(get_preview(rel) or "")
+            except Exception as e:
+                preview = f"(Failed to load preview: {e})"
+
+        if callable(get_preview) and rel and not preview.strip():
+            preview = "(LN instance not found)"
+
+        try:
+            txt.configure(state="normal")
+        except Exception:
+            pass
+        try:
+            txt.delete("1.0", "end")
+            if preview:
+                txt.insert("1.0", preview)
+        finally:
+            try:
+                txt.configure(state="disabled")
+            except Exception:
+                pass
 
     def _apply_autofill_from_selected_ln(self) -> None:
         rel = (self.var_ln.get() or "").strip()
@@ -3267,6 +3470,7 @@ class _CopyApplicationDialog(tk.Toplevel):
         *,
         app_dir: Path,
         items: list[str],
+        get_source_preview: Callable[[str], str] | None = None,
         title: str = "Copy application",
         source_label: str = "Source file",
         blank_option: str = "",
@@ -3281,6 +3485,8 @@ class _CopyApplicationDialog(tk.Toplevel):
         self._blank_option = (blank_option or "").strip()
         self._source_items = list(items)
         self._items_all = ([self._blank_option] if self._blank_option else []) + list(items)
+        self._get_source_preview = get_source_preview
+        self._preview_after_id: str | None = None
         self._result: dict[str, str] | None = None
         self._last_auto_new_name = ""
 
@@ -3325,8 +3531,29 @@ class _CopyApplicationDialog(tk.Toplevel):
         hint = f"Saved under: {os.fspath(self._app_dir)}"
         ttk.Label(frm, text=hint).grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
+        preview_box = ttk.Frame(frm)
+        preview_box.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        ttk.Label(preview_box, text="Source preview").pack(anchor="w")
+
+        preview_inner = ttk.Frame(preview_box)
+        preview_inner.pack(fill="both", expand=True, pady=(6, 0))
+        preview_inner.columnconfigure(0, weight=1)
+        preview_inner.rowconfigure(0, weight=1)
+
+        self.txt_preview = tk.Text(preview_inner, height=12, wrap="none")
+        y = ttk.Scrollbar(preview_inner, orient="vertical", command=self.txt_preview.yview)
+        self.txt_preview.configure(yscrollcommand=y.set)
+        self.txt_preview.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        try:
+            self.txt_preview.configure(state="disabled")
+        except Exception:
+            pass
+
+        frm.rowconfigure(4, weight=1)
+
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -3368,9 +3595,25 @@ class _CopyApplicationDialog(tk.Toplevel):
                 self.var_new.set(auto)
             self._last_auto_new_name = auto
 
+        def schedule_preview_update(*_args) -> None:
+            if getattr(self, "txt_preview", None) is None:
+                return
+            if self._preview_after_id is not None:
+                try:
+                    self.after_cancel(self._preview_after_id)
+                except Exception:
+                    pass
+                self._preview_after_id = None
+            try:
+                self._preview_after_id = self.after(80, self._update_preview)
+            except Exception:
+                self._preview_after_id = None
+
         self.var_filter.trace_add("write", apply_filter)
         self.var_src.trace_add("write", on_src_change)
+        self.var_src.trace_add("write", schedule_preview_update)
         apply_filter()
+        self._update_preview()
 
         self.cb_src.bind("<Return>", lambda _e: self._ok())
         ent_new.bind("<Return>", lambda _e: self._ok())
@@ -3378,6 +3621,38 @@ class _CopyApplicationDialog(tk.Toplevel):
         self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
 
         ent_filter.focus_set()
+
+    def _update_preview(self) -> None:
+        get_preview = getattr(self, "_get_source_preview", None)
+        txt = getattr(self, "txt_preview", None)
+        if txt is None:
+            return
+
+        src = (self.var_src.get() or "").strip()
+        if not callable(get_preview) or not src or (self._blank_option and src == self._blank_option):
+            preview = ""
+        else:
+            try:
+                preview = str(get_preview(src) or "")
+            except Exception as e:
+                preview = f"(Failed to load preview: {e})"
+
+        if callable(get_preview) and src and (not self._blank_option or src != self._blank_option) and not preview.strip():
+            preview = "(Source not found)"
+
+        try:
+            txt.configure(state="normal")
+        except Exception:
+            pass
+        try:
+            txt.delete("1.0", "end")
+            if preview:
+                txt.insert("1.0", preview)
+        finally:
+            try:
+                txt.configure(state="disabled")
+            except Exception:
+                pass
 
     def _ok(self) -> None:
         src = (self.var_src.get() or "").strip()
@@ -3421,6 +3696,7 @@ class _CopyHmiDialog(tk.Toplevel):
         parent: tk.Misc,
         *,
         hmi_relpaths: list[str],
+        get_source_preview: Callable[[str], str] | None = None,
         suggested_filename: str = "",
     ):
         super().__init__(parent)
@@ -3432,6 +3708,8 @@ class _CopyHmiDialog(tk.Toplevel):
         self._blank_option = "Blank"
         self._relpaths = list(hmi_relpaths)
         self._source_values = [self._blank_option] + self._relpaths
+        self._get_source_preview = get_source_preview
+        self._preview_after_id: str | None = None
         self._result: dict[str, str] | None = None
 
         frm = ttk.Frame(self, padding=12)
@@ -3471,8 +3749,29 @@ class _CopyHmiDialog(tk.Toplevel):
         self.var_filename = tk.StringVar(value=(suggested_filename or ""))
         ttk.Entry(frm, textvariable=self.var_filename, width=36).grid(row=2, column=1, sticky="w", pady=4)
 
+        preview_box = ttk.Frame(frm)
+        preview_box.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        ttk.Label(preview_box, text="Source preview").pack(anchor="w")
+
+        preview_inner = ttk.Frame(preview_box)
+        preview_inner.pack(fill="both", expand=True, pady=(6, 0))
+        preview_inner.columnconfigure(0, weight=1)
+        preview_inner.rowconfigure(0, weight=1)
+
+        self.txt_preview = tk.Text(preview_inner, height=12, wrap="none")
+        y = ttk.Scrollbar(preview_inner, orient="vertical", command=self.txt_preview.yview)
+        self.txt_preview.configure(yscrollcommand=y.set)
+        self.txt_preview.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        try:
+            self.txt_preview.configure(state="disabled")
+        except Exception:
+            pass
+
+        frm.rowconfigure(3, weight=1)
+
         btns = ttk.Frame(frm)
-        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="Copy", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -3499,13 +3798,61 @@ class _CopyHmiDialog(tk.Toplevel):
             if cur and cur not in filtered:
                 self.var_src.set("")
 
+        def schedule_preview_update(*_args) -> None:
+            if getattr(self, "txt_preview", None) is None:
+                return
+            if self._preview_after_id is not None:
+                try:
+                    self.after_cancel(self._preview_after_id)
+                except Exception:
+                    pass
+                self._preview_after_id = None
+            try:
+                self._preview_after_id = self.after(80, self._update_preview)
+            except Exception:
+                self._preview_after_id = None
+
         self.var_filter.trace_add("write", apply_filter)
+        self.var_src.trace_add("write", schedule_preview_update)
         apply_filter()
+        self._update_preview()
 
         self.bind("<Escape>", lambda _e: self._cancel())
         self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
         cb.bind("<Return>", lambda _e: self._ok())
         ent_filter.focus_set()
+
+    def _update_preview(self) -> None:
+        get_preview = getattr(self, "_get_source_preview", None)
+        txt = getattr(self, "txt_preview", None)
+        if txt is None:
+            return
+
+        src = (self.var_src.get() or "").strip()
+        if not callable(get_preview) or not src or src == self._blank_option:
+            preview = ""
+        else:
+            try:
+                preview = str(get_preview(src) or "")
+            except Exception as e:
+                preview = f"(Failed to load preview: {e})"
+
+        if callable(get_preview) and src and src != self._blank_option and not preview.strip():
+            preview = "(Source not found)"
+
+        try:
+            txt.configure(state="normal")
+        except Exception:
+            pass
+        try:
+            txt.delete("1.0", "end")
+            if preview:
+                txt.insert("1.0", preview)
+        finally:
+            try:
+                txt.configure(state="disabled")
+            except Exception:
+                pass
 
     def _ok(self) -> None:
         src = (self.var_src.get() or "").strip()
@@ -3539,7 +3886,13 @@ class _CopyHmiDialog(tk.Toplevel):
 
 
 class _CreateHmiFromApplicationDialog(tk.Toplevel):
-    def __init__(self, parent: tk.Misc, *, app_relpaths: list[str]):
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        app_relpaths: list[str],
+        get_app_preview: Callable[[str], str] | None = None,
+    ):
         super().__init__(parent)
         self.title("Create HMI from application")
         self.resizable(False, False)
@@ -3547,6 +3900,8 @@ class _CreateHmiFromApplicationDialog(tk.Toplevel):
         self.grab_set()
 
         self._app_relpaths = list(app_relpaths)
+        self._get_app_preview = get_app_preview
+        self._preview_after_id: str | None = None
         self._result: dict[str, str] | None = None
 
         frm = ttk.Frame(self, padding=12)
@@ -3582,8 +3937,29 @@ class _CreateHmiFromApplicationDialog(tk.Toplevel):
         except Exception:
             pass
 
+        preview_box = ttk.Frame(frm)
+        preview_box.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        ttk.Label(preview_box, text="Application preview").pack(anchor="w")
+
+        preview_inner = ttk.Frame(preview_box)
+        preview_inner.pack(fill="both", expand=True, pady=(6, 0))
+        preview_inner.columnconfigure(0, weight=1)
+        preview_inner.rowconfigure(0, weight=1)
+
+        self.txt_preview = tk.Text(preview_inner, height=12, wrap="none")
+        y = ttk.Scrollbar(preview_inner, orient="vertical", command=self.txt_preview.yview)
+        self.txt_preview.configure(yscrollcommand=y.set)
+        self.txt_preview.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        try:
+            self.txt_preview.configure(state="disabled")
+        except Exception:
+            pass
+
+        frm.rowconfigure(2, weight=1)
+
         btns = ttk.Frame(frm)
-        btns.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="Create", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -3614,13 +3990,61 @@ class _CreateHmiFromApplicationDialog(tk.Toplevel):
             if cur and cur not in filtered:
                 self.var_app.set("")
 
+        def schedule_preview_update(*_args) -> None:
+            if getattr(self, "txt_preview", None) is None:
+                return
+            if self._preview_after_id is not None:
+                try:
+                    self.after_cancel(self._preview_after_id)
+                except Exception:
+                    pass
+                self._preview_after_id = None
+            try:
+                self._preview_after_id = self.after(80, self._update_preview)
+            except Exception:
+                self._preview_after_id = None
+
         self.var_filter.trace_add("write", apply_filter)
+        self.var_app.trace_add("write", schedule_preview_update)
         apply_filter()
+        self._update_preview()
 
         self.bind("<Escape>", lambda _e: self._cancel())
         self.bind("<Control-f>", lambda _e: ent_filter.focus_set())
         self.cb_app.bind("<Return>", lambda _e: self._ok())
         ent_filter.focus_set()
+
+    def _update_preview(self) -> None:
+        get_preview = getattr(self, "_get_app_preview", None)
+        txt = getattr(self, "txt_preview", None)
+        if txt is None:
+            return
+
+        app_rel = (self.var_app.get() or "").strip()
+        if not callable(get_preview) or not app_rel:
+            preview = ""
+        else:
+            try:
+                preview = str(get_preview(app_rel) or "")
+            except Exception as e:
+                preview = f"(Failed to load preview: {e})"
+
+        if callable(get_preview) and app_rel and not preview.strip():
+            preview = "(Application not found)"
+
+        try:
+            txt.configure(state="normal")
+        except Exception:
+            pass
+        try:
+            txt.delete("1.0", "end")
+            if preview:
+                txt.insert("1.0", preview)
+        finally:
+            try:
+                txt.configure(state="disabled")
+            except Exception:
+                pass
 
     def _ok(self) -> None:
         rel = (self.var_app.get() or "").strip()
@@ -8199,6 +8623,7 @@ class MainWindow(tk.Tk):
             self,
             source_relpaths=source_relpaths,
             source_base_dir=base_dir,
+            get_source_preview=self._afg_source_preview_text,
             initial_name="",
             initial_proxy="",
             initial_chapter="",
@@ -11559,7 +11984,11 @@ class MainWindow(tk.Tk):
                 messagebox.showerror("Missing", f"No application (*.xml) found under:\n\n{os.fspath(app_dir)}", parent=self)
                 return
 
-            dlg = _CreateHmiFromApplicationDialog(self, app_relpaths=app_items)
+            dlg = _CreateHmiFromApplicationDialog(
+                self,
+                app_relpaths=app_items,
+                get_app_preview=self._application_source_preview_text,
+            )
             res = dlg.show()
             if not res:
                 return
@@ -11602,6 +12031,7 @@ class MainWindow(tk.Tk):
             dlg = _CopyHmiDialog(
                 self,
                 hmi_relpaths=items,
+                get_source_preview=self._hmi_source_preview_text,
                 suggested_filename="HMI.xml",
             )
             res = dlg.show()
@@ -23298,7 +23728,12 @@ class MainWindow(tk.Tk):
             messagebox.showerror("Missing", f"No LN instance (*.xml) found under:\n\n{os.fspath(lndm_dir)}", parent=self)
             return
 
-        dlg = _CreateFromLnInstanceDialog(self, lndm_dir=lndm_dir, items=items)
+        dlg = _CreateFromLnInstanceDialog(
+            self,
+            lndm_dir=lndm_dir,
+            items=items,
+            get_ln_preview=self._ln_instance_source_preview_text,
+        )
         res = dlg.show()
         if not res or self.instance_editor is None:
             return
@@ -23409,7 +23844,12 @@ class MainWindow(tk.Tk):
             messagebox.showerror("Missing", f"No application (*.xml) found under:\n\n{os.fspath(app_dir)}", parent=self)
             return
 
-        dlg = _CopyApplicationDialog(self, app_dir=app_dir, items=items)
+        dlg = _CopyApplicationDialog(
+            self,
+            app_dir=app_dir,
+            items=items,
+            get_source_preview=self._application_source_preview_text,
+        )
         res = dlg.show()
         if not res:
             return
@@ -23440,6 +23880,71 @@ class MainWindow(tk.Tk):
         if tag.startswith("{"):
             return tag.split("}", 1)[1]
         return tag
+
+    def _ln_instance_source_preview_text(self, rel: str) -> str:
+        rel = (rel or "").strip()
+        if not rel:
+            return ""
+        p = self._lndm_dir() / rel
+        if not p.exists():
+            return ""
+        try:
+            root = ET.parse(p).getroot()
+        except Exception:
+            return ""
+        if _local_name(root.tag) == "LN":
+            return _format_xml_preview(root)
+        ln_el = None
+        for el in root.iter():
+            if isinstance(el.tag, str) and _local_name(el.tag) == "LN":
+                ln_el = el
+                break
+        return _format_xml_preview(ln_el if ln_el is not None else root)
+
+    def _application_source_preview_text(self, rel: str) -> str:
+        rel = (rel or "").strip()
+        if not rel:
+            return ""
+        p = self._application_dir() / rel
+        if not p.exists():
+            return ""
+        try:
+            root = ET.parse(p).getroot()
+        except Exception:
+            return ""
+
+        fb = None
+        for el in root.iter():
+            if isinstance(el.tag, str) and self._local_name(el.tag) == "funBlock":
+                fb = el
+                break
+        return _format_xml_preview(fb if fb is not None else root)
+
+    def _afg_source_preview_text(self, rel: str) -> str:
+        rel = (rel or "").strip()
+        if not rel:
+            return ""
+        p = self._applicationgroup_dir() / rel
+        if not p.exists():
+            return ""
+        try:
+            root = ET.parse(p).getroot()
+        except Exception:
+            return ""
+        return _format_xml_preview(root)
+
+    def _hmi_source_preview_text(self, rel: str) -> str:
+        rel = (rel or "").strip()
+        if not rel or rel == "Blank":
+            return ""
+        p = self._hmi_template_dir() / rel
+        if not p.exists():
+            return ""
+        try:
+            root = ET.parse(p).getroot()
+        except Exception:
+            return ""
+        return _format_xml_preview(root)
 
     def _clear_tv(self, tv: ttk.Treeview | None) -> None:
         if tv is None:

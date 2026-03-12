@@ -1622,6 +1622,7 @@ class NewTemplateDialog(tk.Toplevel):
         parent: tk.Misc,
         *,
         lnode_infos: list[LNodeTypeInfo],
+        get_lnode_preview: Callable[[str], str] | None = None,
     ):
         super().__init__(parent)
         self.title("New LN template (LNodeType)")
@@ -1631,6 +1632,8 @@ class NewTemplateDialog(tk.Toplevel):
 
         self._result: dict[str, str] | None = None
         self._lnode_infos = list(lnode_infos)
+        self._get_lnode_preview = get_lnode_preview
+        self._preview_after_id: str | None = None
         self._id_internal_update = False
         self._id_user_modified = False
         self._last_suggested_id = ""
@@ -1699,8 +1702,29 @@ class NewTemplateDialog(tk.Toplevel):
         )
         hint.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
+        preview_box = ttk.Frame(frm)
+        preview_box.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        ttk.Label(preview_box, text="Template preview").pack(anchor="w")
+
+        preview_inner = ttk.Frame(preview_box)
+        preview_inner.pack(fill="both", expand=True, pady=(6, 0))
+        preview_inner.columnconfigure(0, weight=1)
+        preview_inner.rowconfigure(0, weight=1)
+
+        self.txt_preview = tk.Text(preview_inner, height=12, wrap="none")
+        y = ttk.Scrollbar(preview_inner, orient="vertical", command=self.txt_preview.yview)
+        self.txt_preview.configure(yscrollcommand=y.set)
+        self.txt_preview.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        try:
+            self.txt_preview.configure(state="disabled")
+        except Exception:
+            pass
+
+        frm.rowconfigure(6, weight=1)
+
         btns = ttk.Frame(frm)
-        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="Create", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -1766,12 +1790,60 @@ class NewTemplateDialog(tk.Toplevel):
             elif (not raw) and cur and (cur not in filtered):
                 self.var_base.set("")
 
+        def schedule_preview_update(*_args) -> None:
+            if getattr(self, "txt_preview", None) is None:
+                return
+            if self._preview_after_id is not None:
+                try:
+                    self.after_cancel(self._preview_after_id)
+                except Exception:
+                    pass
+                self._preview_after_id = None
+            try:
+                self._preview_after_id = self.after(80, self._update_preview)
+            except Exception:
+                self._preview_after_id = None
+
         self.var_base.trace_add("write", prefill)
+        self.var_base.trace_add("write", schedule_preview_update)
         self.var_filter.trace_add("write", apply_filter)
         apply_filter()
         prefill()
+        self._update_preview()
 
         ent_filter.focus_set()
+
+    def _update_preview(self) -> None:
+        get_preview = getattr(self, "_get_lnode_preview", None)
+        txt = getattr(self, "txt_preview", None)
+        if txt is None:
+            return
+
+        lnode_id = (self.var_base.get() or "").strip()
+        if lnode_id == "(Blank)" or not lnode_id or not callable(get_preview):
+            preview = ""
+        else:
+            try:
+                preview = str(get_preview(lnode_id) or "")
+            except Exception as e:
+                preview = f"(Failed to load preview: {e})"
+
+        if callable(get_preview) and lnode_id and lnode_id != "(Blank)" and not preview.strip():
+            preview = "(Template not found)"
+
+        try:
+            txt.configure(state="normal")
+        except Exception:
+            pass
+        try:
+            txt.delete("1.0", "end")
+            if preview:
+                txt.insert("1.0", preview)
+        finally:
+            try:
+                txt.configure(state="disabled")
+            except Exception:
+                pass
 
     def _ok(self) -> None:
         new_id = self.var_id.get().strip()
@@ -3132,7 +3204,11 @@ class LNodeTypeEditor(ttk.Frame):
         if self.dirty and not messagebox.askyesno("Unsaved", "Discard unsaved changes?", parent=self):
             return
 
-        dlg = NewTemplateDialog(self, lnode_infos=self.catalog.lnode_types)
+        dlg = NewTemplateDialog(
+            self,
+            lnode_infos=self.catalog.lnode_types,
+            get_lnode_preview=self._ln_template_preview_text,
+        )
         res = dlg.show()
         if res is None:
             return
@@ -3696,6 +3772,85 @@ class LNodeTypeEditor(ttk.Frame):
             lines.append(f"{indent}</{tag}>")
 
         render(do_el, 0)
+        if len(lines) >= max_lines:
+            lines = lines[: max_lines - 1] + ["...(truncated)..."]
+
+        return "\n".join(lines) + "\n"
+
+    def _ln_template_preview_text(self, lnode_id: str) -> str:
+        lnode_id = (lnode_id or "").strip()
+        if not lnode_id:
+            return ""
+
+        info = next((x for x in (self.catalog.lnode_types or []) if (x.id or "").strip() == lnode_id), None)
+        if info is None:
+            return ""
+
+        try:
+            root = ET.parse(info.file_path).getroot()
+        except Exception:
+            return ""
+
+        ln_el = None
+        for cand in root.iter():
+            if not isinstance(cand.tag, str):
+                continue
+            if not cand.tag.endswith("LNodeType"):
+                continue
+            if (cand.attrib.get("id") or "").strip() == lnode_id:
+                ln_el = cand
+                break
+        if ln_el is None:
+            return ""
+
+        def strip_ns(tag: str) -> str:
+            if not isinstance(tag, str):
+                return str(tag)
+            if "}" in tag:
+                return tag.split("}", 1)[1]
+            return tag
+
+        def fmt_attrs(attrib: dict) -> str:
+            if not attrib:
+                return ""
+            parts: list[str] = []
+            for k in sorted(attrib.keys()):
+                v = attrib.get(k)
+                if v is None:
+                    continue
+                parts.append(f'{k}="{v}"')
+            return (" " + " ".join(parts)) if parts else ""
+
+        max_lines = 400
+        lines: list[str] = []
+
+        def render(el: ET.Element, level: int = 0) -> None:
+            if len(lines) >= max_lines:
+                return
+            tag = strip_ns(el.tag)
+            attrs = fmt_attrs(getattr(el, "attrib", {}) or {})
+            children = list(el)
+            text = (el.text or "").strip()
+            indent = "  " * level
+
+            if not children and not text:
+                lines.append(f"{indent}<{tag}{attrs} />")
+                return
+
+            if not children and text:
+                lines.append(f"{indent}<{tag}{attrs}>{text}</{tag}>")
+                return
+
+            lines.append(f"{indent}<{tag}{attrs}>")
+            if text:
+                lines.append(f"{indent}  {text}")
+            for ch in children:
+                if len(lines) >= max_lines:
+                    break
+                render(ch, level + 1)
+            lines.append(f"{indent}</{tag}>")
+
+        render(ln_el, 0)
         if len(lines) >= max_lines:
             lines = lines[: max_lines - 1] + ["...(truncated)..."]
 

@@ -110,6 +110,7 @@ class NewDOTypeDialog(tk.Toplevel):
         do_type_ids: list[str],
         cdc_values: list[str],
         get_base_cdc: Callable[[str], str] | None = None,
+        get_do_type_preview: Callable[[str], str] | None = None,
     ):
         super().__init__(parent)
         self.title("New DO template (DOType)")
@@ -121,6 +122,8 @@ class NewDOTypeDialog(tk.Toplevel):
         self._do_type_ids = list(do_type_ids or [])
         self._cdc_values = list(cdc_values or [])
         self._get_base_cdc = get_base_cdc
+        self._get_do_type_preview = get_do_type_preview
+        self._preview_after_id: str | None = None
 
         self._id_internal_update = False
         self._id_user_modified = False
@@ -194,8 +197,29 @@ class NewDOTypeDialog(tk.Toplevel):
         )
         hint.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
+        preview_box = ttk.Frame(frm)
+        preview_box.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        ttk.Label(preview_box, text="DOType template preview").pack(anchor="w")
+
+        preview_inner = ttk.Frame(preview_box)
+        preview_inner.pack(fill="both", expand=True, pady=(6, 0))
+        preview_inner.columnconfigure(0, weight=1)
+        preview_inner.rowconfigure(0, weight=1)
+
+        self.txt_preview = tk.Text(preview_inner, height=12, wrap="none")
+        y = ttk.Scrollbar(preview_inner, orient="vertical", command=self.txt_preview.yview)
+        self.txt_preview.configure(yscrollcommand=y.set)
+        self.txt_preview.grid(row=0, column=0, sticky="nsew")
+        y.grid(row=0, column=1, sticky="ns")
+        try:
+            self.txt_preview.configure(state="disabled")
+        except Exception:
+            pass
+
+        frm.rowconfigure(6, weight=1)
+
         btns = ttk.Frame(frm)
-        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="Create", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -260,12 +284,63 @@ class NewDOTypeDialog(tk.Toplevel):
             elif (not raw) and cur and (cur not in filtered):
                 self.var_base.set("")
 
+        def schedule_preview_update(*_args) -> None:
+            if getattr(self, "txt_preview", None) is None:
+                return
+            if self._preview_after_id is not None:
+                try:
+                    self.after_cancel(self._preview_after_id)
+                except Exception:
+                    pass
+                self._preview_after_id = None
+            try:
+                self._preview_after_id = self.after(80, self._update_preview)
+            except Exception:
+                self._preview_after_id = None
+
         self.var_base.trace_add("write", prefill)
+        self.var_base.trace_add("write", schedule_preview_update)
         self.var_filter.trace_add("write", apply_filter)
         apply_filter()
         prefill()
+        self._update_preview()
 
         ent_filter.focus_set()
+
+    def _update_preview(self) -> None:
+        get_preview = getattr(self, "_get_do_type_preview", None)
+        txt = getattr(self, "txt_preview", None)
+        if txt is None:
+            return
+
+        do_type = (self.var_base.get() or "").strip()
+
+        if do_type == "(Blank)" or not do_type:
+            preview = ""
+        elif not callable(get_preview):
+            preview = ""
+        else:
+            try:
+                preview = str(get_preview(do_type) or "")
+            except Exception as e:
+                preview = f"(Failed to load preview: {e})"
+
+        if callable(get_preview) and do_type and do_type != "(Blank)" and not preview.strip():
+            preview = "(DOType not found)"
+
+        try:
+            txt.configure(state="normal")
+        except Exception:
+            pass
+        try:
+            txt.delete("1.0", "end")
+            if preview:
+                txt.insert("1.0", preview)
+        finally:
+            try:
+                txt.configure(state="disabled")
+            except Exception:
+                pass
 
     def _ok(self) -> None:
         new_id = (self.var_id.get() or "").strip()
@@ -2514,6 +2589,88 @@ class DoTemplateTab(ttk.Frame):
                 return (el.attrib.get("cdc") or "").strip().upper()
         return ""
 
+    def _do_type_preview_text(self, do_type_id: str) -> str:
+        do_type_id = (do_type_id or "").strip()
+        if not do_type_id:
+            return ""
+
+        do_dir = self._do_type_dir()
+        path = find_type_file(kind_dir=do_dir, type_id=do_type_id, cache=self._type_file_cache)
+        if path is None:
+            return ""
+        try:
+            root = ET.parse(path).getroot()
+        except Exception:
+            return ""
+
+        ns = ""
+        if isinstance(root.tag, str) and root.tag.startswith("{"):
+            ns = root.tag.split("}", 1)[0][1:]
+
+        def q(tag: str) -> str:
+            return f"{{{ns}}}{tag}" if ns else tag
+
+        do_el = None
+        for cand in root.findall(f".//{q('DOType')}"):
+            if (cand.attrib.get("id") or "").strip() == do_type_id:
+                do_el = cand
+                break
+        if do_el is None:
+            return ""
+
+        def strip_ns(tag: str) -> str:
+            if not isinstance(tag, str):
+                return str(tag)
+            if "}" in tag:
+                return tag.split("}", 1)[1]
+            return tag
+
+        def fmt_attrs(attrib: dict) -> str:
+            if not attrib:
+                return ""
+            parts: list[str] = []
+            for k in sorted(attrib.keys()):
+                v = attrib.get(k)
+                if v is None:
+                    continue
+                parts.append(f'{k}="{v}"')
+            return (" " + " ".join(parts)) if parts else ""
+
+        max_lines = 400
+        lines: list[str] = []
+
+        def render(el: ET.Element, level: int = 0) -> None:
+            if len(lines) >= max_lines:
+                return
+            tag = strip_ns(el.tag)
+            attrs = fmt_attrs(getattr(el, "attrib", {}) or {})
+            children = list(el)
+            text = (el.text or "").strip()
+            indent = "  " * level
+
+            if not children and not text:
+                lines.append(f"{indent}<{tag}{attrs} />")
+                return
+
+            if not children and text:
+                lines.append(f"{indent}<{tag}{attrs}>{text}</{tag}>")
+                return
+
+            lines.append(f"{indent}<{tag}{attrs}>")
+            if text:
+                lines.append(f"{indent}  {text}")
+            for ch in children:
+                if len(lines) >= max_lines:
+                    break
+                render(ch, level + 1)
+            lines.append(f"{indent}</{tag}>")
+
+        render(do_el, 0)
+        if len(lines) >= max_lines:
+            lines = lines[: max_lines - 1] + ["...(truncated)..."]
+
+        return "\n".join(lines) + "\n"
+
     def _scan_do_cdc_qt_presence(self) -> dict[str, tuple[int, int, int]]:
         do_dir = self._do_type_dir()
         if not do_dir.exists():
@@ -2602,6 +2759,7 @@ class DoTemplateTab(ttk.Frame):
             do_type_ids=do_ids,
             cdc_values=cdc_values,
             get_base_cdc=self._do_type_cdc_for_id,
+            get_do_type_preview=self._do_type_preview_text,
         )
         res = dlg.show()
         if not res:
