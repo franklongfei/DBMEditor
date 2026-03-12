@@ -22,7 +22,6 @@ def _monitor_workarea_top_left(x: int, y: int) -> tuple[int, int] | None:
         return None
 
     try:
-        MONITOR_DEFAULTTONEAREST = 2
 
         class POINT(ctypes.Structure):
             _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]

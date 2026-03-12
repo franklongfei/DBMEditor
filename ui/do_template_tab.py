@@ -3392,28 +3392,33 @@ class DoTemplateTab(ttk.Frame):
         if len(self._do_tmpl_da_elements) != len(rows):
             self._apply_ui_to_xml()
 
-        for kind, payload in (self._do_tmpl_child_specs or []):
-            if kind == "ELEM":
-                try:
-                    do_el.append(deepcopy_et_element(payload))  # type: ignore[arg-type]
-                except Exception:
-                    continue
-            elif kind == "DA":
-                try:
-                    idx = int(payload)  # type: ignore[arg-type]
-                except Exception:
-                    continue
-                if idx < 0 or idx >= len(self._do_tmpl_da_elements):
-                    continue
-                do_el.append(deepcopy_et_element(self._do_tmpl_da_elements[idx]))
-
-        if not self._do_tmpl_child_specs:
+        # Keep non-DA children in their original positions, but always map DA slots
+        # to the current UI row order. Stored DA indices can become stale after
+        # delete/insert operations (especially with duplicate DA names).
+        specs = list(self._do_tmpl_child_specs or [])
+        if not specs:
             for da in self._do_tmpl_da_elements:
                 do_el.append(deepcopy_et_element(da))
+        else:
+            da_pos = 0
+            for kind, payload in specs:
+                if kind == "ELEM":
+                    try:
+                        do_el.append(deepcopy_et_element(payload))  # type: ignore[arg-type]
+                    except Exception:
+                        continue
+                    continue
 
-        existing_da_count = sum(1 for k, _p in (self._do_tmpl_child_specs or []) if k == "DA")
-        for extra in self._do_tmpl_da_elements[existing_da_count:]:
-            do_el.append(deepcopy_et_element(extra))
+                if kind != "DA":
+                    continue
+
+                if da_pos >= len(self._do_tmpl_da_elements):
+                    continue
+                do_el.append(deepcopy_et_element(self._do_tmpl_da_elements[da_pos]))
+                da_pos += 1
+
+            for extra in self._do_tmpl_da_elements[da_pos:]:
+                do_el.append(deepcopy_et_element(extra))
 
         schema_ns = "http://www.w3.org/2001/XMLSchema"
         xsi_ns = "http://www.w3.org/2001/XMLSchema-instance"

@@ -4183,6 +4183,7 @@ class _EditApplicationInputDialog(tk.Toplevel):
         self.var_desc = tk.StringVar(value=(initial.get("desc") or ""))
         self.var_src = tk.StringVar(value=(initial.get("src") or ""))
         self.var_doRef = tk.StringVar(value=(initial.get("doRef") or ""))
+        self.var_daRef = tk.StringVar(value=(initial.get("daRef") or ""))
         self.var_soft = tk.BooleanVar(value=((initial.get("softlink") or "").lower() == "true"))
         self.var_conf = tk.BooleanVar(value=((initial.get("confpin") or "").lower() == "true"))
 
@@ -4202,13 +4203,16 @@ class _EditApplicationInputDialog(tk.Toplevel):
         ttk.Label(frm, text="doRef").grid(row=4, column=0, sticky="w", pady=4)
         ttk.Entry(frm, textvariable=self.var_doRef, width=56).grid(row=4, column=1, sticky="we", pady=4)
 
+        ttk.Label(frm, text="daRef").grid(row=5, column=0, sticky="w", pady=4)
+        ttk.Entry(frm, textvariable=self.var_daRef, width=56).grid(row=5, column=1, sticky="we", pady=4)
+
         flags = ttk.Frame(frm)
-        flags.grid(row=5, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        flags.grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 0))
         ttk.Checkbutton(flags, text="Soft link", variable=self.var_soft).pack(side="left")
         ttk.Checkbutton(flags, text="Confpin", variable=self.var_conf).pack(side="left", padx=(16, 0))
 
         btns = ttk.Frame(frm)
-        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
         ttk.Button(btns, text="OK", command=self._ok).pack(side="right", padx=(0, 8))
 
@@ -4228,6 +4232,7 @@ class _EditApplicationInputDialog(tk.Toplevel):
             "desc": (self.var_desc.get() or ""),
             "src": (self.var_src.get() or ""),
             "doRef": (self.var_doRef.get() or "").strip(),
+            "daRef": (self.var_daRef.get() or "").strip(),
             "softlink": "true" if bool(self.var_soft.get()) else "",
             "confpin": "true" if bool(self.var_conf.get()) else "",
         }
@@ -4351,6 +4356,7 @@ class _EditApplicationOutputDialog(tk.Toplevel):
         self.var_overlap = tk.StringVar(value=(initial.get("Overlap") or ""))
         self.var_persist = tk.BooleanVar(value=((initial.get("persist") or "").lower() == "true"))
         self.var_fault = tk.BooleanVar(value=((initial.get("faultlog") or "").lower() == "true"))
+        self.var_confpin = tk.BooleanVar(value=((initial.get("confpin") or "").lower() == "true"))
 
         ttk.Label(frm, text="name").grid(row=0, column=0, sticky="w", pady=4)
         ent_name = ttk.Entry(frm, textvariable=self.var_name, width=56)
@@ -4382,6 +4388,7 @@ class _EditApplicationOutputDialog(tk.Toplevel):
         flags.grid(row=8, column=0, columnspan=2, sticky="w", pady=(10, 0))
         ttk.Checkbutton(flags, text="persist", variable=self.var_persist).pack(side="left")
         ttk.Checkbutton(flags, text="faultlog", variable=self.var_fault).pack(side="left", padx=(16, 0))
+        ttk.Checkbutton(flags, text="confpin", variable=self.var_confpin).pack(side="left", padx=(16, 0))
 
         btns = ttk.Frame(frm)
         btns.grid(row=9, column=0, columnspan=2, sticky="e", pady=(12, 0))
@@ -4422,6 +4429,7 @@ class _EditApplicationOutputDialog(tk.Toplevel):
             "MaxContiguous": maxc,
             "Overlap": overlap,
             "faultlog": "true" if bool(self.var_fault.get()) else "",
+            "confpin": "true" if bool(self.var_confpin.get()) else "",
         }
         self.destroy()
 
@@ -6220,6 +6228,15 @@ class MainWindow(tk.Tk):
         self._app_saved_sig: str | None = None
         self._app_loading: bool = False
         self.btn_app_save: ttk.Button | None = None
+        self._app_open_readonly: bool = False
+        self._app_open_readonly_reason: str = ""
+        self._app_open_include_source: Path | None = None
+        self._app_funblock_entries: list[tk.Widget] = []
+        self._app_table_buttons: dict[str, list[tk.Widget]] = {}
+        self._app_template_mode: bool = False
+        self._app_template_target_path: Path | None = None
+        self._app_template_tree: ET.ElementTree | None = None
+        self._app_template_element: ET.Element | None = None
 
         # Application "Search" UI state
         self._all_app_files: list[str] = []
@@ -6853,7 +6870,7 @@ class MainWindow(tk.Tk):
                 (self.instance_editor.var_app_desc.get() or ""),
             )
 
-        in_keys = ["name", "type", "desc", "src", "doRef", "softlink", "confpin"]
+        in_keys = ["name", "type", "desc", "src", "doRef", "daRef", "softlink", "confpin"]
         simple_keys = ["name", "type", "src", "desc"]
         out_keys = [
             "name",
@@ -6866,6 +6883,7 @@ class MainWindow(tk.Tk):
             "MaxContiguous",
             "Overlap",
             "faultlog",
+            "confpin",
         ]
 
         def not_deleted(rr: dict[str, str]) -> bool:
@@ -6891,7 +6909,7 @@ class MainWindow(tk.Tk):
     def _app_table_saved_keys(self, table: str) -> list[str]:
         # Keys that matter for Save (and therefore for "changed" highlight)
         if table == "input":
-            return ["name", "type", "desc", "src", "doRef", "softlink", "confpin"]
+            return ["name", "type", "desc", "src", "doRef", "daRef", "softlink", "confpin"]
         if table == "output":
             return [
                 "name",
@@ -6904,6 +6922,7 @@ class MainWindow(tk.Tk):
                 "MaxContiguous",
                 "Overlap",
                 "faultlog",
+                "confpin",
             ]
         # setting / conf / control
         return ["name", "type", "src", "desc"]
@@ -11256,15 +11275,34 @@ class MainWindow(tk.Tk):
         tree = ET.parse(path)
         root = tree.getroot()
 
-        funblock = None
-        for el in root.iter():
-            if not isinstance(el.tag, str):
-                continue
-            if self._local_name(el.tag) == "funBlock":
-                funblock = el
-                break
+        funblock: ET.Element | None = None
+
+        # 1) Resolve known xi:include template delegate pattern first.
+        try:
+            resolved_fb, _src, _tpl_tree, _tpl_el = self._resolve_application_funblock_xinclude(path=path, root=root)
+            if resolved_fb is not None:
+                funblock = resolved_fb
+        except Exception:
+            # Keep AFG resilient: fall through to direct parse modes.
+            funblock = None
+
+        # 2) Regular Application file with concrete <funBlock>.
         if funblock is None:
-            raise ValueError("No <funBlock> found")
+            for el in root.iter():
+                if not isinstance(el.tag, str):
+                    continue
+                if self._local_name(el.tag) == "funBlock":
+                    funblock = el
+                    break
+
+        # 3) Direct template open: <funBlock-template> behaves like funBlock body.
+        if funblock is None:
+            template_el = self._find_funblock_template_element(root)
+            if template_el is not None:
+                funblock = self._build_funblock_from_template_element(template_el, prefer_tag="funBlock")
+
+        if funblock is None:
+            raise ValueError("No <funBlock> or <funBlock-template> found")
 
         fb_name = (funblock.attrib.get("name") or "").strip() or path.stem
         inputs: list[str] = []
@@ -18124,6 +18162,14 @@ class MainWindow(tk.Tk):
                     return "bay.LLN0.SettingControl"
                 return f"{ln_ref}.{nm}"
 
+            def _setting_daref(nm: str) -> str:
+                if (nm or "").strip().lower() == "settingcontrol":
+                    return ""
+                try:
+                    return self._hmi_setting_daref_for_do_name(nm, do_types_by_name)
+                except Exception:
+                    return ""
+
             for nm in settings_expected:
                 if nm in existing_by_name:
                     it = existing_by_name[nm]
@@ -18135,6 +18181,12 @@ class MainWindow(tk.Tk):
                         changed += 1
                     if (it.attrib.get("name") or "").strip() != nm:
                         it.attrib["name"] = nm
+                        self._hmi_ui_tag_set(it, "changed")
+                        changed += 1
+
+                    want_da = _setting_daref(nm)
+                    if want_da and (it.attrib.get("daRef") or "").strip() != want_da:
+                        it.attrib["daRef"] = want_da
                         self._hmi_ui_tag_set(it, "changed")
                         changed += 1
 
@@ -18163,6 +18215,9 @@ class MainWindow(tk.Tk):
                 it = ET.SubElement(menu, _q(HMI_CUST_NS, "HMIMenuItem"))
                 it.attrib["name"] = nm
                 it.attrib["doRef"] = _setting_doref(nm)
+                da_ref0 = _setting_daref(nm)
+                if da_ref0:
+                    it.attrib["daRef"] = da_ref0
                 self._hmi_ui_tag_set(it, "added")
                 added += 1
 
@@ -20246,6 +20301,115 @@ class MainWindow(tk.Tk):
         cache[do_type_id] = out
         return list(out)
 
+    def _hmi_setting_daref_for_do_type(self, do_type_id: str) -> str:
+        """Infer default HMI setting daRef for a DOType.
+
+        Priority:
+        1) .setVal
+        2) .setMag.f
+        3) .setMag.i
+        """
+
+        do_type_id = (do_type_id or "").strip()
+        if not do_type_id:
+            return ""
+
+        cache = getattr(self, "_hmi_setting_daref_cache", None)
+        if cache is None:
+            cache = {}
+            setattr(self, "_hmi_setting_daref_cache", cache)
+        if do_type_id in cache:
+            return str(cache.get(do_type_id) or "")
+
+        do_dir = self.workspace_root / "ep7_datamodel" / "datamodel" / "iec61850" / "DOType"
+        da_dir = self.workspace_root / "ep7_datamodel" / "datamodel" / "iec61850" / "DAType"
+
+        path = self._find_type_file(kind_dir=do_dir, type_id=do_type_id)
+        if path is None:
+            cache[do_type_id] = ""
+            return ""
+
+        try:
+            root = ET.parse(path).getroot()
+        except Exception:
+            cache[do_type_id] = ""
+            return ""
+
+        do_el: ET.Element | None = None
+        for el in root.iter():
+            if isinstance(el.tag, str) and _local_name(el.tag) == "DOType":
+                do_el = el
+                break
+        if do_el is None:
+            cache[do_type_id] = ""
+            return ""
+
+        setmag_da_type_id = ""
+        has_setmag = False
+
+        for da in list(do_el):
+            if not (isinstance(da.tag, str) and _local_name(da.tag) == "DA"):
+                continue
+            fc = (da.attrib.get("fc") or "").strip().upper()
+            if fc not in {"SP", "SE"}:
+                continue
+            da_name = (da.attrib.get("name") or "").strip().lower()
+            if da_name == "setval":
+                cache[do_type_id] = ".setVal"
+                return ".setVal"
+            if da_name == "setmag":
+                has_setmag = True
+                bt = (da.attrib.get("bType") or "").strip().lower()
+                if bt == "struct":
+                    setmag_da_type_id = (da.attrib.get("type") or "").strip()
+
+        if setmag_da_type_id:
+            p_da = self._find_type_file(kind_dir=da_dir, type_id=setmag_da_type_id)
+            if p_da is not None:
+                try:
+                    da_root = ET.parse(p_da).getroot()
+                except Exception:
+                    da_root = None
+                if da_root is not None:
+                    da_type_el: ET.Element | None = None
+                    for el in da_root.iter():
+                        if isinstance(el.tag, str) and _local_name(el.tag) == "DAType":
+                            da_type_el = el
+                            break
+                    if da_type_el is not None:
+                        has_f = False
+                        has_i = False
+                        for bda in list(da_type_el):
+                            if not (isinstance(bda.tag, str) and _local_name(bda.tag) == "BDA"):
+                                continue
+                            bda_name = (bda.attrib.get("name") or "").strip().lower()
+                            if bda_name == "f":
+                                has_f = True
+                            elif bda_name == "i":
+                                has_i = True
+                        if has_f:
+                            cache[do_type_id] = ".setMag.f"
+                            return ".setMag.f"
+                        if has_i:
+                            cache[do_type_id] = ".setMag.i"
+                            return ".setMag.i"
+
+        if has_setmag:
+            cache[do_type_id] = ""
+            return ""
+
+        cache[do_type_id] = ""
+        return ""
+
+    def _hmi_setting_daref_for_do_name(self, do_name: str, do_types_by_name: dict[str, str]) -> str:
+        nm = (do_name or "").strip()
+        if not nm:
+            return ""
+        do_type_id = (do_types_by_name.get(nm) or "").strip()
+        if not do_type_id:
+            return ""
+        return self._hmi_setting_daref_for_do_type(do_type_id)
+
     def _do_type_stmx_info(self, do_type_id: str) -> tuple[bool, str]:
         """Return (has_fc_stmx, inferred_basic_type) for a DOType.
 
@@ -20873,6 +21037,7 @@ class MainWindow(tk.Tk):
                     row.get("type") or "",
                     row.get("src") or "",
                     row.get("doRef") or "",
+                    row.get("daRef") or "",
                     "☑" if soft else "☐",
                     "☑" if conf else "☐",
                 ],
@@ -20893,6 +21058,7 @@ class MainWindow(tk.Tk):
                     snap.get("type") or "",
                     snap.get("src") or "",
                     snap.get("doRef") or "",
+                    snap.get("daRef") or "",
                     "☑" if soft else "☐",
                     "☑" if conf else "☐",
                 ],
@@ -20926,6 +21092,7 @@ class MainWindow(tk.Tk):
                 row.get("type") or "",
                 row.get("src") or "",
                 row.get("doRef") or "",
+                row.get("daRef") or "",
                 "☑" if soft else "☐",
                 "☑" if conf else "☐",
             ],
@@ -20942,6 +21109,8 @@ class MainWindow(tk.Tk):
         return sel[0]
 
     def _edit_selected_app_input(self) -> None:
+        if not self._app_editing_allowed(notify=True):
+            return
         iid = self._selected_app_input_iid()
         if iid is None:
             return
@@ -20962,6 +21131,8 @@ class MainWindow(tk.Tk):
             pass
 
     def _on_app_input_click(self, event: tk.Event) -> None:
+        if not self._app_editing_allowed(notify=False):
+            return "break"
         tv = self._app_tv_input
         if tv is None:
             return
@@ -20999,13 +21170,13 @@ class MainWindow(tk.Tk):
             return "break"
 
         # Checkbox columns
-        if col in {"#5", "#6"}:
+        if col in {"#6", "#7"}:
             row = self._app_input_iid_to_row.get(row_iid)
             if row is None:
                 return
             if bool(row.get("__ui_deleted")):
                 return "break"
-            key = "softlink" if col == "#5" else "confpin"
+            key = "softlink" if col == "#6" else "confpin"
             cur = (row.get(key) or "").lower() == "true"
             row[key] = "" if cur else "true"
             self._update_app_input_tv_row(row_iid)
@@ -21020,6 +21191,8 @@ class MainWindow(tk.Tk):
         return
 
     def _on_app_input_double_click(self, event: tk.Event) -> str:
+        if not self._app_editing_allowed(notify=False):
+            return "break"
         tv = self._app_tv_input
         if tv is None:
             return "break"
@@ -21037,7 +21210,7 @@ class MainWindow(tk.Tk):
             pass
 
         # Double click edits: name/src/doRef as text; type as typing mode.
-        if col in {"#1", "#3", "#4"}:
+        if col in {"#1", "#3", "#4", "#5"}:
             try:
                 tv.after_idle(lambda: self._begin_app_input_inline_edit(row_iid, col, mode="text"))
             except Exception:
@@ -21050,6 +21223,8 @@ class MainWindow(tk.Tk):
         return "break"
 
     def _on_app_setting_click(self, event: tk.Event) -> str | None:
+        if not self._app_editing_allowed(notify=False):
+            return "break"
         tv = self._app_tv_setting
         if tv is None:
             return None
@@ -21087,6 +21262,8 @@ class MainWindow(tk.Tk):
         return None
 
     def _on_app_setting_double_click(self, event: tk.Event) -> str:
+        if not self._app_editing_allowed(notify=False):
+            return "break"
         tv = self._app_tv_setting
         if tv is None:
             return "break"
@@ -21122,6 +21299,8 @@ class MainWindow(tk.Tk):
         return "break"
 
     def _on_app_output_click(self, event: tk.Event) -> str | None:
+        if not self._app_editing_allowed(notify=False):
+            return "break"
         tv = self._app_tv_output
         if tv is None:
             return None
@@ -21138,20 +21317,22 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
-        # persist/faultlog columns: single click toggles checkbox
+        # persist/faultlog/confpin columns: single click toggles checkbox
         try:
             cols = list(tv["columns"])
             persist_col = f"#{cols.index('persist') + 1}"
             fault_col = f"#{cols.index('faultlog') + 1}"
+            confpin_col = f"#{cols.index('confpin') + 1}"
             type_col = f"#{cols.index('type') + 1}"
             doref_col = f"#{cols.index('doRef') + 1}"
         except Exception:
             persist_col = "#6"
             fault_col = "#7"
+            confpin_col = "#8"
             type_col = "#2"
             doref_col = "#4"
 
-        if col in {persist_col, fault_col}:
+        if col in {persist_col, fault_col, confpin_col}:
             try:
                 idx = int(row_iid)
             except Exception:
@@ -21161,7 +21342,12 @@ class MainWindow(tk.Tk):
             row = self._app_output_rows[idx]
             if bool(row.get("__ui_deleted")):
                 return "break"
-            key = "persist" if col == persist_col else "faultlog"
+            if col == persist_col:
+                key = "persist"
+            elif col == fault_col:
+                key = "faultlog"
+            else:
+                key = "confpin"
             cur = (row.get(key) or "").lower() == "true"
             if key == "persist":
                 row[key] = "false" if cur else "true"
@@ -21200,6 +21386,8 @@ class MainWindow(tk.Tk):
         return None
 
     def _on_app_output_double_click(self, event: tk.Event) -> str:
+        if not self._app_editing_allowed(notify=False):
+            return "break"
         tv = self._app_tv_output
         if tv is None:
             return "break"
@@ -21216,7 +21404,7 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
-        # Text columns editable; type as typing mode. (persist/faultlog are click-only)
+        # Text columns editable; type as typing mode. (persist/faultlog/confpin are click-only)
         key: str | None = None
         try:
             cols = list(tv["columns"])
@@ -21239,6 +21427,8 @@ class MainWindow(tk.Tk):
         return "break"
 
     def _on_app_conf_click(self, event: tk.Event) -> str | None:
+        if not self._app_editing_allowed(notify=False):
+            return "break"
         tv = self._app_tv_conf
         if tv is None:
             return None
@@ -21272,6 +21462,8 @@ class MainWindow(tk.Tk):
         return None
 
     def _on_app_conf_double_click(self, event: tk.Event) -> str:
+        if not self._app_editing_allowed(notify=False):
+            return "break"
         tv = self._app_tv_conf
         if tv is None:
             return "break"
@@ -21301,6 +21493,8 @@ class MainWindow(tk.Tk):
         return "break"
 
     def _on_app_control_click(self, event: tk.Event) -> str | None:
+        if not self._app_editing_allowed(notify=False):
+            return "break"
         tv = self._app_tv_control
         if tv is None:
             return None
@@ -21336,6 +21530,8 @@ class MainWindow(tk.Tk):
         return None
 
     def _on_app_control_double_click(self, event: tk.Event) -> str:
+        if not self._app_editing_allowed(notify=False):
+            return "break"
         tv = self._app_tv_control
         if tv is None:
             return "break"
@@ -21437,6 +21633,8 @@ class MainWindow(tk.Tk):
         btn("Down", lambda t=table, _tv=tv: (_tv.focus_set(), self._app_table_move(t, 1)), padx=(6, 0))
 
     def _show_app_table_context_menu(self, event: tk.Event, table: str) -> None:
+        if not self._app_editing_allowed(notify=False):
+            return
         tv = self._app_table_tv(table)
         if tv is None:
             return
@@ -21948,7 +22146,7 @@ class MainWindow(tk.Tk):
         for idx, row in enumerate(rows):
             values: list[str] = []
             for c in cols:
-                if table == "output" and c in {"persist", "faultlog"}:
+                if table == "output" and c in {"persist", "faultlog", "confpin"}:
                     on = (row.get(c) or "").lower() == "true"
                     values.append("☑" if on else "☐")
                 else:
@@ -21970,7 +22168,7 @@ class MainWindow(tk.Tk):
         for i, snap in enumerate(removed):
             values: list[str] = []
             for c in cols:
-                if table == "output" and c in {"persist", "faultlog"}:
+                if table == "output" and c in {"persist", "faultlog", "confpin"}:
                     on = (snap.get(c) or "").lower() == "true"
                     values.append("☑" if on else "☐")
                 else:
@@ -21992,7 +22190,7 @@ class MainWindow(tk.Tk):
         cols = list(tv["columns"])
         values: list[str] = []
         for c in cols:
-            if table == "output" and c in {"persist", "faultlog"}:
+            if table == "output" and c in {"persist", "faultlog", "confpin"}:
                 on = (row.get(c) or "").lower() == "true"
                 values.append("☑" if on else "☐")
             else:
@@ -22030,6 +22228,7 @@ class MainWindow(tk.Tk):
                 "desc": "",
                 "src": "",
                 "doRef": "",
+                "daRef": "",
                 "softlink": "",
                 "confpin": "",
             }
@@ -22045,6 +22244,7 @@ class MainWindow(tk.Tk):
                 "MaxContiguous": "0",
                 "Overlap": "1",
                 "faultlog": "",
+                "confpin": "",
             }
         # setting / conf / control
         return {
@@ -22055,6 +22255,8 @@ class MainWindow(tk.Tk):
         }
 
     def _app_table_add(self, table: str) -> None:
+        if not self._app_editing_allowed(notify=True):
+            return
         if not table:
             return
         rows = self._app_table_rows(table)
@@ -22073,6 +22275,8 @@ class MainWindow(tk.Tk):
                 pass
 
     def _app_table_insert(self, table: str) -> None:
+        if not self._app_editing_allowed(notify=True):
+            return
         if not table:
             return
         rows = self._app_table_rows(table)
@@ -22093,6 +22297,8 @@ class MainWindow(tk.Tk):
                 pass
 
     def _app_table_edit(self, table: str) -> None:
+        if not self._app_editing_allowed(notify=True):
+            return
         if not table:
             return
 
@@ -22201,6 +22407,8 @@ class MainWindow(tk.Tk):
         self._app_table_delete(table)
 
     def _app_table_paste(self, table: str) -> None:
+        if not self._app_editing_allowed(notify=True):
+            return
         if not table:
             return
         clip = self._app_clipboard.get(table)
@@ -22224,6 +22432,8 @@ class MainWindow(tk.Tk):
                 pass
 
     def _app_table_delete(self, table: str) -> None:
+        if not self._app_editing_allowed(notify=True):
+            return
         if not table:
             return
         idx = self._app_table_selected_index(table)
@@ -22266,6 +22476,8 @@ class MainWindow(tk.Tk):
                 pass
 
     def _app_table_move(self, table: str, delta: int) -> None:
+        if not self._app_editing_allowed(notify=True):
+            return
         if not table:
             return
         idx = self._app_table_selected_index(table)
@@ -22305,7 +22517,7 @@ class MainWindow(tk.Tk):
         self._end_app_input_inline_editor(commit=True)
 
         # Map Treeview column -> row key
-        key_by_col = {"#1": "name", "#2": "type", "#3": "src", "#4": "doRef"}
+        key_by_col = {"#1": "name", "#2": "type", "#3": "src", "#4": "doRef", "#5": "daRef"}
         key = key_by_col.get(col)
         if key is None:
             return
@@ -23107,7 +23319,7 @@ class MainWindow(tk.Tk):
                 pass
             return
 
-        key_by_col = {"#1": "name", "#2": "type", "#3": "src", "#4": "doRef"}
+        key_by_col = {"#1": "name", "#2": "type", "#3": "src", "#4": "doRef", "#5": "daRef"}
         key = key_by_col.get(col)
         if key is None:
             try:
@@ -23658,13 +23870,18 @@ class MainWindow(tk.Tk):
             attrib["desc"] = row.get("desc") or ""
             attrib["src"] = row.get("src") or ""
             attrib["doRef"] = row.get("doRef") or ""
+            da_ref = row.get("daRef") or ""
+            if da_ref.strip() != "":
+                attrib["daRef"] = da_ref
             if (row.get("softlink") or "").lower() == "true":
                 attrib["softlink"] = "true"
             if (row.get("confpin") or "").lower() == "true":
                 attrib["confpin"] = "true"
-            attrib["buffer"] = "1"
-            attrib["index"] = "-1"
-            attrib["condition"] = "1"
+            # Preserve existing source metadata; do not rewrite these fields.
+            for k in ("buffer", "index", "condition"):
+                v0 = row.get(k) or ""
+                if v0 != "":
+                    attrib[k] = v0
             el.attrib = attrib
             fb.insert(insert_index, el)
             insert_index += 1
@@ -23693,13 +23910,17 @@ class MainWindow(tk.Tk):
             attrib: dict[str, str] = {}
             for k in attr_order:
                 v = row.get(k) or ""
-                if k in {"name", "type", "src", "doRef", "persist", "faultlog", "outPurpose", "srvRef", "MaxContiguous", "Overlap"}:
+                if k in {"name", "type", "src", "doRef", "persist", "faultlog", "confpin", "outPurpose", "srvRef", "MaxContiguous", "Overlap"}:
                     v = v.strip()
 
                 if tag_local == "output":
                     if k == "persist":
                         v = "true" if (v or "").lower() == "true" else "false"
                     elif k == "faultlog":
+                        if (v or "").lower() != "true":
+                            continue
+                        v = "true"
+                    elif k == "confpin":
                         if (v or "").lower() != "true":
                             continue
                         v = "true"
@@ -23767,6 +23988,7 @@ class MainWindow(tk.Tk):
                     "desc": "",
                     "src": "",
                     "doRef": do_ref,
+                    "daRef": "",
                     "softlink": "",
                     "confpin": "",
                 }
@@ -23801,6 +24023,10 @@ class MainWindow(tk.Tk):
             self._app_root = root
             self._app_funblock = fb
             self._app_file_path = None
+            self._app_template_mode = False
+            self._app_template_target_path = None
+            self._app_template_tree = None
+            self._app_template_element = None
             self._app_input_types_cache = None
             self._app_setting_types_cache = None
             self._app_output_types_cache = None
@@ -23821,6 +24047,8 @@ class MainWindow(tk.Tk):
             self._wire_application_funblock_traces()
         except Exception:
             pass
+
+        self._set_application_readonly(False)
 
         self._mark_application_unsaved()
 
@@ -23866,6 +24094,11 @@ class MainWindow(tk.Tk):
 
         self._open_application_from_path(src)
         self._app_file_path = dst
+        self._app_template_mode = False
+        self._app_template_target_path = None
+        self._app_template_tree = None
+        self._app_template_element = None
+        self._set_application_readonly(False)
         try:
             self._mark_application_unsaved()
         except Exception:
@@ -23968,13 +24201,37 @@ class MainWindow(tk.Tk):
             messagebox.showerror("Open failed", str(e), parent=self)
             return
 
-        funblock = None
-        for el in root.iter():
-            if not isinstance(el.tag, str):
-                continue
-            if self._local_name(el.tag) == "funBlock":
-                funblock = el
-                break
+        include_source: Path | None = None
+        template_mode = False
+        template_target_path: Path | None = None
+        template_tree: ET.ElementTree | None = None
+        template_el: ET.Element | None = None
+        try:
+            funblock, include_source, template_tree, template_el = self._resolve_application_funblock_xinclude(path=path, root=root)
+        except Exception as e:
+            messagebox.showerror("Invalid include", str(e), parent=self)
+            return
+
+        if include_source is not None:
+            template_mode = template_tree is not None and template_el is not None
+            template_target_path = include_source if template_mode else None
+
+        if funblock is None:
+            direct_template = self._find_funblock_template_element(root)
+            if direct_template is not None:
+                funblock = self._build_funblock_from_template_element(direct_template)
+                template_mode = True
+                template_target_path = path
+                template_tree = tree
+                template_el = direct_template
+
+        if funblock is None:
+            for el in root.iter():
+                if not isinstance(el.tag, str):
+                    continue
+                if self._local_name(el.tag) == "funBlock":
+                    funblock = el
+                    break
         if funblock is None:
             messagebox.showerror("Invalid", "No <funBlock> found in file", parent=self)
             return
@@ -23995,6 +24252,10 @@ class MainWindow(tk.Tk):
             self._app_file_path = path
             self._app_root = root
             self._app_funblock = funblock
+            self._app_template_mode = bool(template_mode)
+            self._app_template_target_path = template_target_path
+            self._app_template_tree = template_tree
+            self._app_template_element = template_el
 
             self._app_undo_stack = []
 
@@ -24011,7 +24272,17 @@ class MainWindow(tk.Tk):
                 self.instance_editor.var_app_LnRef.set((funblock.attrib.get("LnRef") or "").strip())
                 self.instance_editor.var_app_desc.set(funblock.attrib.get("desc") or "")
 
-            self._set_app_input_rows(_rows("input", ["name", "type", "desc", "src", "doRef", "softlink", "confpin"]))
+            self._set_app_input_rows(
+                _rows(
+                    "input",
+                    ["name", "type", "desc", "src", "doRef", "daRef", "softlink", "confpin", "buffer", "index", "condition"],
+                )
+            )
+            # Keep source-only input metadata so Save won't rewrite them.
+            for _r in self._app_input_rows:
+                _r.setdefault("buffer", _r.get("buffer") or "")
+                _r.setdefault("index", _r.get("index") or "")
+                _r.setdefault("condition", _r.get("condition") or "")
             self._app_table_set_rows("setting", _rows("setting", ["name", "type", "src", "desc"]))
             self._app_table_set_rows(
                 "output",
@@ -24026,6 +24297,7 @@ class MainWindow(tk.Tk):
                         "srvRef",
                         "persist",
                         "faultlog",
+                        "confpin",
                         "MaxContiguous",
                         "Overlap",
                     ],
@@ -24035,6 +24307,12 @@ class MainWindow(tk.Tk):
             self._app_table_set_rows("control", _rows("control", ["name", "type", "src", "desc"]))
         finally:
             self._app_loading = False
+
+        self._set_application_readonly(
+            False,
+            reason="",
+            include_source=None,
+        )
 
         # Sync search selection if file is under application/.
         try:
@@ -24046,7 +24324,14 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
-        self._set_status(f"Opened application: {os.fspath(path)}")
+        if include_source is not None and template_mode and template_target_path is not None:
+            self._set_status(
+                f"Opened application via xi:include (editable, saves to template): {os.fspath(path)} -> {os.fspath(template_target_path)}"
+            )
+        elif template_mode and template_target_path is not None:
+            self._set_status(f"Opened funBlock-template: {os.fspath(template_target_path)}")
+        else:
+            self._set_status(f"Opened application: {os.fspath(path)}")
 
         try:
             self._wire_application_funblock_traces()
@@ -24061,11 +24346,12 @@ class MainWindow(tk.Tk):
 
     def _update_app_refresh_button_state(self) -> None:
         has_app = self._app_root is not None and self._app_funblock is not None
+        readonly = bool(getattr(self, "_app_open_readonly", False))
 
         btn_refresh = self.btn_app_refresh
         if btn_refresh is not None:
             try:
-                btn_refresh.configure(state=("normal" if has_app else "disabled"))
+                btn_refresh.configure(state=("normal" if (has_app and (not readonly)) else "disabled"))
             except Exception:
                 pass
 
@@ -24077,6 +24363,303 @@ class MainWindow(tk.Tk):
                 btn_create_hmi.configure(state=("normal" if enabled else "disabled"))
             except Exception:
                 pass
+
+    def _set_application_readonly(
+        self,
+        readonly: bool,
+        *,
+        reason: str = "",
+        include_source: Path | None = None,
+    ) -> None:
+        self._app_open_readonly = bool(readonly)
+        self._app_open_readonly_reason = (reason or "").strip()
+        self._app_open_include_source = include_source
+
+        # funBlock header entries
+        try:
+            for w in list(getattr(self, "_app_funblock_entries", []) or []):
+                if w is None:
+                    continue
+                try:
+                    w.configure(state=("disabled" if readonly else "normal"))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # Per-table toolbar actions
+        try:
+            for _table, btns in (getattr(self, "_app_table_buttons", {}) or {}).items():
+                for b in list(btns or []):
+                    if b is None:
+                        continue
+                    try:
+                        b.configure(state=("disabled" if readonly else "normal"))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # Save is never allowed in include-readonly mode.
+        if self.btn_app_save is not None:
+            try:
+                self.btn_app_save.configure(state=("disabled" if readonly else "normal"))
+            except Exception:
+                pass
+
+        btn_refresh = getattr(self, "btn_app_refresh", None)
+        if btn_refresh is not None:
+            try:
+                if readonly:
+                    btn_refresh.configure(state="disabled")
+                else:
+                    self._update_app_refresh_button_state()
+            except Exception:
+                pass
+
+    def _app_editing_allowed(self, *, notify: bool = True) -> bool:
+        if not bool(getattr(self, "_app_open_readonly", False)):
+            return True
+        if notify:
+            src = getattr(self, "_app_open_include_source", None)
+            src_txt = os.fspath(src) if isinstance(src, Path) else ""
+            msg = "This AFB is loaded from xi:include and is read-only."
+            if src_txt:
+                msg = msg + f"\n\nIncluded source:\n{src_txt}"
+            messagebox.showinfo("Read-only", msg, parent=self)
+        return False
+
+    def _find_funblock_template_element(self, root: ET.Element) -> ET.Element | None:
+        if isinstance(root.tag, str) and self._local_name(root.tag) == "funBlock-template":
+            return root
+        for el in root.iter():
+            if isinstance(el.tag, str) and self._local_name(el.tag) == "funBlock-template":
+                return el
+        return None
+
+    def _build_funblock_from_template_element(self, template_el: ET.Element, *, prefer_tag: str = "funBlock") -> ET.Element:
+        tag = prefer_tag
+        if isinstance(template_el.tag, str) and template_el.tag.startswith("{"):
+            ns = template_el.tag.split("}", 1)[0][1:]
+            tag = f"{{{ns}}}{prefer_tag}"
+        fb = ET.Element(tag)
+        try:
+            for k, v in (template_el.attrib or {}).items():
+                fb.attrib[str(k)] = str(v)
+        except Exception:
+            pass
+        for ch in list(template_el):
+            if not isinstance(ch.tag, str):
+                continue
+            try:
+                fb.append(_deepcopy_et_element(ch))
+            except Exception:
+                pass
+        return fb
+
+    def _save_application_to_funblock_template(
+        self,
+        *,
+        target_path: Path,
+        template_tree: ET.ElementTree,
+        template_el: ET.Element,
+    ) -> None:
+        if self._app_funblock is None:
+            raise ValueError("No loaded funBlock to save")
+
+        fb = self._app_funblock
+
+        # Keep the template root strictly as <funBlock-template>.
+        # Do not carry funBlock header attributes to the template root.
+        try:
+            template_el.attrib.clear()
+        except Exception:
+            pass
+
+        for ch in list(template_el):
+            if not isinstance(ch.tag, str):
+                continue
+            try:
+                template_el.remove(ch)
+            except Exception:
+                pass
+
+        for ch in list(fb):
+            if not isinstance(ch.tag, str):
+                continue
+            try:
+                template_el.append(_deepcopy_et_element(ch))
+            except Exception:
+                pass
+
+        # Save rule for funBlock-template:
+        # - exact XML declaration/header line style
+        # - root tag remains <funBlock-template>
+        # - no namespace prefixes like ns0:
+        out_root = _deepcopy_et_element(template_el)
+
+        def _strip_ns_name(name: str) -> str:
+            if not isinstance(name, str):
+                return str(name)
+            if name.startswith("{") and "}" in name:
+                return name.split("}", 1)[1]
+            if ":" in name:
+                return name.split(":", 1)[1]
+            return name
+
+        def _strip_ns_recursive(el: ET.Element) -> None:
+            try:
+                if isinstance(el.tag, str):
+                    el.tag = _strip_ns_name(el.tag)
+            except Exception:
+                pass
+
+            try:
+                if el.attrib:
+                    new_attrib: dict[str, str] = {}
+                    for k, v in list(el.attrib.items()):
+                        kk = _strip_ns_name(str(k))
+                        # Drop xmlns declarations from output to keep template clean.
+                        if kk == "xmlns" or str(k).startswith("xmlns:"):
+                            continue
+                        new_attrib[kk] = str(v)
+                    el.attrib.clear()
+                    el.attrib.update(new_attrib)
+            except Exception:
+                pass
+
+            for ch0 in list(el):
+                if isinstance(ch0.tag, str):
+                    _strip_ns_recursive(ch0)
+
+        _strip_ns_recursive(out_root)
+
+        out_tree = ET.ElementTree(out_root)
+        try:
+            ET.indent(out_tree, space="    ", level=0)
+        except Exception:
+            pass
+
+        xml_body = ET.tostring(out_root, encoding="unicode", short_empty_elements=True)
+        text = '<?xml version="1.0" encoding="utf-8" ?>\n' + xml_body + '\n'
+        target_path.write_text(text, encoding="utf-8")
+
+    def _resolve_application_funblock_xinclude(
+        self,
+        *,
+        path: Path,
+        root: ET.Element,
+    ) -> tuple[ET.Element | None, Path | None, ET.ElementTree | None, ET.Element | None]:
+        """Return (funBlock, source_path, template_tree, template_element) for xi:include delegates."""
+
+        include_el: ET.Element | None = None
+        include_href = ""
+        include_xpointer = ""
+        for el in root.iter():
+            if not isinstance(el.tag, str):
+                continue
+            if self._local_name(el.tag) != "include":
+                continue
+            href = (el.attrib.get("href") or "").strip()
+            if not href:
+                continue
+            include_el = el
+            include_href = href
+            include_xpointer = (el.attrib.get("xpointer") or "").strip()
+            break
+
+        if include_el is None:
+            return (None, None, None, None)
+
+        # Only apply include-to-funBlock behavior for the known template pattern.
+        if "/funBlock-template/*" not in include_xpointer:
+            return (None, None, None, None)
+
+        inc_path = (Path(path).parent / include_href).resolve()
+        if not inc_path.exists():
+            raise FileNotFoundError(f"xi:include target not found: {os.fspath(inc_path)}")
+
+        try:
+            inc_tree = ET.parse(inc_path)
+            inc_root = inc_tree.getroot()
+        except Exception as e:
+            raise ValueError(f"Failed to parse xi:include target: {e}") from e
+
+        # 1) Collect include source from <funBlock-template> when present.
+        template_el: ET.Element | None = None
+        if isinstance(inc_root.tag, str) and self._local_name(inc_root.tag) == "funBlock-template":
+            template_el = inc_root
+        else:
+            for el in inc_root.iter():
+                if isinstance(el.tag, str) and self._local_name(el.tag) == "funBlock-template":
+                    template_el = el
+                    break
+
+        template_children: list[ET.Element] = []
+        if template_el is not None:
+            template_children = [ch for ch in list(template_el) if isinstance(ch.tag, str)]
+
+        # 2) If include appears under a local <funBlock>, merge template children into that host.
+        host_funblock: ET.Element | None = None
+        include_index = -1
+        for parent in root.iter():
+            if not isinstance(parent.tag, str):
+                continue
+            children = list(parent)
+            for i, ch in enumerate(children):
+                if ch is not include_el:
+                    continue
+                if self._local_name(parent.tag) == "funBlock":
+                    host_funblock = parent
+                    include_index = i
+                break
+            if host_funblock is not None:
+                break
+
+        if host_funblock is not None and template_children:
+            merged = _deepcopy_et_element(host_funblock)
+            merged_children = list(merged)
+            insert_at = max(0, min(include_index, len(merged_children)))
+
+            # Remove include placeholder at the insertion point when still present.
+            if 0 <= insert_at < len(merged_children):
+                ch0 = merged_children[insert_at]
+                if isinstance(ch0.tag, str) and self._local_name(ch0.tag) == "include":
+                    try:
+                        merged.remove(ch0)
+                    except Exception:
+                        pass
+
+            for off, src_ch in enumerate(template_children):
+                try:
+                    merged.insert(insert_at + off, _deepcopy_et_element(src_ch))
+                except Exception:
+                    pass
+            return (merged, inc_path, inc_tree, template_el)
+
+        # 3) Fallback: include target already has a complete <funBlock>.
+        for el in inc_root.iter():
+            if isinstance(el.tag, str) and self._local_name(el.tag) == "funBlock":
+                return (el, inc_path, inc_tree, None)
+
+        # 4) Last fallback: wrap template fragment as synthetic <funBlock>.
+        if template_children:
+            tag = "funBlock"
+            for el in root.iter():
+                if isinstance(el.tag, str) and self._local_name(el.tag) == "funBlock":
+                    tag = el.tag
+                    break
+            synthetic = ET.Element(tag)
+            for src_ch in template_children:
+                try:
+                    synthetic.append(_deepcopy_et_element(src_ch))
+                except Exception:
+                    pass
+            return (synthetic, inc_path, inc_tree, template_el)
+
+        raise ValueError(
+            f"No <funBlock> or <funBlock-template> found in xi:include target: {os.fspath(inc_path)}"
+        )
 
     def _clear_app_refresh_diff_state(self) -> None:
         for k in list(self._app_sync_added_names):
@@ -24838,6 +25421,8 @@ class MainWindow(tk.Tk):
                 pass
 
     def _refresh_application_from_latest_ln_instance(self) -> None:
+        if not self._app_editing_allowed(notify=True):
+            return
         # Enabled state should prevent this, but keep it safe.
         if self._app_root is None or self._app_funblock is None:
             messagebox.showerror("Missing", "Open an application file first.", parent=self)
@@ -24926,6 +25511,7 @@ class MainWindow(tk.Tk):
                     "desc": "",
                     "src": "",
                     "doRef": do_ref,
+                    "daRef": "",
                     "softlink": "",
                     "confpin": "",
                 }
@@ -25193,10 +25779,10 @@ class MainWindow(tk.Tk):
         # Manual inputs: include all inputs that define InRef purpose, even when src is empty.
         manual_inputs_for_hmi: list[tuple[str, str]] = []
         settings: list[str] = []
+        do_types_by_name: dict[str, str] = {}
         try:
             seen_input_ln_seq: set[tuple[str, ...]] = set()
             seen_manual_input_do: set[str] = set()
-            do_types_by_name: dict[str, str] = {}
 
             try:
                 inst_path = self._guess_ln_instance_path_from_lnref(ln_ref_raw) if ln_ref_raw else None
@@ -25485,6 +26071,12 @@ class MainWindow(tk.Tk):
                 it_m_set = ET.SubElement(menu_m_set, _q(HMI_CUST_NS, "HMIMenuItem"))
                 it_m_set.attrib["name"] = nm0
                 it_m_set.attrib["doRef"] = f"{ln_ref}.{nm0}"
+                try:
+                    da_ref0 = self._hmi_setting_daref_for_do_name(nm0, do_types_by_name)
+                except Exception:
+                    da_ref0 = ""
+                if da_ref0:
+                    it_m_set.attrib["daRef"] = da_ref0
 
         # IED tab default order: Meas, Output, Setting, Input.
         if has_meas:
@@ -25779,8 +26371,55 @@ class MainWindow(tk.Tk):
         fb.attrib["desc"] = (self.instance_editor.var_app_desc.get() or "")
 
     def _save_application(self) -> None:
+        if not self._app_editing_allowed(notify=True):
+            return
         if self._app_root is None:
             messagebox.showerror("Missing", "Open an application file first.", parent=self)
+            return
+
+        if bool(getattr(self, "_app_template_mode", False)):
+            target_path = getattr(self, "_app_template_target_path", None)
+            template_tree = getattr(self, "_app_template_tree", None)
+            template_el = getattr(self, "_app_template_element", None)
+            if target_path is None or template_tree is None or template_el is None:
+                messagebox.showerror("Missing", "Template target is not available for save.", parent=self)
+                return
+
+            self._apply_funblock_fields_to_xml()
+            self._apply_app_input_rows_to_xml()
+            self._apply_simple_app_rows_to_xml(
+                tag_local="output",
+                rows=self._app_output_rows,
+                attr_order=["name", "type", "desc", "outPurpose", "srvRef", "persist", "doRef", "MaxContiguous", "Overlap", "faultlog", "confpin"],
+            )
+            self._apply_simple_app_rows_to_xml(tag_local="setting", rows=self._app_setting_rows, attr_order=["name", "type", "desc", "src"])
+            self._apply_simple_app_rows_to_xml(tag_local="conf", rows=self._app_conf_rows, attr_order=["name", "type", "desc", "src"])
+            self._apply_simple_app_rows_to_xml(tag_local="control", rows=self._app_control_rows, attr_order=["name", "type", "desc", "src"])
+
+            try:
+                self._save_application_to_funblock_template(
+                    target_path=Path(target_path),
+                    template_tree=template_tree,
+                    template_el=template_el,
+                )
+            except Exception as e:
+                messagebox.showerror("Save failed", str(e), parent=self)
+                return
+
+            self._app_file_path = Path(target_path)
+            try:
+                app_dir = self._application_dir()
+                rel = os.fspath(Path(target_path).relative_to(app_dir))
+            except Exception:
+                rel = os.fspath(Path(target_path).name)
+            self._refresh_application_search_list(select_rel=rel)
+            self._set_status(f"Saved funBlock-template: {os.fspath(target_path)}")
+
+            self._mark_application_saved()
+            try:
+                self._clear_application_refresh_highlights()
+            except Exception:
+                pass
             return
 
         # Default Save uses funBlock name as file name under application/.
@@ -25819,7 +26458,7 @@ class MainWindow(tk.Tk):
         self._apply_simple_app_rows_to_xml(
             tag_local="output",
             rows=self._app_output_rows,
-            attr_order=["name", "type", "desc", "outPurpose", "srvRef", "persist", "doRef", "MaxContiguous", "Overlap", "faultlog"],
+            attr_order=["name", "type", "desc", "outPurpose", "srvRef", "persist", "doRef", "MaxContiguous", "Overlap", "faultlog", "confpin"],
         )
         self._apply_simple_app_rows_to_xml(tag_local="setting", rows=self._app_setting_rows, attr_order=["name", "type", "desc", "src"])
         self._apply_simple_app_rows_to_xml(tag_local="conf", rows=self._app_conf_rows, attr_order=["name", "type", "desc", "src"])
@@ -25845,6 +26484,8 @@ class MainWindow(tk.Tk):
             pass
 
     def _save_application_as(self) -> None:
+        if not self._app_editing_allowed(notify=True):
+            return
         if self._app_root is None:
             messagebox.showerror("Missing", "Open an application file first.", parent=self)
             return
@@ -25864,12 +26505,59 @@ class MainWindow(tk.Tk):
             return
 
         path = Path(target)
+
+        if bool(getattr(self, "_app_template_mode", False)):
+            template_tree = getattr(self, "_app_template_tree", None)
+            template_el = getattr(self, "_app_template_element", None)
+            if template_tree is None or template_el is None:
+                messagebox.showerror("Missing", "Template target is not available for Save As.", parent=self)
+                return
+
+            self._apply_funblock_fields_to_xml()
+            self._apply_app_input_rows_to_xml()
+            self._apply_simple_app_rows_to_xml(
+                tag_local="output",
+                rows=self._app_output_rows,
+                attr_order=["name", "type", "desc", "outPurpose", "srvRef", "persist", "doRef", "MaxContiguous", "Overlap", "faultlog", "confpin"],
+            )
+            self._apply_simple_app_rows_to_xml(tag_local="setting", rows=self._app_setting_rows, attr_order=["name", "type", "desc", "src"])
+            self._apply_simple_app_rows_to_xml(tag_local="conf", rows=self._app_conf_rows, attr_order=["name", "type", "desc", "src"])
+            self._apply_simple_app_rows_to_xml(tag_local="control", rows=self._app_control_rows, attr_order=["name", "type", "desc", "src"])
+
+            try:
+                self._save_application_to_funblock_template(
+                    target_path=path,
+                    template_tree=template_tree,
+                    template_el=template_el,
+                )
+            except Exception as e:
+                messagebox.showerror("Save As failed", str(e), parent=self)
+                return
+
+            self._app_file_path = path
+            self._app_template_target_path = path
+            try:
+                app_dir = self._application_dir()
+                rel = os.fspath(path.relative_to(app_dir))
+            except Exception:
+                rel = os.fspath(path.name)
+            self._refresh_application_search_list(select_rel=rel)
+
+            self._set_status(f"Saved funBlock-template as: {os.fspath(path)}")
+
+            self._mark_application_saved()
+            try:
+                self._clear_application_refresh_highlights()
+            except Exception:
+                pass
+            return
+
         self._apply_funblock_fields_to_xml()
         self._apply_app_input_rows_to_xml()
         self._apply_simple_app_rows_to_xml(
             tag_local="output",
             rows=self._app_output_rows,
-            attr_order=["name", "type", "desc", "outPurpose", "srvRef", "persist", "doRef", "MaxContiguous", "Overlap", "faultlog"],
+            attr_order=["name", "type", "desc", "outPurpose", "srvRef", "persist", "doRef", "MaxContiguous", "Overlap", "faultlog", "confpin"],
         )
         self._apply_simple_app_rows_to_xml(tag_local="setting", rows=self._app_setting_rows, attr_order=["name", "type", "desc", "src"])
         self._apply_simple_app_rows_to_xml(tag_local="conf", rows=self._app_conf_rows, attr_order=["name", "type", "desc", "src"])

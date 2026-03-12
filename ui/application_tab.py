@@ -100,29 +100,39 @@ class ApplicationTab(ttk.Frame):
             fb.columnconfigure(col, weight=1)
 
         ttk.Label(fb, text="name").grid(row=0, column=0, sticky="w")
-        ttk.Entry(fb, textvariable=o.instance_editor.var_app_name, width=18).grid(
+        e_name = ttk.Entry(fb, textvariable=o.instance_editor.var_app_name, width=18)
+        e_name.grid(
             row=0, column=1, sticky="we", padx=(6, 12)
         )
 
         ttk.Label(fb, text="class").grid(row=0, column=2, sticky="w")
-        ttk.Entry(fb, textvariable=o.instance_editor.var_app_class, width=18).grid(
+        e_class = ttk.Entry(fb, textvariable=o.instance_editor.var_app_class, width=18)
+        e_class.grid(
             row=0, column=3, sticky="we", padx=(6, 12)
         )
 
         ttk.Label(fb, text="seqNb").grid(row=0, column=4, sticky="w")
-        ttk.Entry(fb, textvariable=o.instance_editor.var_app_seqNb, width=6).grid(
+        e_seq = ttk.Entry(fb, textvariable=o.instance_editor.var_app_seqNb, width=6)
+        e_seq.grid(
             row=0, column=5, sticky="w", padx=(6, 12)
         )
 
         ttk.Label(fb, text="LnRef").grid(row=0, column=6, sticky="w")
-        ttk.Entry(fb, textvariable=o.instance_editor.var_app_LnRef, width=22).grid(
+        e_lnref = ttk.Entry(fb, textvariable=o.instance_editor.var_app_LnRef, width=22)
+        e_lnref.grid(
             row=0, column=7, sticky="we", padx=(6, 12)
         )
 
         ttk.Label(fb, text="desc").grid(row=0, column=8, sticky="w")
-        ttk.Entry(fb, textvariable=o.instance_editor.var_app_desc, width=30).grid(
+        e_desc = ttk.Entry(fb, textvariable=o.instance_editor.var_app_desc, width=30)
+        e_desc.grid(
             row=0, column=9, sticky="we", padx=(6, 0)
         )
+
+        # Keep references so owner can switch Application editor to read-only mode.
+        o._app_funblock_entries = [e_name, e_class, e_seq, e_lnref, e_desc]
+        if not isinstance(getattr(o, "_app_table_buttons", None), dict):
+            o._app_table_buttons = {}
 
         try:
             o._wire_application_funblock_traces()
@@ -143,7 +153,7 @@ class ApplicationTab(ttk.Frame):
         sub.add(tab_conf, text="conf")
         sub.add(tab_ctl, text="control")
 
-        def _make_tv(parent0: tk.Misc, cols: list[str], heads: list[str]) -> ttk.Treeview:
+        def _make_tv(parent0: tk.Misc, cols: list[str], heads: list[str], table_name: str) -> ttk.Treeview:
             wrap = ttk.Frame(parent0)
             wrap.pack(fill="both", expand=True)
             wrap.columnconfigure(0, weight=1)
@@ -154,7 +164,12 @@ class ApplicationTab(ttk.Frame):
             tb.grid(row=0, column=0, columnspan=2, sticky="we")
 
             def _btn(label: str, cmd, padx=(0, 0)) -> None:
-                ttk.Button(tb, text=label, command=cmd).pack(side="left", padx=padx)
+                b = ttk.Button(tb, text=label, command=cmd)
+                b.pack(side="left", padx=padx)
+                try:
+                    o._app_table_buttons.setdefault(table_name, []).append(b)
+                except Exception:
+                    pass
 
             tv = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="browse")
             for c, h in zip(cols, heads, strict=False):
@@ -173,17 +188,19 @@ class ApplicationTab(ttk.Frame):
 
         o._app_tv_input = _make_tv(
             tab_in,
-            ["name", "type", "src", "doRef", "softlink", "confpin"],
-            ["name", "type", "src", "doRef", "softlink", "confpin"],
+            ["name", "type", "src", "doRef", "daRef", "softlink", "confpin"],
+            ["name", "type", "src", "doRef", "daRef", "softlink", "confpin"],
+            "input",
         )
-        o._app_tv_setting = _make_tv(tab_set, ["name", "type", "src", "desc"], ["name", "type", "src", "desc"])
+        o._app_tv_setting = _make_tv(tab_set, ["name", "type", "src", "desc"], ["name", "type", "src", "desc"], "setting")
         o._app_tv_output = _make_tv(
             tab_out,
-            ["name", "type", "doRef", "MaxContiguous", "Overlap", "persist", "faultlog", "desc"],
-            ["name", "type", "doRef", "MaxContiguous", "Overlap", "persist", "faultlog", "desc"],
+            ["name", "type", "doRef", "MaxContiguous", "Overlap", "persist", "faultlog", "confpin", "desc"],
+            ["name", "type", "doRef", "MaxContiguous", "Overlap", "persist", "faultlog", "confpin", "desc"],
+            "output",
         )
-        o._app_tv_conf = _make_tv(tab_conf, ["name", "type", "src", "desc"], ["name", "type", "src", "desc"])
-        o._app_tv_control = _make_tv(tab_ctl, ["name", "type", "src", "desc"], ["name", "type", "src", "desc"])
+        o._app_tv_conf = _make_tv(tab_conf, ["name", "type", "src", "desc"], ["name", "type", "src", "desc"], "conf")
+        o._app_tv_control = _make_tv(tab_ctl, ["name", "type", "src", "desc"], ["name", "type", "src", "desc"], "control")
 
         # Diff highlight tags (used by Application Refresh)
         for _tv in (o._app_tv_input, o._app_tv_setting, o._app_tv_output, o._app_tv_conf, o._app_tv_control):

@@ -58,6 +58,16 @@ def _safe_parse(path: Path) -> ET.ElementTree | None:
         return None
 
 
+def _iter_lnode_type_elements(root: ET.Element) -> list[ET.Element]:
+    out: list[ET.Element] = []
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        if el.tag == _q("LNodeType") or el.tag.endswith("}LNodeType") or el.tag == "LNodeType":
+            out.append(el)
+    return out
+
+
 def _collect_scl_ids_from_files(folder: Path, tag: str) -> set[str]:
     out: set[str] = set()
     if not folder.exists():
@@ -115,19 +125,17 @@ def scan_type_catalog(iec61850_dir: str | Path) -> TypeCatalog:
 
     lnode_types: list[LNodeTypeInfo] = []
     if lnode_type_dir.exists():
-        for path in lnode_type_dir.glob("*.xml"):
+        for path in lnode_type_dir.rglob("*.xml"):
             tree = _safe_parse(path)
             if tree is None:
                 continue
             root = tree.getroot()
-            ln = root.find(f".//{_q('LNodeType')}")
-            if ln is None:
-                continue
-            id_ = (ln.attrib.get("id") or "").strip()
-            ln_class = (ln.attrib.get("lnClass") or "").strip()
-            desc = (ln.attrib.get("desc") or "").strip()
-            if id_:
-                lnode_types.append(LNodeTypeInfo(id=id_, ln_class=ln_class, desc=desc, file_path=path))
+            for ln in _iter_lnode_type_elements(root):
+                id_ = (ln.attrib.get("id") or "").strip()
+                ln_class = (ln.attrib.get("lnClass") or "").strip()
+                desc = (ln.attrib.get("desc") or "").strip()
+                if id_:
+                    lnode_types.append(LNodeTypeInfo(id=id_, ln_class=ln_class, desc=desc, file_path=path))
 
     lnode_types.sort(key=lambda x: (x.ln_class, x.id))
 
@@ -142,7 +150,16 @@ def scan_type_catalog(iec61850_dir: str | Path) -> TypeCatalog:
 def load_lnode_type(info: LNodeTypeInfo) -> LNodeTypeModel:
     tree = ET.parse(info.file_path)
     root = tree.getroot()
-    ln = root.find(f".//{_q('LNodeType')}")
+    ln: ET.Element | None = None
+    target_id = (getattr(info, "id", "") or "").strip()
+    if target_id:
+        for el in _iter_lnode_type_elements(root):
+            if (el.attrib.get("id") or "").strip() == target_id:
+                ln = el
+                break
+    if ln is None:
+        all_lnodes = _iter_lnode_type_elements(root)
+        ln = all_lnodes[0] if all_lnodes else None
     if ln is None:
         raise ValueError(f"No LNodeType found in {info.file_path}")
 
@@ -195,7 +212,13 @@ def load_lnode_type(info: LNodeTypeInfo) -> LNodeTypeModel:
     privates = _private_items_from_parent(ln)
 
     lnode_attrib = {k: str(v) for k, v in ln.attrib.items()}
-    return LNodeTypeModel(info=info, lnode_attrib=lnode_attrib, dos=dos, privates=privates)
+    resolved_info = LNodeTypeInfo(
+        id=(lnode_attrib.get("id") or info.id or "").strip(),
+        ln_class=(lnode_attrib.get("lnClass") or info.ln_class or "").strip(),
+        desc=(lnode_attrib.get("desc") or info.desc or "").strip(),
+        file_path=info.file_path,
+    )
+    return LNodeTypeModel(info=resolved_info, lnode_attrib=lnode_attrib, dos=dos, privates=privates)
 
 
 def save_lnode_type(

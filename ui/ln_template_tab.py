@@ -1763,10 +1763,11 @@ class NewTemplateDialog(tk.Toplevel):
                 finally:
                     self._id_internal_update = False
 
-            if not self.var_lnclass.get().strip() and info.ln_class:
-                self.var_lnclass.set(info.ln_class)
-            if not self.var_desc.get().strip() and info.desc:
-                self.var_desc.set(info.desc)
+            # New-template UX rule:
+            # - lnClass follows the selected base template
+            # - desc starts blank (do not inherit source desc)
+            self.var_lnclass.set((info.ln_class or "").strip())
+            self.var_desc.set("")
 
         def apply_filter(*_args) -> None:
             raw = (self.var_filter.get() or "").strip().lower()
@@ -2809,6 +2810,20 @@ class LNodeTypeEditor(ttk.Frame):
         self.lbl_saved = ttk.Label(row2, text="")
         self.lbl_saved.pack(side="left", padx=(12, 0))
 
+        row3 = ttk.Frame(self, padding=(10, 6, 10, 0))
+        row3.pack(fill="x")
+        ttk.Label(row3, text="LN class").pack(side="left")
+        self.var_lnclass_edit = tk.StringVar(value="")
+        self.ent_lnclass_edit = ttk.Entry(row3, textvariable=self.var_lnclass_edit, width=24)
+        self.ent_lnclass_edit.pack(side="left", padx=(8, 14))
+
+        ttk.Label(row3, text="desc").pack(side="left")
+        self.var_desc_edit = tk.StringVar(value="")
+        self.ent_desc_edit = ttk.Entry(row3, textvariable=self.var_desc_edit)
+        self.ent_desc_edit.pack(side="left", padx=(8, 0), fill="x", expand=True)
+
+        self._suspend_header_trace = False
+
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -2915,9 +2930,114 @@ class LNodeTypeEditor(ttk.Frame):
         apply_ln_filter()
         self._apply_ln_filter = apply_ln_filter
 
+        self.var_lnclass_edit.trace_add("write", lambda *_args: self._on_header_fields_changed())
+        self.var_desc_edit.trace_add("write", lambda *_args: self._on_header_fields_changed())
+        self._set_header_fields_enabled(False)
+
         # UX shortcuts
         self.cb.bind("<Return>", lambda _e: self.load_selected())
         self.bind_all("<Control-f>", lambda _e: ent_filter.focus_set())
+
+    def _set_header_fields_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        try:
+            self.ent_lnclass_edit.configure(state=state)
+        except Exception:
+            pass
+        try:
+            self.ent_desc_edit.configure(state=state)
+        except Exception:
+            pass
+
+    def _sync_header_fields_from_model(self) -> None:
+        if self.model is None:
+            self._suspend_header_trace = True
+            try:
+                self.var_lnclass_edit.set("")
+                self.var_desc_edit.set("")
+            finally:
+                self._suspend_header_trace = False
+            self._set_header_fields_enabled(False)
+            return
+
+        self._suspend_header_trace = True
+        try:
+            self.var_lnclass_edit.set((self.model.info.ln_class or "").strip())
+            self.var_desc_edit.set((self.model.info.desc or "").strip())
+        finally:
+            self._suspend_header_trace = False
+        self._set_header_fields_enabled(True)
+
+    def _refresh_meta_label(self) -> None:
+        if self.model is None:
+            self.lbl_meta.configure(text="")
+            return
+        info = self.model.info
+        meta = f"lnClass={info.ln_class}  file={os.fspath(info.file_path)}"
+        if info.desc:
+            meta = meta + f"  desc={info.desc}"
+        self.lbl_meta.configure(text=meta)
+
+    def _apply_header_edits_from_ui(self) -> None:
+        if self.model is None:
+            return
+
+        ln_class = (self.var_lnclass_edit.get() or "").strip()
+        desc = (self.var_desc_edit.get() or "").strip()
+
+        self.model.lnode_attrib["lnClass"] = ln_class
+        if desc:
+            self.model.lnode_attrib["desc"] = desc
+        else:
+            self.model.lnode_attrib.pop("desc", None)
+
+        self.model.info = LNodeTypeInfo(
+            id=self.model.info.id,
+            ln_class=ln_class,
+            desc=desc,
+            file_path=self.model.info.file_path,
+        )
+        self._refresh_meta_label()
+
+    def _sync_catalog_entry_for_current_model(self) -> None:
+        if self.model is None:
+            return
+
+        cur = self.model.info
+
+        def _same_path(a: Path, b: Path) -> bool:
+            try:
+                return a.resolve() == b.resolve()
+            except Exception:
+                return os.fspath(a) == os.fspath(b)
+
+        replaced = False
+        for i, x in enumerate(self.catalog.lnode_types):
+            if (x.id or "").strip() != (cur.id or "").strip():
+                continue
+            if _same_path(Path(x.file_path), Path(cur.file_path)):
+                self.catalog.lnode_types[i] = cur
+                replaced = True
+                break
+
+        if not replaced:
+            self.catalog.lnode_types.append(cur)
+
+        self.catalog.lnode_types.sort(key=lambda x: (x.ln_class, x.id))
+        self._all_lnode_infos = list(self.catalog.lnode_types)
+        self._all_lnode_ids = [x.id for x in self._all_lnode_infos]
+        try:
+            self._apply_ln_filter()
+        except Exception:
+            self.cb["values"] = self._all_lnode_ids
+
+    def _on_header_fields_changed(self) -> None:
+        if self._suspend_header_trace:
+            return
+        if self.model is None:
+            return
+        self._apply_header_edits_from_ui()
+        self._update_dirty_from_view()
 
     def _update_create_instance_button(self) -> None:
         try:
@@ -3055,18 +3175,23 @@ class LNodeTypeEditor(ttk.Frame):
         self._saved_sig_full = self._signature_full(
             dos=self.table.get_rows(),
             privates=self.private_table.get_rows(),
+            ln_class=self.model.info.ln_class,
+            desc=self.model.info.desc,
         )
         self.dirty = False
         self._update_save_button()
         self._update_create_instance_button()
-        meta = f"lnClass={info.ln_class}  file={os.fspath(info.file_path)}"
-        if info.desc:
-            meta = meta + f"  desc={info.desc}"
-        self.lbl_meta.configure(text=meta)
+        self._sync_header_fields_from_model()
+        self._refresh_meta_label()
 
     def save_current(self) -> None:
         if self.model is None:
             # Silent no-op for Ctrl+S and Save
+            return
+
+        self._apply_header_edits_from_ui()
+        if not (self.model.info.ln_class or "").strip():
+            messagebox.showerror("Missing", "lnClass is required", parent=self)
             return
 
         self.model.dos = self.table.get_rows()
@@ -3080,7 +3205,10 @@ class LNodeTypeEditor(ttk.Frame):
         self._saved_sig_full = self._signature_full(
             dos=self.model.dos,
             privates=self.model.privates,
+            ln_class=self.model.info.ln_class,
+            desc=self.model.info.desc,
         )
+        self._sync_catalog_entry_for_current_model()
         self.dirty = False
         self._update_save_button()
         self._refresh_all_rules_view()
@@ -3146,6 +3274,10 @@ class LNodeTypeEditor(ttk.Frame):
 
         self.model.dos = self.table.get_rows()
         self.model.privates = self.private_table.get_rows()
+        self._apply_header_edits_from_ui()
+        if not (self.model.info.ln_class or "").strip():
+            messagebox.showerror("Missing", "lnClass is required", parent=self)
+            return
 
         new_info_id = new_id if (update_id and new_id) else self.model.info.id
         new_ln_class = self.model.info.ln_class
@@ -3167,26 +3299,17 @@ class LNodeTypeEditor(ttk.Frame):
             messagebox.showerror("Save As failed", str(e), parent=self)
             return
 
-        # If we created a new name, add it to the catalog list so it becomes selectable.
-        if new_info_id and all(i.id != new_info_id for i in self.catalog.lnode_types):
-            self.catalog.lnode_types.append(self.model.info)
-            self.catalog.lnode_types.sort(key=lambda x: (x.ln_class, x.id))
-            self._all_lnode_infos = list(self.catalog.lnode_types)
-            self._all_lnode_ids = [x.id for x in self._all_lnode_infos]
-            try:
-                self._apply_ln_filter()
-            except Exception:
-                self.cb["values"] = self._all_lnode_ids
+        self._sync_catalog_entry_for_current_model()
 
         self.var_selected.set(self.model.info.id)
-        meta = f"lnClass={self.model.info.ln_class}  file={os.fspath(self.model.info.file_path)}"
-        if self.model.info.desc:
-            meta = meta + f"  desc={self.model.info.desc}"
-        self.lbl_meta.configure(text=meta)
+        self._sync_header_fields_from_model()
+        self._refresh_meta_label()
 
         self._saved_sig_full = self._signature_full(
             dos=self.model.dos,
             privates=self.model.privates,
+            ln_class=self.model.info.ln_class,
+            desc=self.model.info.desc,
         )
         self.dirty = False
         self._update_save_button()
@@ -3290,13 +3413,11 @@ class LNodeTypeEditor(ttk.Frame):
         self.dirty = True
         self._update_save_button()
         self._update_create_instance_button()
-        meta = f"lnClass={info.ln_class}  file={os.fspath(info.file_path)}"
-        if info.desc:
-            meta = meta + f"  desc={info.desc}"
-        self.lbl_meta.configure(text=meta)
+        self._sync_header_fields_from_model()
+        self._refresh_meta_label()
         self._set_status("New LN template created (unsaved)")
 
-    def _signature_full(self, *, dos: list[DOItem], privates: list[PrivateItem]) -> tuple:
+    def _signature_full(self, *, dos: list[DOItem], privates: list[PrivateItem], ln_class: str, desc: str) -> tuple:
         sig_dos = tuple(
             (
                 x.name,
@@ -3318,7 +3439,8 @@ class LNodeTypeEditor(ttk.Frame):
             )
             for x in privates
         )
-        return (sig_dos, sig_priv)
+        sig_header = ((ln_class or "").strip(), (desc or "").strip())
+        return (sig_header, sig_dos, sig_priv)
 
     def _refresh_all_rules_view(self) -> None:
         try:
@@ -4563,6 +4685,8 @@ class LNodeTypeEditor(ttk.Frame):
         cur = self._signature_full(
             dos=self.table.get_rows(),
             privates=self.private_table.get_rows(),
+            ln_class=(self.var_lnclass_edit.get() or ""),
+            desc=(self.var_desc_edit.get() or ""),
         )
         self.dirty = (self._saved_sig_full is None) or (cur != self._saved_sig_full)
         self._update_save_button()

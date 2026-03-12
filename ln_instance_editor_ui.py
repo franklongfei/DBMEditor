@@ -746,7 +746,7 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._undoing: bool = False
         self._undo_suspended: bool = False
 
-        self._edit_entry: ttk.Entry | None = None
+        self._edit_entry: tk.Widget | None = None
         self._edit_iid: str | None = None
         self._edit_col: str | None = None
         self._meta_edit_cb: ttk.Combobox | None = None
@@ -784,6 +784,10 @@ class LNInstanceEditorFrame(ttk.Frame):
         self._all_instance_relpaths: list[str] = []
 
         self._type_catalog = None
+        self._ln_type_do_map_cache: dict[str, dict[str, str]] = {}
+        self._do_type_sdo_map_cache: dict[str, dict[str, str]] = {}
+        self._do_type_da_map_cache: dict[str, dict[str, dict[str, str]]] = {}
+        self._enum_values_cache: dict[str, list[str]] = {}
 
         # Template default maps (for display + right-click Apply)
         self._tpl_default_values: dict[str, str] = {}
@@ -1399,6 +1403,271 @@ class LNInstanceEditorFrame(ttk.Frame):
         if not iec61850_dir.exists():
             raise FileNotFoundError(f"IEC61850 folder not found: {iec61850_dir}")
         self._type_catalog = scan_type_catalog(iec61850_dir)
+
+    def _iec61850_dir(self) -> Path:
+        return self.workspace_root / "ep7_datamodel" / "datamodel" / "iec61850"
+
+    def _find_lnodetype_file(self, ln_type_id: str) -> Path | None:
+        ln_type_id = (ln_type_id or "").strip()
+        if not ln_type_id:
+            return None
+        try:
+            self._ensure_type_catalog()
+            for info in list(getattr(self._type_catalog, "lnode_types", []) or []):
+                if (info.id or "").strip() == ln_type_id and Path(info.file_path).is_file():
+                    return Path(info.file_path)
+        except Exception:
+            pass
+
+        ln_dir = self._iec61850_dir() / "LNodeType"
+        p0 = ln_dir / f"{ln_type_id}.xml"
+        if p0.is_file():
+            return p0
+        try:
+            for p in ln_dir.rglob(f"{ln_type_id}.xml"):
+                if p.is_file():
+                    return p
+        except Exception:
+            pass
+        return None
+
+    def _find_do_type_file(self, do_type_id: str) -> Path | None:
+        do_type_id = (do_type_id or "").strip()
+        if not do_type_id:
+            return None
+        do_dir = self._iec61850_dir() / "DOType"
+        p0 = do_dir / f"{do_type_id}.xml"
+        if p0.is_file():
+            return p0
+        try:
+            for p in do_dir.rglob(f"{do_type_id}.xml"):
+                if p.is_file():
+                    return p
+        except Exception:
+            pass
+        return None
+
+    def _find_enum_type_file(self, enum_type_id: str) -> Path | None:
+        enum_type_id = (enum_type_id or "").strip()
+        if not enum_type_id:
+            return None
+        enum_dir = self._iec61850_dir() / "EnumType"
+        p0 = enum_dir / f"{enum_type_id}.xml"
+        if p0.is_file():
+            return p0
+        try:
+            for p in enum_dir.rglob(f"{enum_type_id}.xml"):
+                if p.is_file():
+                    return p
+        except Exception:
+            pass
+        return None
+
+    def _ln_type_do_type_map(self, ln_type_id: str) -> dict[str, str]:
+        ln_type_id = (ln_type_id or "").strip()
+        if not ln_type_id:
+            return {}
+        if ln_type_id in self._ln_type_do_map_cache:
+            return dict(self._ln_type_do_map_cache.get(ln_type_id) or {})
+
+        p = self._find_lnodetype_file(ln_type_id)
+        if p is None:
+            self._ln_type_do_map_cache[ln_type_id] = {}
+            return {}
+
+        out: dict[str, str] = {}
+        try:
+            root = ET.parse(p).getroot()
+            ln_el: ET.Element | None = None
+            for el in root.iter():
+                if not (isinstance(el.tag, str) and _local_name(el.tag) == "LNodeType"):
+                    continue
+                if (el.attrib.get("id") or "").strip() == ln_type_id:
+                    ln_el = el
+                    break
+            if ln_el is None:
+                for el in root.iter():
+                    if isinstance(el.tag, str) and _local_name(el.tag) == "LNodeType":
+                        ln_el = el
+                        break
+            if ln_el is not None:
+                for ch in list(ln_el):
+                    if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "DO"):
+                        continue
+                    nm = (ch.attrib.get("name") or "").strip()
+                    tp = (ch.attrib.get("type") or "").strip()
+                    if nm and tp:
+                        out[nm] = tp
+        except Exception:
+            out = {}
+
+        self._ln_type_do_map_cache[ln_type_id] = out
+        return dict(out)
+
+    def _do_type_sdo_type_map(self, do_type_id: str) -> dict[str, str]:
+        do_type_id = (do_type_id or "").strip()
+        if not do_type_id:
+            return {}
+        if do_type_id in self._do_type_sdo_map_cache:
+            return dict(self._do_type_sdo_map_cache.get(do_type_id) or {})
+
+        p = self._find_do_type_file(do_type_id)
+        if p is None:
+            self._do_type_sdo_map_cache[do_type_id] = {}
+            return {}
+
+        out: dict[str, str] = {}
+        try:
+            root = ET.parse(p).getroot()
+            do_el: ET.Element | None = None
+            for el in root.iter():
+                if not (isinstance(el.tag, str) and _local_name(el.tag) == "DOType"):
+                    continue
+                if (el.attrib.get("id") or "").strip() == do_type_id:
+                    do_el = el
+                    break
+            if do_el is not None:
+                for ch in list(do_el):
+                    if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "SDO"):
+                        continue
+                    nm = (ch.attrib.get("name") or "").strip()
+                    tp = (ch.attrib.get("type") or "").strip()
+                    if nm and tp:
+                        out[nm] = tp
+        except Exception:
+            out = {}
+
+        self._do_type_sdo_map_cache[do_type_id] = out
+        return dict(out)
+
+    def _do_type_da_map(self, do_type_id: str) -> dict[str, dict[str, str]]:
+        do_type_id = (do_type_id or "").strip()
+        if not do_type_id:
+            return {}
+        if do_type_id in self._do_type_da_map_cache:
+            return dict(self._do_type_da_map_cache.get(do_type_id) or {})
+
+        p = self._find_do_type_file(do_type_id)
+        if p is None:
+            self._do_type_da_map_cache[do_type_id] = {}
+            return {}
+
+        out: dict[str, dict[str, str]] = {}
+        try:
+            root = ET.parse(p).getroot()
+            do_el: ET.Element | None = None
+            for el in root.iter():
+                if not (isinstance(el.tag, str) and _local_name(el.tag) == "DOType"):
+                    continue
+                if (el.attrib.get("id") or "").strip() == do_type_id:
+                    do_el = el
+                    break
+            if do_el is not None:
+                for ch in list(do_el):
+                    if not (isinstance(ch.tag, str) and _local_name(ch.tag) == "DA"):
+                        continue
+                    nm = (ch.attrib.get("name") or "").strip()
+                    if not nm:
+                        continue
+                    out[nm] = {k: str(v) for k, v in (ch.attrib or {}).items()}
+        except Exception:
+            out = {}
+
+        self._do_type_da_map_cache[do_type_id] = out
+        return dict(out)
+
+    def _enum_values(self, enum_type_id: str) -> list[str]:
+        enum_type_id = (enum_type_id or "").strip()
+        if not enum_type_id:
+            return []
+        if enum_type_id in self._enum_values_cache:
+            return list(self._enum_values_cache.get(enum_type_id) or [])
+
+        p = self._find_enum_type_file(enum_type_id)
+        if p is None:
+            self._enum_values_cache[enum_type_id] = []
+            return []
+
+        out_pairs: list[tuple[int | None, str]] = []
+        try:
+            root = ET.parse(p).getroot()
+            enum_el: ET.Element | None = None
+            for el in root.iter():
+                if not (isinstance(el.tag, str) and _local_name(el.tag) == "EnumType"):
+                    continue
+                if (el.attrib.get("id") or "").strip() == enum_type_id:
+                    enum_el = el
+                    break
+            if enum_el is not None:
+                for ev in list(enum_el):
+                    if not (isinstance(ev.tag, str) and _local_name(ev.tag) == "EnumVal"):
+                        continue
+                    txt = (ev.text or "").strip()
+                    if not txt:
+                        continue
+                    ord_s = (ev.attrib.get("ord") or "").strip()
+                    ord_i: int | None = None
+                    try:
+                        ord_i = int(ord_s) if ord_s else None
+                    except Exception:
+                        ord_i = None
+                    out_pairs.append((ord_i, txt))
+        except Exception:
+            out_pairs = []
+
+        if out_pairs and all(o is not None for o, _ in out_pairs):
+            out_pairs.sort(key=lambda x: int(x[0] or 0))
+        vals = [t for _o, t in out_pairs]
+        self._enum_values_cache[enum_type_id] = vals
+        return list(vals)
+
+    def _enum_values_for_value_path(self, value_path: str) -> list[str]:
+        base = (value_path or "").split("/Val:", 1)[0]
+        if not base:
+            return []
+
+        ln_type_id = (self.var_lnType.get() or "").strip()
+        if not ln_type_id:
+            return []
+
+        parts = [s for s in base.split("/") if s]
+        doi_name = ""
+        sdi_names: list[str] = []
+        dai_name = ""
+        for seg in parts:
+            if seg.startswith("DOI:"):
+                doi_name = (seg.split(":", 1)[1] or "").strip()
+            elif seg.startswith("SDI:"):
+                sdi_names.append((seg.split(":", 1)[1] or "").strip())
+            elif seg.startswith("DAI:"):
+                dai_name = (seg.split(":", 1)[1] or "").strip()
+
+        if not (doi_name and dai_name):
+            return []
+
+        do_map = self._ln_type_do_type_map(ln_type_id)
+        cur_do_type = (do_map.get(doi_name) or "").strip()
+        if not cur_do_type:
+            return []
+
+        for sdi in sdi_names:
+            if not sdi:
+                continue
+            sdo_map = self._do_type_sdo_type_map(cur_do_type)
+            nxt = (sdo_map.get(sdi) or "").strip()
+            if not nxt:
+                return []
+            cur_do_type = nxt
+
+        da_map = self._do_type_da_map(cur_do_type)
+        attrs = da_map.get(dai_name) or {}
+        btype = (attrs.get("bType") or "").strip().lower()
+        if btype != "enum":
+            return []
+        enum_type_id = (attrs.get("type") or "").strip()
+        if not enum_type_id:
+            return []
+        return self._enum_values(enum_type_id)
 
     def _template_preview_text(self, template_id: str) -> str:
         template_id = (template_id or "").strip()
@@ -3994,6 +4263,38 @@ class LNInstanceEditorFrame(ttk.Frame):
             value_text = ref.get_value_text().replace("\n", " ")
         else:
             value_text = (self._langref_id_for_value_path(ref.path) or "").strip()
+
+        if col == "val":
+            enum_values = list(self._enum_values_for_value_path(ref.path) or [])
+            if enum_values:
+                vals = list(enum_values)
+                cur0 = (value_text or "").strip()
+                if cur0 and cur0 not in vals:
+                    vals = [cur0] + vals
+
+                cb = ttk.Combobox(self.tree, state="readonly", values=tuple(vals))
+                cb.place(x=x, y=y, width=w, height=h)
+                cb.set(cur0)
+                cb.focus_set()
+
+                cb.bind("<<ComboboxSelected>>", lambda _e: self._end_cell_edit(commit=True))
+                cb.bind("<Return>", lambda _e: self._end_cell_edit(commit=True))
+                cb.bind("<Escape>", lambda _e: self._end_cell_edit(commit=False))
+                cb.bind("<FocusOut>", self._on_value_combobox_focus_out)
+                cb.bind("<Control-z>", lambda _e: (self.undo(), "break")[1])
+                cb.bind("<Control-Z>", lambda _e: (self.undo(), "break")[1])
+                cb.bind("<Button-1>", lambda _e: (self._combobox_toggle_posted(cb), "break")[1])
+
+                try:
+                    self.tree.after_idle(lambda: self._combobox_post(cb))
+                except Exception:
+                    self._combobox_post(cb)
+
+                self._edit_entry = cb
+                self._edit_iid = iid
+                self._edit_col = col
+                return
+
         ent = ttk.Entry(self.tree)
         ent.place(x=x, y=y, width=w, height=h)
         ent.insert(0, value_text)
@@ -4056,6 +4357,17 @@ class LNInstanceEditorFrame(ttk.Frame):
             return
 
         self._end_meta_edit(commit=True)
+
+    def _on_value_combobox_focus_out(self, event: tk.Event) -> None:
+        try:
+            widget = event.widget
+        except Exception:
+            widget = None
+
+        if isinstance(widget, ttk.Combobox) and self._combobox_is_posted(widget):
+            return
+
+        self._end_cell_edit(commit=True)
 
     def _begin_meta_edit(self, iid: str, col: str) -> None:
         ref = self._iid_to_ref.get(iid)
